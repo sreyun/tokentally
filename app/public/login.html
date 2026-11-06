@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<meta name="color-scheme" content="light dark">
+<title>登录 · 百炼费用分析</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<main class="login-page">
+  <div class="login-shell">
+    <section class="login-side" aria-hidden="true">
+      <div class="brand-mark"><svg viewBox="0 0 24 24" fill="none" stroke-width="2.2" stroke-linecap="round"><path d="M4 19V11M10 19V5M16 19v-6M22 19H2"/></svg></div>
+      <h2>百炼 API Key<br>成本管理与用量分析</h2>
+      <p>与阿里云费用中心口径一致，按 API Key、模型、业务空间多维分析费用与 Token 用量。</p>
+      <ul>
+        <li><svg class="ico" viewBox="0 0 24 24"><circle cx="8" cy="15" r="4"/><path d="M10.8 12.2L20 3M16 7l3 3M14 9l2 2"/></svg><span>每个 API Key 的费用、模型构成、单位成本与趋势</span></li>
+        <li><svg class="ico" viewBox="0 0 24 24"><path d="M20 7H5a2 2 0 0 1 0-4h13v4"/><path d="M3 5v14a2 2 0 0 0 2 2h15V7"/></svg><span>预算与月末预测，超支提前预警</span></li>
+        <li><svg class="ico" viewBox="0 0 24 24"><path d="M12 2l10 5-10 5L2 7z"/><path d="M2 17l10 5 10-5M2 12l10 5 10-5"/></svg><span>多维透视成本分摊，一键导出</span></li>
+        <li><svg class="ico" viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg><span>Key 治理：闲置、权限过宽、无描述、异常消耗</span></li>
+      </ul>
+      <div class="foot">数据每 5 分钟与阿里云同步 · AccessKey 加密存储</div>
+    </section>
+    <section class="login-card">
+      <h1>登录</h1>
+      <p>请使用管理员分配的账号登录</p>
+      <form id="loginForm" autocomplete="on" novalidate>
+        <label class="field"><span>用户名</span><input class="inp" id="username" name="username" autocomplete="username" required maxlength="64" autofocus></label>
+        <label class="field"><span>密码</span>
+          <span class="pw-wrap"><input class="inp" id="password" name="password" type="password" autocomplete="current-password" required maxlength="256">
+          <button type="button" class="btn ghost icon sm" id="togglePw" aria-label="显示密码" title="显示/隐藏密码"><svg class="ico" viewBox="0 0 24 24"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg></button></span></label>
+        <div class="err" id="err" role="alert" aria-live="assertive"></div>
+        <button class="btn primary" type="submit" id="btnLogin">登录</button>
+      </form>
+      <div class="sec-note"><svg class="ico" viewBox="0 0 24 24"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>连续多次输入错误将临时锁定账号；会话空闲超时自动退出</div>
+    </section>
+  </div>
+</main>
+<script src="/login.js"></script>
+</body>
+</html>

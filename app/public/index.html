@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<meta name="color-scheme" content="light dark">
+<title>百炼费用分析</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<div class="app" id="app">
+  <aside class="sidebar" aria-label="主导航">
+    <div class="brand">
+      <div class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke-width="2.2" stroke-linecap="round"><path d="M4 19V11M10 19V5M16 19v-6M22 19H2"/></svg></div>
+      <div class="brand-text"><b>百炼费用分析</b><span>MODEL STUDIO · COST INSIGHT</span></div>
+    </div>
+    <nav id="nav"></nav>
+    <div class="side-foot" id="sideFoot"></div>
+  </aside>
+
+  <div class="main-col">
+    <header class="topbar" id="topbar">
+      <button class="btn ghost icon" id="btnCollapse" title="收起/展开侧栏" aria-label="收起或展开侧栏"><svg class="ico" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button>
+      <div class="page-title"><h1 id="pageTitle">综合总览</h1><span id="pageSub"></span></div>
+
+      <div class="tb-group" id="periodBox" role="group" aria-label="统计周期">
+        <div class="seg" id="modeSeg">
+          <button type="button" data-mode="month" title="按阿里云账期（自然月），金额与费用中心“按账期”账单一致">账期</button>
+          <button type="button" data-mode="range" title="按自然日（北京时间），金额与费用中心“按天”账单一致">日期</button>
+        </div>
+        <span class="tb-group" id="monthBox">
+          <button class="btn ghost icon" id="btnPrev" title="上一账期" aria-label="上一账期"><svg class="ico" viewBox="0 0 24 24"><path d="M15 6l-6 6 6 6"/></svg></button>
+          <select class="inp" id="cycleSel" aria-label="账期"></select>
+          <button class="btn ghost icon" id="btnNext" title="下一账期" aria-label="下一账期"><svg class="ico" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg></button>
+          <span id="finalBadge"></span>
+        </span>
+        <span class="tb-group" id="rangeBox" hidden>
+          <select class="inp" id="preset" aria-label="快捷时间范围">
+            <option value="today">今天</option><option value="yesterday">昨天</option><option value="7">近 7 天</option>
+            <option value="30">近 30 天</option><option value="90">近 90 天</option><option value="mtd">本月至今</option>
+            <option value="lastmonth">上月</option><option value="custom">自定义</option>
+          </select>
+          <input class="inp" type="date" id="from" aria-label="开始日期">
+          <span class="muted">–</span>
+          <input class="inp" type="date" id="to" aria-label="结束日期">
+          <button class="btn primary" id="btnApply" hidden>应用</button>
+        </span>
+      </div>
+      <button class="btn ghost icon" id="btnRefresh" title="刷新数据" aria-label="刷新数据"><svg class="ico" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.6-6.4L21 8"/><path d="M21 3v5h-5"/></svg></button>
+      <span class="tb-sep tb-hide-md"></span>
+      <button class="sync-btn" id="btnSync" aria-haspopup="dialog" aria-label="数据同步状态"></button>
+      <button class="btn ghost icon" id="btnTheme" aria-label="切换主题"></button>
+      <button class="user-btn" id="btnUser" aria-haspopup="menu" aria-label="用户菜单"></button>
+      <div class="loadbar" aria-hidden="true"></div>
+    </header>
+
+    <main class="content" id="content">
+      <div class="notices" id="notices" aria-live="polite"></div>
+      <div class="filterbar" id="filterbar" hidden></div>
+      <div class="more-filters" id="moreFilters" hidden></div>
+      <div class="chips" id="chips" hidden></div>
+      <div id="view"></div>
+      <details class="note" id="note">
+        <summary>数据口径说明</summary>
+        <div>
+          “账期”使用阿里云费用中心月度实例账单（DescribeInstanceBill · MONTHLY），“日期”使用按天账单（DAILY），自然日按北京时间划分，金额与阿里云控制台一致。
+          应付金额 = 原价 − 优惠 − 优惠券抵扣（税前）；可在筛选栏切换为原价或优惠后金额。账单相对实际调用约延迟数小时，当月数据会随同步持续更新，次月 3 日后出账为准。
+          环比：历史账期对比上月全月，当月对比上月同期（相同天数），按日期查询对比上一个等长周期。
+          账单实例ID格式：<span class="mono">ApiKeyID;业务空间ID;模型;计费项;[调用渠道];[免费额度用完即停]</span>，ApiKeyID 为空表示控制台体验、订阅套餐、Batch 等非 API Key 调用。
+        </div>
+      </details>
+    </main>
+  </div>
+</div>
+
+<dialog id="drawer" class="drawer" aria-labelledby="drawerTitle">
+  <div class="dlg-h">
+    <h2 id="drawerTitle">详情</h2><span id="drawerTags"></span><span class="sp"></span>
+    <span class="row" id="drawerActions"></span>
+    <button class="btn ghost icon sm" data-close aria-label="关闭"><svg class="ico" viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg></button>
+  </div>
+  <div class="dlg-b" id="drawerBody"></div>
+</dialog>
+
+<dialog id="dlgPwd" aria-labelledby="dlgPwdTitle">
+  <div class="dlg-h"><h2 id="dlgPwdTitle">修改密码</h2><span class="sp"></span><button class="btn ghost icon sm" data-close id="btnPwdClose" aria-label="关闭"><svg class="ico" viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg></button></div>
+  <form class="dlg-b" id="pwdForm" autocomplete="on">
+    <div class="notice warn" id="pwdForce" hidden><svg class="ico" viewBox="0 0 24 24"><path d="M12 9v4M12 17h.01M10.3 3.9L1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg><div>为保障账号安全，首次登录或密码被重置后需先设置新密码。</div></div>
+    <input type="text" name="username" autocomplete="username" id="pwdUser" hidden>
+    <label class="field"><span>原密码</span><input class="inp" type="password" id="pwdOld" autocomplete="current-password" required></label>
+    <label class="field"><span>新密码</span><input class="inp" type="password" id="pwdNew" autocomplete="new-password" required minlength="10"></label>
+    <label class="field"><span>确认新密码</span><input class="inp" type="password" id="pwdNew2" autocomplete="new-password" required minlength="10"></label>
+    <div class="hint">至少 10 位，需同时包含字母和数字，且不能包含用户名。修改后其他设备上的登录会话将失效。</div>
+    <div class="bad-text" id="pwdErr" role="alert"></div>
+    <div class="row" style="justify-content:flex-end"><button class="btn primary" type="submit">确认修改</button></div>
+  </form>
+</dialog>
+
+<div id="tip" role="tooltip"></div>
+<div class="toast-host" id="toasts" aria-live="polite"></div>
+<script type="module" src="/js/main.js"></script>
+</body>
+</html>

@@ -1,0 +1,175 @@
+/* API Key 详情：单个 Key 的费用、趋势、模型构成、计费项、渠道、权限与变更历史 */
+import {
+  $, esc, state, ui, app, http, money, moneyShort, compact, intFmt, pct, sum, uniq, metricVal, METRICS, NONE_KEY, DIMS, keyObj, keyShort, keyDesc, wsName,
+  aggregate, aggAll, sortedAggs, totalTokens, deltaPill, tipRows, icon, help, segCtl, fmtTime, budgetOf, budgetLevel, forecastOf, channelLabel,
+  WEEK, weekday, ioInfo, num, periodTag, daysBetween,
+} from '../core.js';
+import { columnChart, rankList, segbar, legendList, legendHtml } from '../charts.js';
+import { table, dataBar } from '../table.js';
+import { billDimsHtml } from './models.js';
+
+export function render(v, id) {
+  const k = keyObj(id);
+  if (!k && id !== NONE_KEY) { v.innerHTML = `<button class="back" data-go="#/keys">${icon('x')} 返回 API Key 分析</button><div class="panel empty"><h2>未找到该 API Key</h2><div>ID ${esc(id)} 不在已同步的 Key 列表和当前账单中。</div></div>`; return; }
+  const of = l => (l.apiKeyId || NONE_KEY) === id;
+  const lines = state.lines.filter(of), prevLines = state.prev.filter(of), daily = state.daily.filter(of), hist = state.history.filter(of);
+  const a = aggAll(lines), pa = aggAll(prevLines);
+  const p = state.data.period;
+  const allByKey = sortedAggs(aggregate(state.lines, DIMS.key.of)).filter(x => x.cost > 0);
+  const rank = allByKey.findIndex(x => x.key === id) + 1;
+  const totalAll = sum(state.lines, metricVal);
+  const tokens = totalTokens(a), ptokens = totalTokens(pa);
+  const perM = tokens ? a.cost / tokens * 1e6 : null, pPerM = ptokens ? pa.cost / ptokens * 1e6 : null;
+  const hit = a.tIn ? a.tCache / a.tIn : null, pHit = pa.tIn ? pa.tCache / pa.tIn : null;
+  const budget = p.mode === 'month' ? budgetOf(id) : null;
+  const fc = forecastOf(daily, l => l.pretax);
+  const act = state.keyActivity.get(id);
+  const days = uniq(daily.map(l => l.date)).sort();
+  const statusPill = id === NONE_KEY ? '<span class="pill neutral">非 Key 调用</span>'
+    : k.source === 'deleted' ? `<span class="pill bad">已删除 ${fmtTime(k.deletedAt, false)}</span>` : k.source === 'bill' ? '<span class="pill warn">不在 Key 列表</span>'
+      : k.disabled ? '<span class="pill bad">已禁用</span>' : '<span class="pill good">启用</span>';
+  const ipOpen = k && (!(k.accessIps || []).length || k.accessIps.some(x => x === '0.0.0.0/0' || x === '::/0'));
+
+  v.innerHTML = `
+    <button class="back" data-go="#/keys"><svg class="ico" viewBox="0 0 24 24"><path d="M15 6l-6 6 6 6"/></svg>API Key 分析</button>
+    <div class="entity-h">
+      <span class="entity-ico">${icon('key')}</span>
+      <div class="entity-t"><h2>${esc(keyShort(id))} ${statusPill}${k && !k.description && id !== NONE_KEY ? '<span class="pill warn">无描述</span>' : ''}</h2>
+        <div class="sub">${id === NONE_KEY ? '账单实例ID中 ApiKeyID 为空：控制台体验、订阅套餐、托管智能体、Batch 等非 API Key 调用'
+          : `ID <span class="mono">${esc(id)}</span> · <span class="mono">${esc(k.apiKeyValue || '—')}</span> · 业务空间 ${esc(wsName(k.wsKey))}${k.wsKey ? ` <span class="mono">${esc(k.wsKey)}</span>` : ''} · 创建于 ${fmtTime(k.gmtCreate, false)}`}</div></div>
+      <div class="row"><span class="lbl muted" style="font-size:12px">口径</span>${segMetric()}<button class="btn" data-key-detail>${icon('list')}账单明细</button></div>
+    </div>
+    <div class="kpi-row">
+      ${tile('wallet', `本期费用 · ${METRICS[ui.f.metric]}`, money(a.cost), deltaPill(a.cost, pa.cost), state.compareLabel, `上期 ${money(pa.cost)} · 原价 ${moneyShort(a.gross)}`)}
+      ${tile('layers', '费用排名', rank ? `第 ${rank}<small>/ ${allByKey.length}</small>` : '—', '', '', `占全部费用 ${pct(a.cost, totalAll)}`)}
+      ${tile('token', 'Token 总量', compact(tokens), deltaPill(tokens, ptokens, { neutral: true }), state.compareLabel, `输入 ${compact(a.tIn)} · 输出 ${compact(a.tOut)}`)}
+      ${tile('unit', '每百万 Token 成本', perM == null ? '—' : money(perM), perM == null ? '' : deltaPill(perM, pPerM), perM == null ? '' : state.compareLabel, '费用 ÷ 总 Token × 10⁶')}
+      ${tile('cache', '缓存命中率', hit == null ? '—' : (hit * 100).toFixed(1) + '%', hit == null ? '' : deltaPill(hit, pHit, { pp: true, goodWhenUp: true }), hit == null ? '' : state.compareLabel, hit == null ? '—' : `命中 ${compact(a.tCache)} Token`)}
+      ${budget ? budgetTile(a.pretax, budget, fc?.value ?? null)
+        : tile('calendar', fc ? '预计本月' : '近 7 / 30 天', fc ? money(fc.value) : `${moneyShort(act?.c7 || 0)}<small>/ ${moneyShort(act?.c30 || 0)}</small>`, '', '', fc ? `日均 ${money(fc.avg)}` : `最近消费 ${act?.lastDay || '—'}`)}
+    </div>
+    <div class="bi">
+      <section class="panel c8"><div class="panel-h"><h3>每日费用</h3><span class="sub">按模型堆叠 · 虚线为日均</span></div><div class="legend" id="kLegend"></div><div class="chart" id="kDaily"></div></section>
+      <section class="panel c4"><div class="panel-h"><h3>模型构成</h3><span class="sub">${a.models.size} 个模型</span></div><div id="kModels"></div></section>
+      <section class="panel c6"><div class="panel-h"><h3>月度费用</h3>${help('近 12 个账期的账期账单，按模型堆叠；范围取决于同步回溯月数。')}</div><div class="legend" id="kHLegend"></div><div class="chart" id="kHist"></div></section>
+      <section class="panel c6"><div class="panel-h"><h3>计费维度</h3><span class="sub">按费用拆分</span></div><div id="kDims"></div></section>
+      <section class="panel c12"><div class="panel-h"><h3>模型明细</h3><span class="sub">${esc(state.compareLabel)} · 点击查看模型详情</span><div class="actions"><button class="btn sm" id="csvM">${icon('download')}导出</button></div></div><div id="kModelTbl"></div></section>
+      <section class="panel c12"><div class="panel-h"><h3>计费项明细</h3><span class="sub">模型 × 计费项 × 单价</span><div class="actions"><button class="btn sm" id="csvI">${icon('download')}导出</button></div></div><div id="kItemTbl"></div></section>
+      <section class="panel c6"><div class="panel-h"><h3>调用渠道</h3></div><div id="kCh"></div></section>
+      <section class="panel c6"><div class="panel-h"><h3>权限与变更记录</h3>${help('权限来自阿里云同步；变更记录为每次同步检测到的描述、归属、权限等变化。')}</div>
+        <div class="kv" style="margin-bottom:14px">
+          <div><span>模型权限</span><b>${!k ? '—' : k.authType === 'All' || k.allowAllModels ? '<span class="warn-text">全部模型</span>' : esc((k.accessibleModels || []).join('、') || '—')}</b></div>
+          <div><span>IP 白名单</span><b class="mono">${!k ? '—' : ipOpen ? '<span class="warn-text">不限</span>' : esc(k.accessIps.join(', '))}</b></div>
+          <div><span>最近消费 / 近 30 天</span><b>${esc(act?.lastDay || '—')} / ${money(act?.c30 || 0)}</b></div>
+          <div><span>首次同步 / 最近同步</span><b>${fmtTime(k?.firstSeen)} / ${fmtTime(k?.lastSeen)}</b></div>
+        </div>
+        <div id="kChanges"><div class="nodata">加载中…</div></div></section>
+    </div>`;
+
+  // 每日（按模型）
+  const ranked = sortedAggs(aggregate(daily, l => l.model)).map(x => x.key);
+  const colored = ranked.slice(0, 7), others = ranked.slice(7);
+  const series = colored.map((m, i) => ({ id: m, label: m, color: `var(--s${i + 1})` }));
+  if (others.length) series.push({ id: '__other', label: `其他 ${others.length} 个模型`, color: 'var(--other)' });
+  const cell = new Map();
+  daily.forEach(l => { const kk = l.date + '|' + (colored.includes(l.model) ? l.model : '__other'); cell.set(kk, (cell.get(kk) || 0) + metricVal(l)); });
+  $('#kLegend', v).innerHTML = series.length > 1 ? legendHtml(series) : '';
+  const totalDaily = sum(daily, metricVal);
+  const calDays = daysBetween(p.from, p.to < state.today ? p.to : state.today);
+  columnChart($('#kDaily', v), { xs: days, series, cell: (x, s) => cell.get(x + '|' + s) || 0, avg: days.length ? totalDaily / Math.max(1, calDays) : null, height: 260, xLabel: x => x.slice(5), tipTitle: x => `${x}（周${WEEK[weekday(x)]}）`, empty: '本期无按日费用' });
+
+  // 模型构成
+  const mAgg = sortedAggs(aggregate(lines, l => l.model)).filter(x => x.cost > 0);
+  const colorOfModel = m => { const i = colored.indexOf(m); return i >= 0 ? `var(--s${i + 1})` : 'var(--other)'; };
+  const parts = mAgg.slice(0, 7).map(x => ({ id: x.key, label: x.key, value: x.cost, color: colorOfModel(x.key) }));
+  if (mAgg.length > 7) parts.push({ id: '__other', label: `其他 ${mAgg.length - 7} 个`, value: sum(mAgg.slice(7), x => x.cost), color: 'var(--other)' });
+  $('#kModels', v).innerHTML = segbar(parts) + legendList(parts, a.cost);
+
+  // 月度
+  const hm = uniq(hist.map(l => l.date)).sort();
+  const hRank = sortedAggs(aggregate(hist, l => l.model)).map(x => x.key);
+  const hColored = hRank.slice(0, 6), hSeries = hColored.map(m => ({ id: m, label: m, color: colorOfModel(m) !== 'var(--other)' ? colorOfModel(m) : `var(--s${(hColored.indexOf(m) % 8) + 1})` }));
+  if (hRank.length > 6) hSeries.push({ id: '__other', label: '其他模型', color: 'var(--other)' });
+  const hc = new Map(); hist.forEach(l => { const kk = l.date + '|' + (hColored.includes(l.model) ? l.model : '__other'); hc.set(kk, (hc.get(kk) || 0) + metricVal(l)); });
+  $('#kHLegend', v).innerHTML = hSeries.length > 1 ? legendHtml(hSeries) : '';
+  columnChart($('#kHist', v), { xs: hm, series: hSeries, cell: (x, s) => hc.get(x + '|' + s) || 0, height: 220, xLabel: x => x.slice(2), tipTitle: x => `${x} 账期`, weekend: false, empty: '暂无历史账期数据', onX: x => app.setPeriod({ mode: 'month', cycle: x }) });
+
+  $('#kDims', v).innerHTML = billDimsHtml(lines);
+
+  // 模型明细
+  const pm = aggregate(prevLines, l => l.model);
+  const max = Math.max(0, ...mAgg.map(x => x.cost));
+  const tm = table('keyModels', $('#kModelTbl', v), {
+    sort: 'cost', pageSize: 0, caption: '模型明细', onRowClick: r => app.openModel(r.model),
+    columns: [
+      { key: 'model', label: '模型', fmt: x => `<span class="sw" style="background:${colorOfModel(x)}"></span><span class="mono">${esc(x)}</span>` },
+      { key: 'cost', label: `费用（${METRICS[ui.f.metric]}）`, align: 'r', fmt: x => dataBar(x, max) },
+      { key: 'chg', label: state.compareLabel, align: 'r', fmt: (x, r) => deltaPill(r.cost, r.prev), sortVal: r => r.cost - r.prev },
+      { key: 'share', label: '占比', align: 'r', fmt: x => (x * 100).toFixed(1) + '%' },
+      { key: 'tIn', label: '输入 Token', align: 'r', fmt: x => intFmt(x) },
+      { key: 'hit', label: '缓存命中率', align: 'r', fmt: x => (x == null ? '-' : (x * 100).toFixed(1) + '%'), sortVal: r => r.hit ?? -1 },
+      { key: 'tOut', label: '输出 Token', align: 'r', fmt: x => intFmt(x) },
+      { key: 'perM', label: '¥/百万Token', align: 'r', fmt: x => (x == null ? '-' : money(x)), sortVal: r => r.perM ?? -1 },
+      { key: 'days', label: '使用天数', align: 'r' },
+    ],
+    footer: rs => ['合计', money(sum(rs, r => r.cost)), deltaPill(sum(rs, r => r.cost), sum(rs, r => r.prev)), '', intFmt(sum(rs, r => r.tIn)), '', intFmt(sum(rs, r => r.tOut)), '', ''],
+  }).setRows(mAgg.map(x => {
+    const t = totalTokens(x);
+    return { model: x.key, cost: x.cost, prev: pm.get(x.key)?.cost || 0, share: a.cost ? x.cost / a.cost : 0, tIn: x.tIn, tOut: x.tOut, hit: x.tIn ? x.tCache / x.tIn : null, perM: t ? x.cost / t * 1e6 : null, days: uniq(daily.filter(l => l.model === x.key && metricVal(l) > 0).map(l => l.date)).length };
+  }));
+  $('#csvM', v).onclick = () => tm.csv(`Key_${id}_模型明细_${periodTag()}.csv`);
+
+  // 计费项
+  const byItem = aggregate(lines, l => `${l.model}\u0001${l.io}\u0001${l.listPrice}\u0001${l.usageUnit}\u0001${l.listPriceUnit}`);
+  const ti = table('keyItems', $('#kItemTbl', v), {
+    sort: 'cost', pageSize: 50, caption: '计费项明细',
+    columns: [
+      { key: 'model', label: '模型', cls: 'mono' },
+      { key: 'label', label: '计费项', fmt: (x, r) => `${esc(x)}<span class="sub mono">${esc(r.io)}</span>` },
+      { key: 'price', label: '单价', align: 'r', fmt: (x, r) => (x !== '' ? `${esc(x)}<span class="sub">${esc(r.priceUnit)}</span>` : '-'), sortVal: r => num(r.price) },
+      { key: 'usage', label: '用量', align: 'r', fmt: (x, r) => `${intFmt(x)}<span class="sub">${esc(r.unit)}</span>` },
+      { key: 'tokens', label: 'Token', align: 'r', fmt: x => intFmt(x) },
+      { key: 'gross', label: '原价', align: 'r', fmt: x => money(x) },
+      { key: 'cost', label: '费用', align: 'r', fmt: x => money(x) },
+      { key: 'share', label: '占比', align: 'r', fmt: x => (x * 100).toFixed(1) + '%' },
+    ],
+    footer: rs => ['合计', '', '', '', intFmt(sum(rs, r => r.tokens)), money(sum(rs, r => r.gross)), money(sum(rs, r => r.cost)), ''],
+  }).setRows([...byItem.values()].map(x => {
+    const [model, io, price, unit, priceUnit] = x.key.split('\u0001');
+    return { model, io, label: ioInfo(io).label, price, priceUnit, unit, usage: sum(lines.filter(l => `${l.model}\u0001${l.io}\u0001${l.listPrice}\u0001${l.usageUnit}\u0001${l.listPriceUnit}` === x.key), l => l.usage || 0), tokens: totalTokens(x), gross: x.gross, cost: x.cost, share: a.cost ? x.cost / a.cost : 0 };
+  }));
+  $('#csvI', v).onclick = () => ti.csv(`Key_${id}_计费项_${periodTag()}.csv`);
+
+  rankList($('#kCh', v), sortedAggs(aggregate(lines, l => l.channel)).map(x => ({ id: x.key, label: channelLabel(x.key), sub: x.key || '', value: x.cost })), { total: a.cost });
+  v.querySelector('[data-key-detail]').onclick = () => app.setFilter({ key: id }, '#/detail', true);
+  loadChanges(v, id);
+}
+
+function budgetTile(used, budget, fcv) {
+  const p = used / budget * 100, lv = budgetLevel(used, budget), fl = fcv != null ? budgetLevel(fcv, budget) : '';
+  const color = lv === 'bad' ? 'var(--crit)' : lv === 'warn' ? 'var(--warn)' : 'var(--accent)';
+  const cls = x => (x === 'bad' ? 'bad-text' : x === 'warn' ? 'warn-text' : '');
+  return `<section class="kpi"><div class="kpi-h"><span class="kpi-ico">${icon('wallet')}</span><span>月度预算 ${esc(moneyShort(budget))}</span></div>
+    <div class="value ${cls(lv)}">${p.toFixed(1)}%<small>已用</small></div>
+    <div class="progress" style="margin:6px 0 2px"><i style="width:${Math.min(100, p).toFixed(1)}%;background:${color}"></i></div>
+    <div class="meta ${cls(fl)}" title="${fcv != null ? esc(`预计月末 ${money(fcv)}`) : ''}">${fcv != null ? `预计月末 ${esc(moneyShort(fcv))}（${(fcv / budget * 100).toFixed(0)}%）${fcv > budget ? ' · 将超支' : ''}` : `剩余 ${esc(moneyShort(Math.max(0, budget - used)))}`}</div></section>`;
+}
+function segMetric() {
+  return `<div class="seg sm" role="group" aria-label="费用口径">${Object.entries(METRICS).map(([k, l]) => `<button type="button" data-metric="${k}" aria-pressed="${ui.f.metric === k}">${l.replace('金额', '')}</button>`).join('')}</div>`;
+}
+function tile(ic, label, value, delta, cmp, meta) {
+  return `<section class="kpi"><div class="kpi-h"><span class="kpi-ico">${icon(ic)}</span><span>${esc(label)}</span></div><div class="value">${value}</div>
+    <div class="trend">${delta || ''}${delta && cmp ? `<span class="cmp">${esc(cmp)}</span>` : ''}</div><div class="meta" title="${esc(meta)}">${esc(meta)}</div></section>`;
+}
+const FIELD = { description: '描述', workspace_id: '业务空间ID', workspace_name: '业务空间', disabled: '禁用', auth_type: '授权类型', allow_all_models: '全部模型', accessible_models: '可访问模型', access_ips: 'IP 白名单', api_key_masked: 'API Key' };
+const CHG = { create: ['新增', 'good'], update: ['修改', 'warn'], delete: ['删除', 'bad'], restore: ['恢复', 'good'] };
+async function loadChanges(v, id) {
+  const el = $('#kChanges', v);
+  if (!el) return;
+  try {
+    if (!state.changes) state.changes = (await http('GET', '/api/changes')).changes;
+    const list = state.changes.filter(c => c.entity === 'api_key' && c.entity_id === id);
+    const fmt = s => { try { const o = JSON.parse(s || 'null'); return o ? Object.entries(o).map(([kk, x]) => `${FIELD[kk] || kk}：${x == null || x === '' ? '（空）' : x}`).join('；') : ''; } catch { return ''; } };
+    el.innerHTML = list.length ? `<ul class="timeline">${list.map(c => `<li><span class="pill ${CHG[c.change]?.[1] || 'neutral'}">${CHG[c.change]?.[0] || esc(c.change)}</span><div><b>${fmtTime(c.ts)}</b>${c.change === 'update' ? `<div class="muted">${esc(fmt(c.before_json))} → ${esc(fmt(c.after_json))}</div>` : ''}</div></li>`).join('')}</ul>` : '<div class="nodata">暂无变更记录</div>';
+  } catch (e) { el.innerHTML = `<div class="nodata bad-text">${esc(e.message)}</div>`; }
+}

@@ -1,0 +1,108 @@
+/* 成本分摊 / 多维透视：任选行、列维度与指标，交叉汇总并导出 */
+import { $, esc, state, ui, app, LS, money, compact, intFmt, pct, sum, uniq, metricVal, METRICS, NONE_KEY, keyShort, wsName, channelLabel, ioInfo,
+  filterLines, icon, help, opt, periodTag } from '../core.js';
+import { table } from '../table.js';
+
+const TT = { in: '输入（非缓存）', hit: '缓存命中', create: '缓存创建', out: '输出', emb: '向量', other: '其他 / 订阅' };
+const TIME = { peak: '峰时', offpeak: '闲时', std: '不分时段' };
+const DIM = {
+  ws: { label: '业务空间', of: l => l.wsKey, name: wsName },
+  key: { label: 'API Key', of: l => l.apiKeyId || NONE_KEY, name: keyShort },
+  model: { label: '模型', of: l => l.model, name: x => x },
+  dir: { label: 'Token 类型', of: l => (l.ioi.dir === 'in' ? (l.ioi.cache === 'hit' ? 'hit' : l.ioi.cache === 'create' ? 'create' : 'in') : l.ioi.dir), name: x => TT[x] || x },
+  item: { label: '计费项', of: l => l.io, name: x => (x ? ioInfo(x).label : '（无）') },
+  time: { label: '计费时段', of: l => l.ioi.time || 'std', name: x => TIME[x] },
+  channel: { label: '调用渠道', of: l => l.channel, name: channelLabel },
+  date: { label: '日期', of: l => l.date, name: x => x, src: 'daily' },
+  month: { label: '账期（近 12 月）', of: l => l.date, name: x => x, src: 'history' },
+  none: { label: '（不分列）', of: () => '__all', name: () => '合计' },
+};
+const MEASURE = {
+  cost: { label: () => `费用（${METRICS[ui.f.metric]}）`, val: metricVal, fmt: money },
+  gross: { label: () => '原价', val: l => l.gross, fmt: money },
+  tokens: { label: () => '总 Token', val: l => l.tokens || 0, fmt: intFmt },
+  tIn: { label: () => '输入 Token', val: l => (l.ioi.dir === 'in' ? l.tokens || 0 : 0), fmt: intFmt },
+  tOut: { label: () => '输出 Token', val: l => (l.ioi.dir === 'out' ? l.tokens || 0 : 0), fmt: intFmt },
+};
+const SHOW = { value: '数值', row: '行占比', col: '列占比', all: '总占比' };
+const PRESETS = [
+  { name: '业务空间 × API Key', rows: 'ws', cols: 'key' },
+  { name: 'API Key × 模型', rows: 'key', cols: 'model' },
+  { name: '模型 × Token 类型', rows: 'model', cols: 'dir' },
+  { name: 'API Key × 日期', rows: 'key', cols: 'date' },
+  { name: 'API Key × 近 12 月', rows: 'key', cols: 'month' },
+  { name: '业务空间 × 计费时段', rows: 'ws', cols: 'time' },
+];
+
+export function render(v) {
+  const pv = ui.pv || (ui.pv = { rows: 'ws', cols: 'model', measure: 'cost', show: 'value', heat: true, ...LS.get('bc.pivot', {}) });
+  if (pv.rows === pv.cols && pv.rows !== 'none') pv.cols = 'none';
+  if (pv.rows === 'none') pv.rows = 'ws';
+  const rd = DIM[pv.rows], cd = DIM[pv.cols], ms = MEASURE[pv.measure] || MEASURE.cost;
+  const src = rd.src === 'history' || cd.src === 'history' ? state.history : rd.src === 'daily' || cd.src === 'daily' ? state.daily : state.lines;
+  const lines = filterLines(src);
+  const cell = new Map(), rowT = new Map(), colT = new Map();
+  let grand = 0;
+  for (const l of lines) {
+    const r = rd.of(l), c = cd.of(l), x = ms.val(l);
+    if (!x) { if (!rowT.has(r)) rowT.set(r, 0); continue; }
+    cell.set(r + '\u0001' + c, (cell.get(r + '\u0001' + c) || 0) + x);
+    rowT.set(r, (rowT.get(r) || 0) + x); colT.set(c, (colT.get(c) || 0) + x); grand += x;
+  }
+  const isTime = pv.cols === 'date' || pv.cols === 'month';
+  let colIds = [...colT.keys()].sort(isTime ? undefined : (a, b) => colT.get(b) - colT.get(a));
+  const LIMIT = isTime ? 62 : 20;
+  const extra = colIds.slice(LIMIT); colIds = colIds.slice(0, LIMIT);
+  const OTHER = '\u0002other';
+  if (extra.length) { for (const r of rowT.keys()) cell.set(r + '\u0001' + OTHER, sum(extra, c => cell.get(r + '\u0001' + c) || 0)); colT.set(OTHER, sum(extra, c => colT.get(c))); colIds.push(OTHER); }
+  const rowIds = [...rowT.keys()].filter(r => rowT.get(r) > 0);
+  const maxCell = Math.max(0, ...[...cell.values()]);
+
+  v.innerHTML = `
+    <section class="panel">
+      <div class="panel-h"><h3>多维透视</h3>${help('任选行维度与列维度交叉汇总，用于按业务空间/项目分摊成本、对比 Key 的模型使用结构等。日期维度使用按日账单，“近 12 月”使用账期账单，其余使用当前周期账单。全局筛选条件同样生效。')}
+        <div class="actions"><button class="btn sm" id="csv">${icon('download')}导出</button></div></div>
+      <div class="row" style="margin-bottom:12px;gap:10px 16px">
+        <label class="field" style="flex-direction:row;align-items:center;gap:6px"><span>行</span><select class="inp" data-pv="rows">${Object.entries(DIM).filter(([k]) => k !== 'none').map(([k, d]) => opt(k, d.label, pv.rows)).join('')}</select></label>
+        <button class="btn ghost icon sm" id="swap" title="行列互换" aria-label="行列互换"><svg class="ico" viewBox="0 0 24 24"><path d="M7 16V4M3 8l4-4 4 4M17 8v12M21 16l-4 4-4-4"/></svg></button>
+        <label class="field" style="flex-direction:row;align-items:center;gap:6px"><span>列</span><select class="inp" data-pv="cols">${Object.entries(DIM).filter(([k]) => k !== pv.rows).map(([k, d]) => opt(k, d.label, pv.cols)).join('')}</select></label>
+        <label class="field" style="flex-direction:row;align-items:center;gap:6px"><span>指标</span><select class="inp" data-pv="measure">${Object.entries(MEASURE).map(([k, m]) => opt(k, m.label(), pv.measure)).join('')}</select></label>
+        <div class="seg sm" role="group" aria-label="显示方式">${Object.entries(SHOW).map(([k, l]) => `<button type="button" data-pvshow="${k}" aria-pressed="${pv.show === k}">${l}</button>`).join('')}</div>
+        <label class="chk"><input type="checkbox" data-pv="heat" ${pv.heat ? 'checked' : ''}> 色阶</label>
+      </div>
+      <div class="row" style="margin-bottom:12px"><span class="muted" style="font-size:12px">常用：</span>${PRESETS.map((p, i) => `<button class="btn sm ${p.rows === pv.rows && p.cols === pv.cols ? 'primary' : ''}" data-preset="${i}">${esc(p.name)}</button>`).join('')}</div>
+      <div id="tbl"></div>
+      <div class="panel-foot">共 ${rowIds.length} 行 × ${colIds.length} 列${extra.length ? `（列按${ms.label()}取前 ${LIMIT}，其余 ${extra.length} 项合并为“其他”）` : ''} · 合计 ${esc(ms.fmt(grand))}</div>
+    </section>`;
+
+  const fmtCell = (x, r, c) => {
+    if (!x) return '<span class="muted">·</span>';
+    const base = pv.show === 'row' ? rowT.get(r) : pv.show === 'col' ? colT.get(c) : pv.show === 'all' ? grand : 0;
+    const text = pv.show === 'value' ? ms.fmt(x) : pct(x, base);
+    if (!pv.heat) return esc(text);
+    const s = Math.min(7, Math.max(1, Math.ceil(Math.sqrt(x / (maxCell || 1)) * 7)));
+    return `<span class="pv" style="background:var(--q${s});color:${s >= 4 ? '#fff' : '#0b0b0b'}">${esc(text)}</span>`;
+  };
+  const colName = c => (c === OTHER ? `其他 ${extra.length} 项` : cd.name(c));
+  const columns = [{ key: 'name', label: rd.label, fmt: (x, r) => `<b style="font-weight:600">${esc(x)}</b>${r.sub ? `<span class="sub mono">${esc(r.sub)}</span>` : ''}` }];
+  if (pv.cols !== 'none') colIds.forEach((c, i) => columns.push({ key: 'c' + i, label: colName(c), align: 'r', fmt: (x, r) => fmtCell(x, r.id, c), csv: r => (r['c' + i] ? +r['c' + i].toFixed(6) : 0) }));
+  columns.push({ key: 'total', label: '合计', align: 'r', fmt: x => `<b>${esc(ms.fmt(x))}</b>`, csv: r => +r.total.toFixed(6) });
+  columns.push({ key: 'share', label: '占比', align: 'r', fmt: x => (x * 100).toFixed(1) + '%', csv: r => (r.share * 100).toFixed(2) + '%' });
+  const rows = rowIds.map(r => {
+    const o = { id: r, name: rd.name(r), sub: pv.rows === 'key' && r !== NONE_KEY ? r : pv.rows === 'ws' && r ? r : '', total: rowT.get(r), share: grand ? rowT.get(r) / grand : 0 };
+    colIds.forEach((c, i) => { o['c' + i] = cell.get(r + '\u0001' + c) || 0; });
+    return o;
+  });
+  const t = table('pivot:' + pv.rows + ':' + pv.cols, $('#tbl', v), {
+    sort: isTime && pv.rows === 'date' ? 'name' : 'total', dir: pv.rows === 'date' || pv.rows === 'month' ? 'asc' : 'desc', pageSize: 0, caption: '多维透视', maxHeight: '64vh',
+    onRowClick: ['key', 'model', 'ws'].includes(pv.rows) ? r => (pv.rows === 'key' ? (r.id !== NONE_KEY && app.go(`#/key/${r.id}`)) : pv.rows === 'model' ? app.openModel(r.id) : app.setFilter({ ws: r.id || '__nows' }, '#/keys')) : null,
+    columns,
+    footer: rs => columns.map(c => (c.key === 'name' ? '合计' : c.key === 'total' ? esc(ms.fmt(grand)) : c.key === 'share' ? '100%' : esc(ms.fmt(sum(rs, r => r[c.key] || 0))))),
+  }).setRows(rows);
+  const save = () => { LS.set('bc.pivot', pv); render(v); };
+  v.querySelectorAll('[data-pv]').forEach(el => el.onchange = () => { pv[el.dataset.pv] = el.type === 'checkbox' ? el.checked : el.value; save(); });
+  v.querySelectorAll('[data-pvshow]').forEach(el => el.onclick = () => { pv.show = el.dataset.pvshow; save(); });
+  v.querySelectorAll('[data-preset]').forEach(el => el.onclick = () => { const p = PRESETS[+el.dataset.preset]; pv.rows = p.rows; pv.cols = p.cols; save(); });
+  $('#swap', v).onclick = () => { if (pv.cols === 'none') return; [pv.rows, pv.cols] = [pv.cols, pv.rows]; save(); };
+  $('#csv', v).onclick = () => t.csv(`成本分摊_${rd.label}x${cd.label}_${periodTag()}.csv`);
+}

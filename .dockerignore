@@ -1,0 +1,14 @@
+.git
+.env
+.env.*
+!.env.example
+data
+**/data
+node_modules
+*.db
+*.db-wal
+*.db-shm
+*.log
+*.md
+Caddyfile
+docker-compose*.yml
