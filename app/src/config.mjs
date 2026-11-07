@@ -28,6 +28,10 @@ export const config = {
   /** 可选：首次启动时导入的 AccessKey（导入后加密存库，之后以管理页面配置为准） */
   bootstrapAkId: env.ALIBABA_CLOUD_ACCESS_KEY_ID || '',
   bootstrapAkSecret: env.ALIBABA_CLOUD_ACCESS_KEY_SECRET || '',
+  /** 可选：对外访问地址（如 https://cost.example.com），用于告警消息中的跳转链接 */
+  publicUrl: /^https?:\/\/[^\s/?#]+(\/[^\s?#]*)?$/i.test((env.PUBLIC_URL || '').trim()) ? env.PUBLIC_URL.trim() : '',
+  /** 可选：允许通用 Webhook 指向内网地址（默认禁止，防 SSRF） */
+  alertAllowPrivate: bool(env.ALERT_ALLOW_PRIVATE),
   login: {
     maxFailuresPerUser: int(env.LOGIN_MAX_FAILURES, 5, 3, 20),
     lockMinutes: int(env.LOGIN_LOCK_MINUTES, 15, 1, 24 * 60),

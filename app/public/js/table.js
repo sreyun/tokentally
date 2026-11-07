@@ -1,7 +1,7 @@
 /* =========================================================================
  * 数据表格：排序、分页、合计行、首列冻结、键盘操作、CSV 导出
  * ========================================================================= */
-import { esc, money, ui } from './core.js';
+import { esc, money, ui, LS, toast } from './core.js';
 
 const registry = {};
 
@@ -28,6 +28,8 @@ export class DataTable {
   }
   toggleSort(k) {
     if (this.sort === k) this.dir = this.dir === 'desc' ? 'asc' : 'desc'; else { this.sort = k; this.dir = 'desc'; }
+    this.page = 0;
+    if (this.id) LS.set('bc.sort.' + this.id, { sort: this.sort, dir: this.dir });
     this.render();
     this.el.querySelector(`th[data-k="${CSS.escape(k)}"]`)?.focus();
   }
@@ -65,7 +67,8 @@ export class DataTable {
       ? this.view.map((r, i) => `<tr data-i="${i}" class="${clickable ? 'clickable' : ''} ${this.o.rowClass ? this.o.rowClass(r) : ''}" ${clickable ? 'tabindex="0"' : ''}>${cols.map((c, j) => `<td class="${cls(c, j)}">${c.fmt ? c.fmt(r[c.key], r) : esc(r[c.key] ?? '')}</td>`).join('')}</tr>`).join('')
       : `<tr><td colspan="${cols.length}" class="nodata">${esc(this.o.empty || '暂无数据')}</td></tr>`;
     const foot = this.o.footer && rows.length ? `<tfoot><tr>${this.o.footer(rows).map((v, i) => `<td class="${cols[i] ? cls(cols[i], i) : ''}">${v ?? ''}</td>`).join('')}</tr></tfoot>` : '';
-    const pager = this.pageSize && total > Math.min(...[20, this.pageSize]) ? `<div class="pager"><span>共 ${total.toLocaleString()} 条</span>
+    const from = total ? this.page * ps + 1 : 0, to = Math.min(total, (this.page + 1) * ps);
+    const pager = this.pageSize && total > Math.min(...[20, this.pageSize]) ? `<div class="pager"><span>第 ${from.toLocaleString()}–${to.toLocaleString()} 条，共 ${total.toLocaleString()} 条</span>
       <select class="inp sm" data-ps aria-label="每页条数">${[20, 50, 100, 200, 500].map(n => `<option value="${n}" ${n === this.pageSize ? 'selected' : ''}>${n} 条/页</option>`).join('')}</select>
       <button class="btn sm" data-pg="-1" ${this.page === 0 ? 'disabled' : ''}>上一页</button><span>${this.page + 1} / ${pages}</span>
       <button class="btn sm" data-pg="1" ${this.page >= pages - 1 ? 'disabled' : ''}>下一页</button></div>` : (this.pageSize ? `<div class="pager"><span>共 ${total.toLocaleString()} 条</span></div>` : '');
@@ -79,6 +82,7 @@ export class DataTable {
     const head = cols.map(c => c.csvLabel || c.label).concat(extra.map(x => x.label));
     const lines = [head].concat(this.sorted().map(r => cols.map(c => (typeof c.csv === 'function' ? c.csv(r) : r[c.key])).concat(extra.map(x => x.val(r)))));
     downloadCsv(name, lines);
+    toast(`已导出 ${(lines.length - 1).toLocaleString()} 行：${name}`, '', 2600);
   }
 }
 
@@ -99,7 +103,10 @@ export function downloadCsv(name, lines) {
 export function table(id, el, opts) {
   const prev = registry[id];
   const t = new DataTable(el, opts);
+  t.id = id;
+  const saved = LS.get('bc.sort.' + id, null);
   if (prev) { t.sort = prev.sort; t.dir = prev.dir; t.pageSize = prev.pageSize; }
+  else if (saved && opts.columns.some(c => c.key === saved.sort)) { t.sort = saved.sort; t.dir = saved.dir; }
   registry[id] = t;
   return t;
 }

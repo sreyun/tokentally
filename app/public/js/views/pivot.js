@@ -1,6 +1,6 @@
 /* 成本分摊 / 多维透视：任选行、列维度与指标，交叉汇总并导出 */
 import { $, esc, state, ui, app, LS, money, compact, intFmt, pct, sum, uniq, metricVal, METRICS, NONE_KEY, keyShort, wsName, channelLabel, ioInfo,
-  filterLines, icon, help, opt, periodTag } from '../core.js';
+  filterLines, icon, help, opt, periodTag, toast } from '../core.js';
 import { table } from '../table.js';
 
 const TT = { in: '输入（非缓存）', hit: '缓存命中', create: '缓存创建', out: '输出', emb: '向量', other: '其他 / 订阅' };
@@ -79,9 +79,24 @@ export function render(v) {
     if (!x) return '<span class="muted">·</span>';
     const base = pv.show === 'row' ? rowT.get(r) : pv.show === 'col' ? colT.get(c) : pv.show === 'all' ? grand : 0;
     const text = pv.show === 'value' ? ms.fmt(x) : pct(x, base);
-    if (!pv.heat) return esc(text);
     const s = Math.min(7, Math.max(1, Math.ceil(Math.sqrt(x / (maxCell || 1)) * 7)));
-    return `<span class="pv" style="background:var(--q${s});color:${s >= 4 ? '#fff' : '#0b0b0b'}">${esc(text)}</span>`;
+    const inner = pv.heat ? `<span class="pv" style="background:var(--q${s});color:${s >= 4 ? '#fff' : '#0b0b0b'}">${esc(text)}</span>` : esc(text);
+    const tip = `${rd.name(r)} × ${c === OTHER ? '其他' : cd.name(c)}：${ms.fmt(x)}${c === OTHER ? '' : '，点击查看对应账单明细'}`;
+    return c === OTHER ? `<span title="${esc(tip)}">${inner}</span>` : `<button type="button" class="pv-btn" data-pr="${esc(r)}" data-pc="${esc(c)}" title="${esc(tip)}">${inner}</button>`;
+  };
+  /** 单元格下钻：把行、列维度转换为全局筛选/统计周期后进入账单明细 */
+  const toFilter = (dim, val) => ({
+    ws: { ws: val || '__nows' }, key: { key: val }, model: { model: val }, item: val ? { item: val } : {}, channel: { channel: val },
+    dir: { dir: ['in', 'hit', 'create'].includes(val) ? 'in' : val },
+  }[dim] || {});
+  const drill = (r, c) => {
+    const patch = { ...toFilter(pv.rows, r), ...toFilter(pv.cols, c) };
+    for (const [dim, val] of [[pv.rows, r], [pv.cols, c]]) {
+      if (dim === 'date') app.setPeriod({ mode: 'range', preset: 'custom', from: val, to: val });
+      if (dim === 'month') app.setPeriod({ mode: 'month', cycle: val });
+    }
+    if (pv.rows === 'time' || pv.cols === 'time') toast('计费时段不是筛选维度，已按其余维度定位账单', '', 2600);
+    app.setFilter(patch, '#/detail');
   };
   const colName = c => (c === OTHER ? `其他 ${extra.length} 项` : cd.name(c));
   const columns = [{ key: 'name', label: rd.label, fmt: (x, r) => `<b style="font-weight:600">${esc(x)}</b>${r.sub ? `<span class="sub mono">${esc(r.sub)}</span>` : ''}` }];
@@ -105,4 +120,5 @@ export function render(v) {
   v.querySelectorAll('[data-preset]').forEach(el => el.onclick = () => { const p = PRESETS[+el.dataset.preset]; pv.rows = p.rows; pv.cols = p.cols; save(); });
   $('#swap', v).onclick = () => { if (pv.cols === 'none') return; [pv.rows, pv.cols] = [pv.cols, pv.rows]; save(); };
   $('#csv', v).onclick = () => t.csv(`成本分摊_${rd.label}x${cd.label}_${periodTag()}.csv`);
+  $('#tbl', v).addEventListener('click', e => { const b = e.target.closest('.pv-btn'); if (b) drill(b.dataset.pr, b.dataset.pc); });
 }

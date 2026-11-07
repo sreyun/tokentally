@@ -3,7 +3,7 @@
  * ========================================================================= */
 import {
   $, $$, esc, LS, state, ui, app, http, toast, icon, opt, applyData, addDays, addMonths, lastDayOf, ago, fmtTime, uniq,
-  keyShort, wsName, channelLabel, ioInfo, NONE_KEY, isAdmin, activeFilterCount, METRICS,
+  keyShort, wsName, channelLabel, ioInfo, NONE_KEY, isAdmin, activeFilterCount, METRICS, filterLines,
 } from './core.js';
 import * as Overview from './views/overview.js';
 import * as Keys from './views/keys.js';
@@ -14,6 +14,7 @@ import * as Detail from './views/detail.js';
 import * as Gov from './views/governance.js';
 import * as Changes from './views/changes.js';
 import * as Admin from './views/admin.js';
+import * as Day from './views/day.js';
 
 const ROUTES = {
   overview: { label: '成本概览', icon: 'overview', sub: '本期费用、预算与预测、趋势、关键发现与排行', view: Overview, filters: true },
@@ -36,15 +37,43 @@ function parseHash() {
   if (ROUTES[r.name].admin && state.me && !isAdmin()) return { name: 'overview', arg: '' };
   return r;
 }
-app.go = hash => { if (location.hash === hash) render(); else location.hash = hash; };
+/*
+ * 导航：应用内跳转（app.go）滚动到顶部；浏览器前进/后退恢复离开时的滚动位置；
+ * 维护应用内历史栈，详情页“返回”优先回到上一个页面。
+ */
+const scrollMem = new Map();
+const navStack = [location.hash || '#/overview'];
+let pushNav = false, lastHash = location.hash || '#/overview';
+app.dirty = false;
+const leaveOk = () => !app.dirty || confirm('当前页面有未保存的修改，确定离开吗？');
+app.go = hash => {
+  if (!leaveOk()) return;
+  app.dirty = false;
+  if (location.hash === hash) { render(); return; }
+  pushNav = true;
+  location.hash = hash;
+};
+app.back = fallback => {
+  if (!leaveOk()) return;
+  app.dirty = false;
+  if (navStack.length > 1) history.back(); else app.go(fallback);
+};
 window.addEventListener('hashchange', () => {
-  const prev = route.name;
+  scrollMem.set(lastHash, window.scrollY);
+  const now = location.hash || '#/overview';
+  if (pushNav) navStack.push(now);
+  else if (navStack[navStack.length - 2] === now) navStack.pop();
+  else navStack.push(now);
+  app.dirty = false;
   route = parseHash();
   closePop();
   if ($('#drawer').open) $('#drawer').close();
   render();
-  if (prev !== route.name || route.name === 'key') window.scrollTo({ top: 0 });
+  const y = pushNav ? 0 : (scrollMem.get(now) || 0);
+  requestAnimationFrame(() => window.scrollTo({ top: y }));
+  pushNav = false; lastHash = now;
 });
+window.addEventListener('beforeunload', e => { if (app.dirty) { e.preventDefault(); e.returnValue = ''; } });
 app.render = () => render();
 app.setFilter = (patch, hash, reset = false) => {
   if (reset) Object.assign(ui.f, { ws: '', key: '', model: '', channel: '__all', dir: '', item: '', q: '' });
@@ -52,6 +81,7 @@ app.setFilter = (patch, hash, reset = false) => {
   if (hash) app.go(hash); else render();
 };
 app.openModel = m => Models.openModel(m);
+app.openDay = (d, keyId) => Day.openDay(d, keyId);
 app.setPeriod = p => { Object.assign(ui.period, p); savePeriod(); renderPeriod(); loadData(); };
 app.reload = () => loadData({ silent: true });
 app.refreshStatus = async () => { try { state.status = await http('GET', '/api/status'); } catch { /* ignore */ } renderSyncBtn(); renderSideFoot(); };
@@ -152,6 +182,9 @@ function renderPeriod() {
   $('#from').value = p.from; $('#to').value = p.to;
   $('#from').max = $('#to').max = state.today || '';
   $('#btnApply').hidden = p.preset !== 'custom';
+  const bad = !!(p.from && p.to && p.from > p.to);
+  $('#from').classList.toggle('invalid', bad); $('#to').classList.toggle('invalid', bad);
+  $('#from').title = bad ? '开始日期不能晚于结束日期' : '开始日期';
 }
 function applyPreset(preset) {
   const t = state.today, p = ui.period;
@@ -175,7 +208,10 @@ $('#preset').addEventListener('change', e => {
   if (e.target.value === 'custom') { ui.period.preset = 'custom'; savePeriod(); renderPeriod(); $('#from').focus(); return; }
   applyPreset(e.target.value); savePeriod(); renderPeriod(); loadData();
 });
-['from', 'to'].forEach(id => $('#' + id).addEventListener('change', e => { ui.period[id] = e.target.value; ui.period.preset = 'custom'; savePeriod(); renderPeriod(); }));
+['from', 'to'].forEach(id => {
+  $('#' + id).addEventListener('change', e => { ui.period[id] = e.target.value; ui.period.preset = 'custom'; savePeriod(); renderPeriod(); });
+  $('#' + id).addEventListener('keydown', e => { if (e.key === 'Enter') { ui.period[id] = e.target.value; $('#btnApply').click(); } });
+});
 $('#btnApply').onclick = () => {
   const p = ui.period;
   if (!p.from || !p.to || p.from > p.to) return toast('请选择有效的日期范围', 'err');
@@ -206,14 +242,14 @@ function renderFilters(r) {
   const cls = v => (v ? 'inp active' : 'inp');
   const moreCount = ['dir', 'item'].filter(k => f[k]).length + (f.channel !== '__all' ? 1 : 0);
   bar.hidden = false;
-  bar.innerHTML = `
-    <select class="${cls(f.ws)}" data-f="ws" aria-label="业务空间">${opt('', '全部业务空间', f.ws)}${wsOpts.map(([k, n]) => opt(k, n, f.ws)).join('')}</select>
-    <select class="${cls(f.key)}" data-f="key" aria-label="API Key">${opt('', '全部 API Key', f.key)}${keyIds.map(id => opt(id, id === NONE_KEY ? '无 API Key（控制台/订阅）' : `${keyShort(id)} · ${id}`, f.key)).join('')}</select>
-    <select class="${cls(f.model)}" data-f="model" aria-label="模型">${opt('', '全部模型', f.model)}${models.map(m => opt(m, m, f.model)).join('')}</select>
-    <button class="btn" id="btnMore" aria-expanded="${ui.moreFilters}">${icon('filter')}更多筛选${moreCount ? `<span class="count">${moreCount}</span>` : ''}</button>
-    <div class="search">${icon('search')}<input class="inp" type="search" data-f="q" value="${esc(f.q)}" placeholder="搜索 Key、描述、模型、业务空间、实例ID" aria-label="关键字搜索（快捷键 /）"></div>
-    <span class="spacer"></span>
-    <span class="lbl">口径</span><div class="seg sm" role="group" aria-label="费用口径">${Object.entries(METRICS).map(([k, l]) => `<button type="button" data-metric="${k}" aria-pressed="${f.metric === k}" title="${k === 'pretax' ? '扣除优惠与优惠券后的税前金额' : k === 'gross' ? '官网目录价金额' : '扣除优惠后的金额'}">${l.replace('金额', '')}</button>`).join('')}</div>`;
+  bar.innerHTML = `<div class="fgroup">
+    <select class="${cls(f.ws)}" data-f="ws" aria-label="业务空间" title="业务空间">${opt('', '全部业务空间', f.ws)}${wsOpts.map(([k, n]) => opt(k, n, f.ws)).join('')}</select>
+    <select class="${cls(f.key)}" data-f="key" aria-label="API Key" title="API Key">${opt('', '全部 API Key', f.key)}${keyIds.map(id => opt(id, id === NONE_KEY ? '无 API Key（控制台/订阅）' : `${keyShort(id)} · ${id}`, f.key)).join('')}</select>
+    <select class="${cls(f.model)}" data-f="model" aria-label="模型" title="模型">${opt('', '全部模型', f.model)}${models.map(m => opt(m, m, f.model)).join('')}</select>
+    <button class="btn" id="btnMore" aria-expanded="${ui.moreFilters}" aria-controls="moreFilters">${icon('filter')}更多筛选${moreCount ? `<span class="count">${moreCount}</span>` : ''}</button>
+    <div class="search">${icon('search')}<input class="inp" type="search" data-f="q" value="${esc(f.q)}" placeholder="搜索 Key、描述、模型、业务空间（按 / 聚焦）" aria-label="关键字搜索（快捷键 /）"></div>
+    </div>
+    <div class="metric"><span class="lbl">费用口径</span><div class="seg sm" role="group" aria-label="费用口径">${Object.entries(METRICS).map(([k, l]) => `<button type="button" data-metric="${k}" aria-pressed="${f.metric === k}" title="${k === 'pretax' ? '扣除优惠与优惠券后的税前金额' : k === 'gross' ? '官网目录价金额' : '扣除优惠后的金额'}">${l.replace('金额', '')}</button>`).join('')}</div></div>`;
   more.hidden = !ui.moreFilters;
   if (ui.moreFilters) {
     const channels = uniq(L.map(l => l.channel)).sort();
@@ -237,8 +273,10 @@ function renderNotices(r, extra) {
   const d = state.data;
   if (d && !r.noData && route.name !== 'governance' && route.name !== 'key' && !state.lines.length && s?.aliyun.configured) {
     list.push({ level: 'info', title: '所选周期暂无账单数据', why: d.period.mode === 'month' && !d.period.syncedAt ? '该账期尚未同步。管理员可在“系统管理 → 数据同步”中同步指定账期，或调大回溯月数。' : '该周期内没有百炼费用，或账单仍在同步中。' });
+  } else if (d && r.filters && state.lines.length && activeFilterCount() && !filterLines().length) {
+    list.push({ level: 'info', title: '当前筛选条件下没有数据', why: '可移除部分筛选条件，或切换统计周期。', unf: true });
   }
-  $('#notices').innerHTML = list.map(n => `<div class="notice ${n.level}">${icon(n.level === 'info' ? 'info' : 'warn')}<div><b>${esc(n.title)}</b>${n.why ? `<span class="why">${esc(n.why)}</span>` : ''}${n.go ? `<button class="link" data-go="${n.go}">前往配置 →</button>` : ''}</div></div>`).join('');
+  $('#notices').innerHTML = list.map(n => `<div class="notice ${n.level}">${icon(n.level === 'info' ? 'info' : 'warn')}<div><b>${esc(n.title)}</b>${n.why ? `<span class="why">${esc(n.why)}</span>` : ''}${n.go ? `<button class="link" data-go="${n.go}">前往配置 →</button>` : ''}${n.unf ? '<button class="link" data-unf="*">清除全部筛选 →</button>' : ''}</div></div>`).join('');
 }
 
 /* ---------------- 同步状态 / 用户菜单 ---------------- */
@@ -265,7 +303,8 @@ function closePop() { if (pop) { pop.remove(); pop = null; popKind = ''; } }
 function openPop(kind, anchor, html) {
   closePop();
   pop = document.createElement('div');
-  pop.className = 'pop'; pop.setAttribute('role', kind === 'user' ? 'menu' : 'dialog');
+  pop.className = kind === 'sync' ? 'pop wide' : 'pop'; pop.setAttribute('role', kind === 'user' ? 'menu' : 'dialog');
+  pop.setAttribute('aria-label', kind === 'user' ? '用户菜单' : '数据同步状态');
   pop.innerHTML = html;
   document.body.appendChild(pop);
   popKind = kind;
@@ -281,11 +320,11 @@ function renderSyncPop() {
   const row = (name, x) => {
     const st = x.running ? 'busy' : x.last?.status === 'error' ? 'bad' : x.last?.status === 'partial' || !x.lastSuccessAt ? 'warn' : 'ok';
     const pr = x.progress;
-    return `<div class="sync-row"><span class="dot ${st}"></span><b>${name}</b>
+    return `<div class="sync-row"><span class="dot ${st}" aria-hidden="true"></span><div class="sync-body"><b>${name}</b>
       <span>${x.running ? esc(pr?.text || '同步中…') : x.lastSuccessAt ? `最近成功 ${esc(fmtTime(x.lastSuccessAt))}（${esc(ago(x.lastSuccessAt))}）` : '尚未成功同步'}</span>
-      ${x.running && pr?.total ? `<span><div class="progress"><i style="width:${Math.round(pr.done / pr.total * 100)}%"></i></div></span>` : ''}
+      ${x.running && pr?.total ? `<div class="progress"><i style="width:${Math.round(pr.done / pr.total * 100)}%"></i></div>` : ''}
       ${!x.running && x.last?.status === 'error' ? `<span class="bad-text">上次失败：${esc(x.last.error || '')}</span>` : ''}
-      <span>每 ${x.intervalMin} 分钟自动同步${x.nextAt && !x.running ? ` · 下次约 ${esc(fmtTime(x.nextAt).slice(11))}` : ''}</span></div>`;
+      <span>每 ${x.intervalMin} 分钟自动同步${x.nextAt && !x.running ? ` · 下次约 ${esc(fmtTime(x.nextAt).slice(11))}` : ''}</span></div></div>`;
   };
   const p = state.data?.period;
   pop.innerHTML = `<div class="pop-h">数据同步状态</div><div class="pop-body">
@@ -317,6 +356,10 @@ document.addEventListener('click', async e => {
     catch (ex) { toast('启动失败：' + ex.message, 'err', 4000); }
     return;
   }
+  const cp = e.target.closest('[data-copy]');
+  if (cp) { e.preventDefault(); copyText(cp.dataset.copy); return; }
+  const back = e.target.closest('[data-back]');
+  if (back) { e.preventDefault(); app.back(back.dataset.back); return; }
   const go = e.target.closest('[data-go]');
   if (go) { e.preventDefault(); closePop(); app.go(go.dataset.go); return; }
   const seg = e.target.closest('[data-seg]');
@@ -349,10 +392,22 @@ document.addEventListener('input', e => {
 });
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape' && pop) { closePop(); return; }
-  if (e.key === '/' && !/INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName || '') && !document.querySelector('dialog[open]')) {
-    const q = $('[data-f="q"]'); if (q) { e.preventDefault(); q.focus(); }
-  }
+  const typing = /INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName || '') || document.activeElement?.isContentEditable;
+  if (typing || document.querySelector('dialog[open]') || e.ctrlKey || e.metaKey || e.altKey) return;
+  if (e.key === '/') { const q = $('[data-f="q"]'); if (q) { e.preventDefault(); q.focus(); } }
+  if (route.name === 'key' && (e.key === '[' || e.key === ']')) { const b = $(`[data-nav="${e.key === '[' ? 'prev' : 'next'}"]`); if (b) { e.preventDefault(); b.click(); } }
 });
+async function copyText(t) {
+  try { await navigator.clipboard.writeText(t); }
+  catch {
+    const ta = document.createElement('textarea');
+    ta.value = t; ta.setAttribute('readonly', ''); ta.style.cssText = 'position:fixed;opacity:0;top:0';
+    document.body.appendChild(ta); ta.select();
+    try { document.execCommand('copy'); } catch { /* ignore */ }
+    ta.remove();
+  }
+  toast(`已复制：${t.length > 40 ? t.slice(0, 40) + '…' : t}`, '', 1800);
+}
 $('#btnCollapse').onclick = () => { $('#app').classList.toggle('collapsed'); LS.set('bc.collapsed', $('#app').classList.contains('collapsed')); setTimeout(render, 60); };
 $('#drawer').addEventListener('click', e => { if (e.target === $('#drawer')) $('#drawer').close(); });
 
@@ -392,6 +447,16 @@ document.addEventListener('mousemove', e => { if (tipEl.style.display === 'block
 document.addEventListener('focusin', e => { const t = e.target.closest?.('[data-tip]'); if (t) { const r = t.getBoundingClientRect(); showTip(t, r.left, r.bottom - 8); } });
 document.addEventListener('focusout', () => { tipEl.style.display = 'none'; });
 document.addEventListener('scroll', () => { tipEl.style.display = 'none'; }, true);
+// 触屏：轻触显示提示，2.5 秒后自动隐藏
+let tipTimer;
+document.addEventListener('touchstart', e => {
+  const t = e.target.closest?.('[data-tip]');
+  clearTimeout(tipTimer);
+  if (!t) { tipEl.style.display = 'none'; return; }
+  const p = e.touches[0];
+  showTip(t, p.clientX, p.clientY);
+  tipTimer = setTimeout(() => { tipEl.style.display = 'none'; }, 2500);
+}, { passive: true });
 let rTimer, lastW = innerWidth;
 addEventListener('resize', () => { clearTimeout(rTimer); rTimer = setTimeout(() => { if (Math.abs(innerWidth - lastW) > 40) { lastW = innerWidth; render(); } }, 250); });
 
@@ -423,7 +488,7 @@ $('#pwdForm').addEventListener('submit', async e => {
 });
 
 /* ---------------- 启动 & 轮询 ---------------- */
-let lastSyncSeen = 0;
+let lastSyncSeen = 0, lastBillsSeen = 0;
 async function poll() {
   await app.refreshStatus();
   const s = state.status?.sync;
@@ -431,14 +496,19 @@ async function poll() {
   const latest = Math.max(s.meta.lastSuccessAt || 0, s.bills.lastSuccessAt || 0);
   if (latest > lastSyncSeen) {
     const first = !lastSyncSeen;
-    lastSyncSeen = latest;
-    if (!first && !$('#drawer').open && !document.querySelector('#dlgPwd[open]')) loadData({ silent: true });
+    const billsChanged = (s.bills.lastSuccessAt || 0) > lastBillsSeen;
+    lastSyncSeen = latest; lastBillsSeen = s.bills.lastSuccessAt || 0;
+    if (!first && !$('#drawer').open && !document.querySelector('#dlgPwd[open]')) {
+      await loadData({ silent: true });
+      if (billsChanged && route.name !== 'admin') toast('账单数据已同步更新', '', 2200);
+    }
   }
 }
 async function start() {
   await app.refreshStatus();
   const s = state.status?.sync;
   lastSyncSeen = Math.max(s?.meta.lastSuccessAt || 0, s?.bills.lastSuccessAt || 0);
+  lastBillsSeen = s?.bills.lastSuccessAt || 0;
   if (!ui.period.cycle || ui.period.cycle > state.today.slice(0, 7)) ui.period.cycle = state.today.slice(0, 7);
   if (ui.period.mode === 'range' && ui.period.preset !== 'custom') applyPreset(ui.period.preset);
   route = parseHash();

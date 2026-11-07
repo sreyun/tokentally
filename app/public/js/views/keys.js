@@ -2,7 +2,7 @@
 import {
   $, esc, state, ui, app, money, moneyShort, compact, intFmt, pct, sum, uniq, metricVal, METRICS, NONE_KEY, DIMS, keyObj, keyDesc, keyShort, wsName,
   filterLines, aggregate, sortedAggs, newAgg, totalTokens, topModels, unitsText, deltaPill, tipRows, icon, help, segCtl, fmtTime, budgetOf, budgetLevel,
-  forecastOf, isCurrentMonth, periodTag,
+  forecastOf, isCurrentMonth, periodTag, copyBtn,
 } from '../core.js';
 import { table, dataBar } from '../table.js';
 import { heatmap, dayCols } from '../charts.js';
@@ -81,7 +81,7 @@ export function render(v) {
     </div>`;
   const max = Math.max(0, ...rows.map(r => r.cost));
   const cols = [
-    { key: 'desc', label: 'API Key', csvLabel: '描述', fmt: (x, r) => `<span class="sw" style="background:${DIMS.key.color(r.id)}"></span><b style="font-weight:600">${esc(x)}</b>${!r.hasDesc && r.id !== NONE_KEY ? '<span class="tag warn">无描述</span>' : ''}<span class="sub mono">${esc(r.apiKeyId || '—')}${r.masked ? ' · ' + esc(r.masked) : ''}</span>` },
+    { key: 'desc', label: 'API Key', csvLabel: '描述', fmt: (x, r) => `<span class="sw" style="background:${DIMS.key.color(r.id)}"></span><b style="font-weight:600">${esc(x)}</b>${!r.hasDesc && r.id !== NONE_KEY ? '<span class="tag warn">无描述</span>' : ''}<span class="sub mono">${esc(r.apiKeyId || '—')}${copyBtn(r.apiKeyId, '复制 Key ID')}${r.masked ? ' · ' + esc(r.masked) : ''}</span>` },
     { key: 'wsName', label: '业务空间', fmt: (x, r) => `${esc(x)}${r.wsId ? `<span class="sub mono">${esc(r.wsId)}</span>` : ''}` },
     { key: 'status', label: '状态', fmt: (x, r) => `<span class="state ${r.st}">${esc(x)}</span>${r.deletedAt ? `<span class="sub">${fmtTime(r.deletedAt, false)}</span>` : ''}` },
     { key: 'cost', label: `费用（${METRICS[ui.f.metric]}）`, align: 'r', fmt: x => dataBar(x, max), csv: r => r.cost.toFixed(6) },

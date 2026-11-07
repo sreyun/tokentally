@@ -37,6 +37,7 @@ async function aliyun(el) {
         <label class="field"><span>百炼 OpenAPI 地域</span><select class="inp" name="msRegion">${s.options.msRegions.map(r => opt(r, r, a.msRegion)).join('')}</select></label>
         <label class="field"><span>费用中心站点</span><select class="inp" name="bssSite">${opt('cn', '中国站 business.aliyuncs.com', a.bssSite)}${opt('intl', '国际站 business.ap-southeast-1.aliyuncs.com', a.bssSite)}</select></label>
         <label class="field full"><span>百炼产品代码 ProductCode</span><input class="inp mono" name="productCode" value="${esc(a.productCode)}" placeholder="留空自动识别（通常为 sfm）"></label>
+        <label class="field full" id="akConfirm" hidden><span>当前登录密码</span><input class="inp" name="confirmPassword" type="password" autocomplete="current-password" maxlength="256"><small class="hint">更换 AccessKey 属于敏感操作，需要再次验证身份</small></label>
         <div class="row full"><button class="btn primary" type="submit">保存配置</button><button class="btn" type="button" id="testSaved">测试已保存配置</button><button class="btn" type="button" id="testForm">用表单中的 Key 测试</button></div>
       </form>
       <div class="test-list" id="testOut" aria-live="polite"></div>
@@ -46,10 +47,29 @@ async function aliyun(el) {
       <pre class="code">${esc(JSON.stringify(POLICY, null, 2))}</pre>
       <p class="hint" style="margin:10px 0 0">建议为本系统创建专用 RAM 用户，只授予只读权限并定期轮换 AccessKey。更换 Key 后系统会立即重新同步。</p>
     </section></div>`;
-  $('#akForm', el).onsubmit = async e => {
+  const form = $('#akForm', el), confirmBox = $('#akConfirm', el), pw = form.elements.confirmPassword;
+  const akTouched = () => !!(form.elements.accessKeyId.value.trim() || form.elements.accessKeySecret.value.trim());
+  form.addEventListener('input', e => {
+    if (e.target === pw) { pw.classList.remove('invalid'); return; }
+    confirmBox.hidden = !akTouched();
+    if (confirmBox.hidden) pw.value = '';
+  });
+  form.onsubmit = async e => {
     e.preventDefault();
-    try { await http('PUT', '/api/admin/settings', { aliyun: Object.fromEntries(new FormData(e.target)) }); toast('已保存，AccessKey 已加密存储'); await app.refreshStatus(); aliyun(el); }
-    catch (ex) { toast('保存失败：' + ex.message, 'err', 4000); }
+    const body = Object.fromEntries(new FormData(form));
+    const changingAk = akTouched();
+    if (!changingAk) delete body.confirmPassword;
+    else if (!body.confirmPassword) { confirmBox.hidden = false; pw.classList.add('invalid'); pw.focus(); toast('更换 AccessKey 需输入当前登录密码', 'err'); return; }
+    const btn = form.querySelector('[type=submit]');
+    btn.disabled = true;
+    try {
+      await http('PUT', '/api/admin/settings', { aliyun: body });
+      toast(changingAk ? '已保存，AccessKey 已加密存储，正在重新同步' : '配置已保存');
+      await app.refreshStatus(); aliyun(el);
+    } catch (ex) {
+      if (ex.status === 403) { pw.value = ''; pw.classList.add('invalid'); pw.focus(); }
+      toast('保存失败：' + ex.message, 'err', 4000);
+    } finally { btn.disabled = false; }
   };
   const runTest = async body => {
     const out = $('#testOut', el);
@@ -148,8 +168,17 @@ function runSummary(r) {
 }
 
 /* ---------------- 预算管理 ---------------- */
+const ALERT_HINT = {
+  dingtalk: '钉钉群 → 群设置 → 机器人 → 添加“自定义”机器人，复制 Webhook。安全设置建议选择“加签”并把密钥填到右侧；如使用“自定义关键词”，请包含“预算”。',
+  feishu: '飞书群 → 设置 → 群机器人 → 添加“自定义机器人”，复制 Webhook。建议开启“签名校验”并把密钥填到右侧。',
+  wecom: '企业微信群 → 添加群机器人，复制 Webhook 地址。企业微信机器人不支持加签，地址即凭据，请妥善保管。',
+  generic: '以 POST JSON 发送 {event, title, level, items, text, link, sentAt}。填写密钥后附带 X-Alert-Timestamp 与 X-Alert-Signature 请求头（HMAC-SHA256，签名内容为 timestamp + "." + body）。',
+};
+const ALERT_RULES = { pct: '达到预警阈值', over: '超出预算', forecast: '预计月末超出总预算', keys: '包含 API Key 预算' };
+
 async function budgets(el) {
   const b = state.budgets;
+  const { alerts: al } = await http('GET', '/api/admin/settings');
   const lastCycle = addMonths(state.today.slice(0, 7), -1);
   const lastMonth = new Map();
   state.history.filter(l => l.date === lastCycle).forEach(l => lastMonth.set(l.apiKeyId || NONE_KEY, (lastMonth.get(l.apiKeyId || NONE_KEY) || 0) + l.pretax));
@@ -165,8 +194,30 @@ async function budgets(el) {
         <div class="row"><button class="btn primary" type="submit">保存全部预算</button></div>
       </form></section>
     <section class="panel c8"><div class="panel-h"><h3>API Key 月度预算</h3><span class="sub">留空表示不设预算</span>
-      <div class="actions"><button class="btn sm" id="fill" title="为未设置预算的 Key 按上月费用 × 1.2 填入建议值（取整到元）">按上月 ×1.2 填充空白</button><button class="btn sm" id="clear">清空</button></div></div>
-      <div id="bTbl"></div></section></div>`;
+      <div class="actions"><button class="btn sm" id="fill" title="为未设置预算的 Key 按上月费用 × 1.2 填入建议值（取整到元）">按上月 ×1.2 填充空白</button><button class="btn sm" id="clear">清空</button><button class="btn sm primary" id="saveB">保存</button></div></div>
+      <div id="bTbl"></div><div class="panel-foot" id="bDirty"></div></section>
+    <section class="panel c7"><div class="panel-h"><h3>预算告警通知</h3>${help('每次账单同步完成、预算或通知设置变更后自动检查本月预算；同一阈值（含预算金额）每个账期只通知一次，次月自动重置。Webhook 地址与加签密钥加密保存。')}
+      <div class="actions"><span class="state ${al.enabled ? 'on' : 'off'}">${al.enabled ? '已启用' : '未启用'}</span></div></div>
+      <form id="aForm" class="form-grid" autocomplete="off">
+        <label class="chk full"><input type="checkbox" name="enabled" ${al.enabled ? 'checked' : ''}> 启用预算告警通知</label>
+        <label class="field"><span>通知渠道</span><select class="inp" name="type">${Object.entries(al.types).map(([k, t]) => opt(k, t.label, al.type)).join('')}</select></label>
+        <label class="field" id="aSecretBox"><span>加签密钥（可选）</span><input class="inp mono" name="secret" type="password" autocomplete="new-password" spellcheck="false" maxlength="256" placeholder="${al.secretSet ? '已加密保存，留空表示不修改' : '未设置'}"></label>
+        <label class="field full"><span>Webhook 地址</span><input class="inp mono" name="webhook" spellcheck="false" maxlength="1000" placeholder="${al.webhookSet ? esc(al.webhookMasked) + '（已加密保存，留空表示不修改）' : ''}"></label>
+        <div class="field full"><span>通知条件</span><div class="row" style="gap:6px 18px">${Object.entries(ALERT_RULES).map(([k, l]) => `<label class="chk"><input type="checkbox" name="rule_${k}" ${al.rules[k] ? 'checked' : ''}> ${l}</label>`).join('')}</div></div>
+        <p class="hint full" id="aHint" style="margin:0"></p>
+        <div class="row full"><button class="btn primary" type="submit">保存通知设置</button><button class="btn" type="button" id="aTest">${icon('send')}发送测试消息</button>${al.secretSet ? '<label class="chk"><input type="checkbox" name="clearSecret"> 清除已保存的密钥</label>' : ''}${al.webhookSet ? '<label class="chk"><input type="checkbox" name="clearWebhook"> 移除通知渠道</label>' : ''}</div>
+      </form></section>
+    <section class="panel c5"><div class="panel-h"><h3>告警状态</h3><span class="sub">账期 ${esc(al.state.cycle)}</span></div>
+      <div class="kv">
+        <div><span>最近发送</span><b>${al.state.lastSentAt ? esc(fmtTime(al.state.lastSentAt)) : '尚未发送'}</b></div>
+        <div><span>最近一次失败</span><b class="${al.state.lastError ? 'bad-text' : ''}">${al.state.lastError ? esc(fmtTime(al.state.lastErrorAt)) + ' · ' + esc(al.state.lastError) : '无'}</b></div>
+      </div>
+      <h4 class="sec-h">当前满足条件、尚未通知</h4>
+      ${al.pending.length ? `<ul class="alert-list">${al.pending.map(t => `<li class="warn">${esc(t)}</li>`).join('')}</ul>` : `<p class="hint" style="margin:0">${b.monthly || Object.keys(b.keys || {}).length ? '暂无（未达到任何阈值，或已通知过）' : '尚未设置预算'}</p>`}
+      <h4 class="sec-h">最近通知记录</h4>
+      ${al.state.history.length ? `<ul class="alert-list">${al.state.history.map(h => `<li class="${h.level === 'bad' ? 'bad' : 'warn'}"><b>${esc(fmtTime(h.at))}</b> · ${h.items.map(esc).join('；')}</li>`).join('')}</ul>` : '<p class="hint" style="margin:0">暂无</p>'}
+    </section></div>`;
+  bindAlerts(el, al);
   table('budgets', $('#bTbl', el), {
     sort: 'last', pageSize: 0, maxHeight: '60vh', caption: 'API Key 预算',
     columns: [
@@ -177,18 +228,69 @@ async function budgets(el) {
       { key: 'budget', label: '月度预算（元）', sortable: false, fmt: (x, r) => `<input class="inp sm" type="number" min="0" step="0.01" data-bk="${esc(r.id)}" value="${esc(x)}" placeholder="不设置" style="width:130px" aria-label="${esc(r.desc)} 月度预算">` },
     ],
   }).setRows(rows);
-  $('#fill', el).onclick = () => el.querySelectorAll('[data-bk]').forEach(i => { if (!i.value) { const r = rows.find(x => x.id === i.dataset.bk); if (r && r.last > 0) i.value = Math.ceil(r.last * 1.2); } });
-  $('#clear', el).onclick = () => el.querySelectorAll('[data-bk]').forEach(i => { i.value = ''; });
+  // 输入值实时写回行数据：排序重绘表格时不会丢失尚未保存的输入
+  const markDirty = () => { app.dirty = true; $('#bDirty', el).innerHTML = '<span class="warn-text">有未保存的修改</span> · 按 Enter 或点击“保存”生效'; };
+  const syncInputs = () => el.querySelectorAll('[data-bk]').forEach(i => { const r = rows.find(x => x.id === i.dataset.bk); if (r) i.value = r.budget; });
+  $('#bTbl', el).addEventListener('input', e => { const i = e.target.closest('[data-bk]'); if (!i) return; const r = rows.find(x => x.id === i.dataset.bk); if (r) r.budget = i.value; markDirty(); });
+  $('#bForm', el).addEventListener('input', markDirty);
+  el.addEventListener('keydown', e => { if (e.key === 'Enter' && e.target.matches('[data-bk]')) { e.preventDefault(); $('#bForm', el).requestSubmit(); } });
+  $('#fill', el).onclick = () => { let n = 0; rows.forEach(r => { if (r.budget === '' && r.last > 0) { r.budget = Math.ceil(r.last * 1.2); n++; } }); syncInputs(); if (n) { markDirty(); toast(`已为 ${n} 个 Key 填入建议预算，确认后请保存`); } else toast('没有可填充的空白项（上月无费用或已设置）'); };
+  $('#clear', el).onclick = () => { if (!rows.some(r => r.budget !== '')) return; if (!confirm('清空所有 API Key 的预算输入？保存后生效。')) return; rows.forEach(r => { r.budget = ''; }); syncInputs(); markDirty(); };
+  $('#saveB', el).onclick = () => $('#bForm', el).requestSubmit();
   $('#bForm', el).onsubmit = async e => {
     e.preventDefault();
     const fd = new FormData(e.target);
     const keysB = {};
-    el.querySelectorAll('[data-bk]').forEach(i => { if (i.value !== '') keysB[i.dataset.bk] = i.value; });
+    rows.forEach(r => { if (r.budget !== '' && r.budget != null) keysB[r.id] = r.budget; });
     try {
       state.budgets = await http('PUT', '/api/admin/budgets', { monthly: fd.get('monthly'), alertPct: fd.get('alertPct'), keys: keysB });
-      toast(`预算已保存（${Object.keys(state.budgets.keys).length} 个 Key）`);
+      app.dirty = false;
+      $('#bDirty', el).textContent = '';
+      toast(`预算已保存（总预算${state.budgets.monthly != null ? ' ' + money(state.budgets.monthly) : '未设置'}，${Object.keys(state.budgets.keys).length} 个 Key）`);
       app.reload();
     } catch (ex) { toast('保存失败：' + ex.message, 'err', 4000); }
+  };
+}
+
+function bindAlerts(el, al) {
+  const form = $('#aForm', el);
+  const sync = () => {
+    const t = form.elements.type.value;
+    $('#aHint', el).textContent = ALERT_HINT[t] || '';
+    $('#aSecretBox', el).hidden = !al.types[t]?.sign;
+    form.elements.webhook.placeholder = al.webhookSet && t === al.type ? al.webhookMasked + '（已加密保存，留空表示不修改）' : al.types[t]?.host ? `https://${al.types[t].host}/…` : 'https://…';
+  };
+  sync();
+  form.elements.type.addEventListener('change', sync);
+  form.addEventListener('input', () => { app.dirty = true; });
+  const body = () => {
+    const fd = new FormData(form);
+    return {
+      enabled: fd.get('enabled') === 'on', type: fd.get('type'), webhook: fd.get('webhook') || '', secret: fd.get('secret') || '', clearSecret: fd.get('clearSecret') === 'on', clearWebhook: fd.get('clearWebhook') === 'on',
+      rules: Object.fromEntries(Object.keys(ALERT_RULES).map(k => [k, fd.get('rule_' + k) === 'on'])),
+    };
+  };
+  form.onsubmit = async e => {
+    e.preventDefault();
+    const data = body();
+    if (data.clearWebhook && !confirm('移除通知渠道后将停止发送预算告警（Webhook 地址与密钥会被删除），确定？')) return;
+    const btn = form.querySelector('[type=submit]');
+    btn.disabled = true;
+    try {
+      const out = await http('PUT', '/api/admin/alerts', data);
+      app.dirty = false;
+      const r = out.check || {};
+      toast(data.clearWebhook ? '已移除通知渠道' : !out.enabled ? '通知设置已保存（未启用）' : r.error ? '已保存，但告警发送失败：' + r.error : r.sent ? `已保存，并已发送 ${r.sent} 条当前满足条件的告警` : '通知设置已保存并已启用', r.error ? 'err' : '', 4500);
+      budgets(el);
+    } catch (ex) { toast('保存失败：' + ex.message, 'err', 4000); }
+    finally { btn.disabled = false; }
+  };
+  $('#aTest', el).onclick = async e => {
+    const btn = e.currentTarget, { type, webhook, secret } = body();
+    btn.disabled = true;
+    try { await http('POST', '/api/admin/alerts/test', { type, webhook, secret }); toast('测试消息已发送，请在群中查看'); }
+    catch (ex) { toast(ex.message, 'err', 5000); }
+    finally { btn.disabled = false; }
   };
 }
 

@@ -1,7 +1,7 @@
 /* 模型分析：模型费用、Token 结构、单位成本、计费维度、Key × 模型矩阵、模型详情抽屉 */
 import {
   $, esc, state, ui, app, money, moneyShort, compact, intFmt, pct, sum, uniq, metricVal, METRICS, NONE_KEY, DIMS, keyShort,
-  filterLines, aggregate, aggAll, sortedAggs, totalTokens, unitsText, deltaPill, tipRows, icon, help, segCtl, ioInfo, num, periodTag, WEEK, weekday,
+  filterLines, aggregate, aggAll, sortedAggs, totalTokens, unitsText, deltaPill, tipRows, icon, help, segCtl, ioInfo, num, periodTag, WEEK, weekday, copyBtn,
 } from '../core.js';
 import { columnChart, rankList, stackRank, segbar, legendHtml } from '../charts.js';
 import { table, dataBar } from '../table.js';
@@ -167,7 +167,7 @@ export function openModel(model) {
   const a = aggAll(lines), pa = aggAll(prevLines), tot = sum(filterLines(), metricVal);
   const t = totalTokens(a), pt = totalTokens(pa);
   $('#drawerTitle').textContent = model;
-  $('#drawerTags').innerHTML = `<span class="pill neutral">模型</span>`;
+  $('#drawerTags').innerHTML = `<span class="pill neutral">模型</span>${copyBtn(model, '复制模型名')}`;
   $('#drawerActions').innerHTML = `<button class="btn sm" data-dact="filter">按此模型筛选</button><button class="btn sm" data-dact="detail">账单明细</button>`;
   $('#drawerActions').onclick = e => {
     const b = e.target.closest('[data-dact]'); if (!b) return;
@@ -176,16 +176,17 @@ export function openModel(model) {
     else app.setFilter({ model }, '#/detail');
   };
   $('#drawerBody').innerHTML = `
-    <div class="kpi-row" style="margin:0">
+    <div class="kpi-wrap" style="margin:0"><div class="kpi-row n4">
       ${tile('wallet', `费用 · ${METRICS[ui.f.metric]}`, money(a.cost), deltaPill(a.cost, pa.cost), state.compareLabel, `占全部 ${pct(a.cost, tot)}`)}
       ${tile('token', 'Token', compact(t), deltaPill(t, pt, { neutral: true }), state.compareLabel, `输入 ${compact(a.tIn)} · 输出 ${compact(a.tOut)}`)}
       ${tile('unit', '每百万 Token', t ? money(a.cost / t * 1e6) : '—', t && pt ? deltaPill(a.cost / t, pa.cost / pt) : '', state.compareLabel, '费用 ÷ Token × 10⁶')}
       ${tile('cache', '缓存命中率', a.tIn ? pct(a.tCache, a.tIn) : '—', a.tIn && pa.tIn ? deltaPill(a.tCache / a.tIn, pa.tCache / pa.tIn, { pp: true, goodWhenUp: true }) : '', state.compareLabel, `${a.keys.size} 个 Key 使用`)}
-    </div>
+    </div></div>
     <section><h3>每日费用（按 API Key）</h3><div class="legend" id="dmLegend"></div><div class="chart" id="dmDaily"></div></section>
     <section><h3>使用该模型的 API Key</h3><div id="dmKeys"></div></section>
     <section><h3>计费项</h3><div id="dmItems"></div></section>`;
   if (!d.open) d.showModal();
+  d.querySelector('.dlg-b').scrollTop = 0;
   const days = uniq(daily.map(l => l.date)).sort();
   const ranked = sortedAggs(aggregate(daily, DIMS.key.of)).map(x => x.key);
   const colored = ranked.filter(k => DIMS.key.color(k) !== 'var(--other)'), others = ranked.filter(k => !colored.includes(k));

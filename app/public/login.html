@@ -32,6 +32,7 @@
         <label class="field"><span>密码</span>
           <span class="pw-wrap"><input class="inp" id="password" name="password" type="password" autocomplete="current-password" required maxlength="256">
           <button type="button" class="btn ghost icon sm" id="togglePw" aria-label="显示密码" title="显示/隐藏密码"><svg class="ico" viewBox="0 0 24 24"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg></button></span></label>
+        <div class="hint warn-text" id="caps" hidden>大写锁定已开启</div>
         <div class="err" id="err" role="alert" aria-live="assertive"></div>
         <button class="btn primary" type="submit" id="btnLogin">登录</button>
       </form>

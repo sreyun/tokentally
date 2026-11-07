@@ -104,6 +104,7 @@ export class SyncService {
         const status = detail.warnings?.length ? 'partial' : 'success';
         this.store.finishRun(runId, status, detail, detail.warnings?.length ? detail.warnings.slice(0, 5).join('；') : null, client.calls);
         this.log(`同步[${kind}] ${status} ${Date.now() - t0}ms ${client.calls} 次调用`);
+        if (kind === 'bills') Promise.resolve().then(() => this.onBillsSynced?.()).catch(e => this.log('账单同步后处理失败：' + e.message));
       } catch (e) {
         this.store.finishRun(runId, 'error', null, String(e.message || e).slice(0, 500), client?.calls ?? 0);
         this.log(`同步[${kind}] 失败: ${e.message}`);

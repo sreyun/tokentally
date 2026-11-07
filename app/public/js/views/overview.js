@@ -200,6 +200,7 @@ function drawTrend(daily, days, avgDay, fc) {
     xs, series, cell: (x, id) => cell.get(x + "|" + id) || 0, height: 340, avg: monthly ? null : avgDay,
     xLabel: x => (monthly ? x.slice(2) : x.slice(5)), tipTitle: x => (monthly ? `${x} 账期` : `${x}（周${WEEK[weekday(x)]}）`), weekend: !monthly,
     aria: monthly ? '月度费用趋势' : '每日费用趋势', empty: monthly ? '暂无历史账期数据（可在系统管理中调大回溯月数）' : '暂无按日账单数据',
-    onX: monthly ? x => { app.setPeriod({ mode: 'month', cycle: x }); } : null,
+    onX: monthly ? x => app.setPeriod({ mode: 'month', cycle: x }) : x => app.openDay(x),
+    clickHint: monthly ? '点击切换到该账期' : '点击查看当日明细',
   });
 }

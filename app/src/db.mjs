@@ -390,6 +390,23 @@ export class Store {
     for (const r of recent) out.set(r.id || '', { ...(out.get(r.id || '') || { apiKeyId: r.id || '', lastDay: null }), c7: r.c7 || 0, c30: r.c30 || 0, days30: r.days30 || 0 });
     return [...out.values()];
   }
+  /** 预算告警用：指定账期的月账单按 Key 汇总，以及日账单按 Key×日汇总（应付金额） */
+  budgetUsage(cycle) {
+    const month = this.q("SELECT COALESCE(api_key_id, '') AS id, SUM(pretax) AS cost FROM bill_lines WHERE granularity = 'M' AND period = ? GROUP BY COALESCE(api_key_id, '')").all(cycle);
+    const daily = this.q("SELECT period AS day, SUM(pretax) AS cost FROM bill_lines WHERE granularity = 'D' AND period >= ? AND period <= ? GROUP BY period").all(cycle + '-01', cycle + '-31');
+    return { month, daily };
+  }
+  /** 数据版本指纹：账单、对账、Key/空间元数据、预算任一变化都会改变，用于 /api/data 的 ETag */
+  dataVersion() {
+    const r = this.q(`SELECT
+      (SELECT COALESCE(MAX(synced_at), 0) || ':' || COUNT(*) FROM bill_periods) AS b,
+      (SELECT COALESCE(MAX(synced_at), 0) FROM bill_cycles) AS c,
+      (SELECT COALESCE(MAX(synced_at), 0) FROM ms_overview) AS m,
+      (SELECT COALESCE(MAX(updated_at), 0) || ':' || COALESCE(MAX(last_seen), 0) || ':' || COUNT(*) FROM api_keys) AS k,
+      (SELECT COALESCE(MAX(updated_at), 0) || ':' || COALESCE(MAX(last_seen), 0) || ':' || COUNT(*) FROM workspaces) AS w,
+      (SELECT COALESCE(MAX(updated_at), 0) FROM settings WHERE k = 'budgets') AS s`).get();
+    return [r.b, r.c, r.m, r.k, r.w, r.s].join('|');
+  }
   dataRange() {
     const d = this.q("SELECT MIN(period) AS min, MAX(period) AS max, COUNT(*) AS n FROM bill_lines WHERE granularity = 'D'").get();
     return { minDay: d.min, maxDay: d.max, dailyLines: d.n, cycles: this.listCycles() };

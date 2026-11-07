@@ -11,10 +11,11 @@ import crypto from 'node:crypto';
 import { config } from './config.mjs';
 import { Store } from './db.mjs';
 import { SyncService, todayIn, addDays, addMonths, isCycleFinal } from './sync.mjs';
+import { AlertService, ALERT_TYPES, validateWebhook } from './alerts.mjs';
 import { selfTest, AliyunClient, explainAliyunError, callLog, MS_REGIONS, BSS_ENDPOINTS } from './aliyun.mjs';
 import { loadMasterKey, hashPassword, verifyPassword, burnPasswordCheck, checkPasswordPolicy, randomPassword, maskId, sha256 } from './crypto.mjs';
 
-const VERSION = '1.0.0';
+const VERSION = '1.1.0';
 const log = (...a) => console.log(new Date().toISOString(), ...a);
 
 if (process.argv.includes('--selftest')) {
@@ -61,6 +62,8 @@ if (master.source === 'file') log('提示：未设置 APP_MASTER_KEY，主密钥
 if (secretState() === 'undecryptable') log('警告：已保存的 AccessKey 无法用当前主密钥解密，请在“系统管理”中重新配置。');
 
 const sync = new SyncService({ store, tz: config.billTz, log });
+const alerts = new AlertService({ store, tz: config.billTz, log, publicUrl: config.publicUrl, allowPrivate: config.alertAllowPrivate });
+sync.onBillsSynced = () => alerts.check('bills');
 sync.start();
 setInterval(() => store.purgeSessions(config.sessionIdleMinutes * 60_000), 10 * 60_000).unref();
 setInterval(() => store.purgeOld(), 24 * 3600_000).unref();
@@ -118,6 +121,7 @@ function securityHeaders(req, res) {
   res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=(), payment=(), usb=()');
   res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
   res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
+  res.setHeader('X-Robots-Tag', 'noindex, nofollow, noarchive');
   if (isHttps(req)) res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
 }
 
@@ -287,6 +291,7 @@ function adminSettingsOut() {
   return {
     aliyun: { ...store.aliyunSettings(), accessKeyId: maskId(id), secretState: secretState() },
     sync: store.syncSettings(),
+    alerts: alerts.out(),
     options: { msRegions: MS_REGIONS, bssSites: Object.keys(BSS_ENDPOINTS) },
     security: {
       masterKeySource: master.source, encryption: 'AES-256-GCM', passwordHash: 'scrypt (N=32768, r=8, p=1)',
@@ -294,6 +299,24 @@ function adminSettingsOut() {
       cookieSecure: config.cookieSecure, allowCidrs: config.allowCidrs, loginMaxFailures: config.login.maxFailuresPerUser, lockMinutes: config.login.lockMinutes,
     },
   };
+}
+
+/* 敏感操作二次验证：校验当前登录密码，连续错误达到上限后强制退出该用户全部会话 */
+const pwFails = new Map(); // userId -> 连续输错次数
+async function confirmCurrentPassword(ctx, password, action, msg) {
+  const u = store.userById(ctx.user.id);
+  if (u && (await verifyPassword(String(password || ''), u.pass_hash))) { pwFails.delete(u.id); return u; }
+  const max = config.login.maxFailuresPerUser;
+  const n = (pwFails.get(ctx.user.id) || 0) + 1;
+  if (n >= max) {
+    pwFails.delete(ctx.user.id);
+    store.deleteUserSessions(ctx.user.id);
+    store.audit(ctx.user.username, ctx.ip, action + '.lock', `当前密码连续错误 ${n} 次，已强制退出全部会话`);
+    throw new HttpError(401, '密码错误次数过多，已强制退出登录', 'Unauthorized');
+  }
+  pwFails.set(ctx.user.id, n);
+  store.audit(ctx.user.username, ctx.ip, action + '.fail', `当前密码错误（${n}/${max}）`);
+  throw new HttpError(403, `${msg}（还可尝试 ${max - n} 次）`);
 }
 
 const AK_ID_RE = /^[A-Za-z0-9]{12,64}$/;
@@ -310,8 +333,6 @@ async function putSettings(body, ctx) {
       bssSite: BSS_ENDPOINTS[a.bssSite] ? a.bssSite : cur.bssSite,
       productCode: typeof a.productCode === 'string' ? a.productCode.replace(/[^A-Za-z0-9_,\-]/g, '').slice(0, 100) : cur.productCode,
     };
-    store.setSetting('aliyun', next);
-    for (const k of Object.keys(next)) if (next[k] !== cur[k]) changed.push(`aliyun.${k}`);
     const id = typeof a.accessKeyId === 'string' ? a.accessKeyId.trim() : '';
     const secret = typeof a.accessKeySecret === 'string' ? a.accessKeySecret.trim() : '';
     if (id || secret) {
@@ -319,6 +340,13 @@ async function putSettings(body, ctx) {
       if (secret && !AK_SECRET_RE.test(secret)) throw new HttpError(400, 'AccessKey Secret 格式不正确');
       if (id && !secret) throw new HttpError(400, '更换 AccessKey ID 时必须同时填写 AccessKey Secret');
       if (!id && secret && secretState() !== 'ok') throw new HttpError(400, '请同时填写 AccessKey ID');
+      // 敏感操作二次验证：更换 AccessKey 须输入当前登录密码
+      if (!a.confirmPassword) throw new HttpError(400, '更换 AccessKey 需要输入当前登录密码确认');
+      await confirmCurrentPassword(ctx, a.confirmPassword, 'aliyun.ak.update', '当前登录密码不正确');
+    }
+    store.setSetting('aliyun', next);
+    for (const k of Object.keys(next)) if (next[k] !== cur[k]) changed.push(`aliyun.${k}`);
+    if (id || secret) {
       if (id) store.setSecret('aliyun.accessKeyId', id);
       store.setSecret('aliyun.accessKeySecret', secret);
       changed.push('aliyun.accessKey');
@@ -438,11 +466,7 @@ route('GET', '/api/me', async (req, res, ctx) => json(req, res, 200, {
 
 route('POST', '/api/me/password', async (req, res, ctx) => {
   const { oldPassword, newPassword } = await readJson(req, 4096);
-  const u = store.userById(ctx.user.id);
-  if (!(await verifyPassword(String(oldPassword || ''), u.pass_hash))) {
-    store.audit(u.username, ctx.ip, 'password.change.fail', '原密码错误');
-    throw new HttpError(400, '原密码不正确');
-  }
+  const u = await confirmCurrentPassword(ctx, oldPassword, 'password.change', '原密码不正确');
   const err = checkPasswordPolicy(newPassword, u.username);
   if (err) throw new HttpError(400, err);
   if (oldPassword === newPassword) throw new HttpError(400, '新密码不能与原密码相同');
@@ -453,7 +477,13 @@ route('POST', '/api/me/password', async (req, res, ctx) => {
 }, { allowMustChange: true });
 
 route('GET', '/api/status', async (req, res) => json(req, res, 200, statusOut()));
-route('GET', '/api/data', async (req, res, ctx) => json(req, res, 200, getData(ctx.url)));
+/* 分析数据：按“数据版本 + 日期 + 查询参数”生成 ETag，数据未变化时返回 304，避免轮询刷新时重复下载 */
+route('GET', '/api/data', async (req, res, ctx) => {
+  const etag = 'W/"' + sha256([VERSION, store.dataVersion(), todayIn(config.billTz), ctx.url.search].join('|')).slice(0, 32) + '"';
+  const headers = { 'Cache-Control': 'private, no-cache', ETag: etag };
+  if (req.headers['if-none-match'] === etag) { res.writeHead(304, headers); return res.end(); }
+  return send(req, res, 200, JSON.stringify(getData(ctx.url)), 'application/json; charset=utf-8', headers);
+});
 route('GET', '/api/changes', async (req, res) => json(req, res, 200, { changes: store.listChanges(2000) }));
 
 route('GET', '/api/admin/settings', async (req, res) => json(req, res, 200, adminSettingsOut()), { admin: true });
@@ -489,7 +519,63 @@ route('PUT', '/api/admin/budgets', async (req, res, ctx) => {
   const next = { monthly, alertPct, keys };
   store.setSetting('budgets', next);
   store.audit(ctx.user.username, ctx.ip, 'budgets.update', { monthly, alertPct, keyBudgets: Object.keys(keys).length });
+  alerts.check('budgets');
   return json(req, res, 200, next);
+}, { admin: true });
+
+/* 预算告警通知渠道 */
+route('PUT', '/api/admin/alerts', async (req, res, ctx) => {
+  const b = await readJson(req, 8192);
+  const cur = alerts.settings();
+  const type = ALERT_TYPES[b.type] ? b.type : cur.type;
+  const rules = Object.fromEntries(Object.keys(cur.rules).map(k => [k, b.rules?.[k] == null ? cur.rules[k] : !!b.rules[k]]));
+  const webhookIn = typeof b.webhook === 'string' ? b.webhook.trim() : '';
+  const secretIn = typeof b.secret === 'string' ? b.secret.trim() : '';
+  const sec = alerts.secrets();
+  const clearAll = !!b.clearWebhook;
+  let webhook = '';
+  if (webhookIn && !clearAll) {
+    try { webhook = validateWebhook(type, webhookIn, { allowPrivate: config.alertAllowPrivate }); } catch (e) { throw new HttpError(400, e.message); }
+  } else if (sec.webhook && !clearAll && type !== cur.type) {
+    // 不同渠道的地址与密钥不能混用：更换类型必须同时填写新地址
+    throw new HttpError(400, '已更换通知渠道类型，请同时填写对应的 Webhook 地址');
+  }
+  if (b.enabled && !clearAll && !webhook && !sec.webhook) throw new HttpError(400, '启用通知前请填写 Webhook 地址');
+  if (secretIn.length > 256) throw new HttpError(400, '加签密钥过长');
+  const fields = [];
+  if (clearAll) {
+    store.setSecret('alerts.webhook', ''); store.setSecret('alerts.secret', ''); fields.push('webhook.clear');
+  } else {
+    if (webhook) { store.setSecret('alerts.webhook', webhook); fields.push('webhook'); }
+    if (b.clearSecret) { store.setSecret('alerts.secret', ''); fields.push('secret.clear'); }
+    else if (secretIn) { store.setSecret('alerts.secret', secretIn); fields.push('secret'); }
+    else if (webhook && webhook !== sec.webhook && sec.secret) { store.setSecret('alerts.secret', ''); fields.push('secret.reset'); } // 换了机器人，旧密钥不再适用
+  }
+  const next = { enabled: !!b.enabled && !clearAll, type, rules };
+  store.setSetting('alerts', next);
+  store.audit(ctx.user.username, ctx.ip, 'alert.update', { ...next, fields });
+  const check = next.enabled ? await alerts.check('config') : null;
+  return json(req, res, 200, { ...alerts.out(), check });
+}, { admin: true });
+route('POST', '/api/admin/alerts/test', async (req, res, ctx) => {
+  const b = await readJson(req, 8192);
+  const saved = alerts.settings(), sec = alerts.secrets();
+  const type = ALERT_TYPES[b.type] ? b.type : saved.type;
+  const webhookIn = typeof b.webhook === 'string' ? b.webhook.trim() : '';
+  if (!webhookIn && !sec.webhook) throw new HttpError(400, '请先填写 Webhook 地址');
+  if (!webhookIn && type !== saved.type) throw new HttpError(400, '已更换通知渠道类型，请填写对应的 Webhook 地址后再测试');
+  let webhook;
+  try { webhook = validateWebhook(type, webhookIn || sec.webhook, { allowPrivate: config.alertAllowPrivate }); }
+  catch (e) { throw new HttpError(400, e.message); }
+  const secretIn = typeof b.secret === 'string' ? b.secret.trim().slice(0, 256) : '';
+  const secret = secretIn || (webhook === sec.webhook ? sec.secret : '');
+  try { await alerts.test(type, { webhook, secret }); }
+  catch (e) {
+    store.audit(ctx.user.username, ctx.ip, 'alert.test.fail', { type, error: String(e.message).slice(0, 200) });
+    throw new HttpError(502, '发送失败：' + e.message);
+  }
+  store.audit(ctx.user.username, ctx.ip, 'alert.test', { type });
+  return json(req, res, 200, { ok: true });
 }, { admin: true });
 route('GET', '/api/admin/runs', async (req, res) => json(req, res, 200, { runs: store.listRuns(200) }), { admin: true });
 route('GET', '/api/admin/calls', async (req, res) => json(req, res, 200, { calls: callLog }), { admin: true });

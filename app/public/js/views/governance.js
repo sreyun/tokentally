@@ -47,7 +47,12 @@ export function computeFindings() {
       const broad = (k.authType === 'All' || k.allowAllModels) && ipOpen(k);
       if (broad) add('broad', `${k.authType === 'All' ? '授权类型：全部' : '可访问全部模型'}，IP ${(k.accessIps || []).length ? k.accessIps.join(', ') : '不限'}`);
       else if (ipOpen(k)) add('open_ip', `IP 白名单：${(k.accessIps || []).join(', ') || '未配置'}`);
-      if (!act?.lastDay || act.lastDay < idleBefore) add('idle', act?.lastDay ? `最近消费 ${act.lastDay}` : '同步范围内无消费记录');
+      // 创建不足 30 天的新 Key 不计入闲置（尚未到观察期）
+      const ageDays = k.gmtCreate ? Math.floor((Date.now() - Number(k.gmtCreate)) / 864e5) : Infinity;
+      if (ageDays >= 30 && (!act?.lastDay || act.lastDay < idleBefore)) {
+        const created = Number.isFinite(ageDays) ? `，创建于 ${fmtTime(k.gmtCreate, false)}` : '';
+        add('idle', (act?.lastDay ? `最近消费 ${act.lastDay}（${Math.round((Date.parse(state.today) - Date.parse(act.lastDay)) / 864e5)} 天前）` : '同步范围内无消费记录') + created);
+      }
       if (!k.workspaceId) add('no_ws', '未归属任何业务空间');
     }
   }

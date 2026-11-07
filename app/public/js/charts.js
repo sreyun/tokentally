@@ -32,7 +32,7 @@ export function sparkline(values, color = 'var(--s1)') {
 }
 
 /** 堆叠柱状图 */
-export function columnChart(el, { xs, series, cell, avg = null, height = 260, xLabel = x => x, tipTitle = x => x, aria = '', empty = '暂无数据', weekend = true, onX }) {
+export function columnChart(el, { xs, series, cell, avg = null, height = 260, xLabel = x => x, tipTitle = x => x, aria = '', empty = '暂无数据', weekend = true, onX, clickHint = '' }) {
   if (!xs.length) { el.innerHTML = `<div class="nodata">${esc(empty)}</div>`; return; }
   const W = width(el), H = height;
   const m = { l: 60, r: 10, t: 16, b: 26 }, pw = W - m.l - m.r, ph = H - m.t - m.b;
@@ -69,11 +69,14 @@ export function columnChart(el, { xs, series, cell, avg = null, height = 260, xL
   xs.forEach((x, i) => {
     if (i % every === 0) body += `<text x="${m.l + band * i + band / 2}" y="${H - 7}" text-anchor="middle">${esc(xLabel(x))}</text>`;
     const rows = series.map(sr => [sr.label, cell(x, sr.id), sr.color]).filter(r => r[1] > 0).sort((a, b) => b[1] - a[1]);
-    const tip = tipRows(`${tipTitle(x)} · 合计 ${money(totals[i])}`, rows.slice(0, 10).map(r => [r[0], money(r[1]), r[2]]).concat(rows.length > 10 ? [[`其余 ${rows.length - 10} 项`, money(sum(rows.slice(10), r => r[1])), '']] : []));
-    body += `<rect class="hit" ${onX ? 'style="cursor:pointer"' : ''} data-x="${esc(x)}" x="${m.l + band * i}" y="${m.t}" width="${band}" height="${ph}" data-tip="${esc(tip)}"/>`;
+    const tip = tipRows(`${tipTitle(x)} · 合计 ${money(totals[i])}`, rows.slice(0, 10).map(r => [r[0], money(r[1]), r[2]]).concat(rows.length > 10 ? [[`其余 ${rows.length - 10} 项`, money(sum(rows.slice(10), r => r[1])), '']] : []))
+      + (onX && clickHint && totals[i] > 0 ? `<div class="tip-hint">${esc(clickHint)}</div>` : '');
+    body += `<rect class="hit" ${onX && totals[i] > 0 ? 'style="cursor:pointer" tabindex="0" role="button"' : ''} aria-label="${esc(`${tipTitle(x)} ${money(totals[i])}`)}" data-x="${esc(x)}" x="${m.l + band * i}" y="${m.t}" width="${band}" height="${ph}" data-tip="${esc(tip)}"/>`;
   });
   el.innerHTML = `<svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" role="img" aria-label="${esc(aria)}"><defs>${defs}</defs>${body}</svg>`;
-  el.onclick = onX ? e => { const r = e.target.closest('[data-x]'); if (r) onX(r.dataset.x); } : null;
+  const pick = e => { const r = e.target.closest('[data-x]'); return r && totals[xs.indexOf(r.dataset.x)] > 0 ? r.dataset.x : null; };
+  el.onclick = onX ? e => { const x = pick(e); if (x) onX(x); } : null;
+  el.onkeydown = onX ? e => { if (e.key === 'Enter' || e.key === ' ') { const x = pick(e); if (x) { e.preventDefault(); onX(x); } } } : null;
 }
 
 /** 多折线图（单一 Y 轴） */
@@ -124,7 +127,7 @@ export function rankList(el, items, { fmt = v => money(v), limit = 10, onClick, 
   const shown = items.slice(0, limit);
   el.innerHTML = `<ol class="rank">${shown.map((it, i) => `<li class="${onClick ? 'clickable' : ''}" data-idx="${i}" ${onClick ? 'tabindex="0" role="button"' : ''} ${it.tip ? `data-tip="${esc(it.tip)}"` : ''}>
       <span class="rank-no">${i + 1}</span>
-      <div><div class="rank-top"><span class="rank-label">${esc(it.label)}${it.sub ? `<small>${esc(it.sub)}</small>` : ''}</span><span class="rank-val">${esc(fmt(it.value))}</span></div>
+      <div><div class="rank-top"><span class="rank-label" title="${esc(it.label + (it.sub ? " · " + it.sub : ""))}">${esc(it.label)}${it.sub ? `<small>${esc(it.sub)}</small>` : ''}</span><span class="rank-val">${esc(fmt(it.value))}</span></div>
       <div class="rank-bot"><span class="rank-bar"><i style="width:${Math.max(1, it.value / max * 100).toFixed(1)}%;background:${it.color || color || 'var(--s1)'}"></i></span>
       <span class="rank-meta">${tot ? pct(it.value, tot) : ''}${showDelta ? ' ' + deltaPill(it.value, it.prev ?? 0, { goodWhenUp }) : ''}${it.extra ? ' ' + it.extra : ''}</span></div></div></li>`).join('')}</ol>
     ${items.length > limit ? `<div class="more">另有 ${items.length - limit} 项未显示</div>` : ''}`;
@@ -141,7 +144,7 @@ export function divergingList(el, items, { limit = 10, onClick } = {}) {
     const w = Math.max(1.5, Math.abs(it.delta) / max * 100).toFixed(1);
     const tip = tipRows(it.label, [['本期', money(it.cur)], ['上期', money(it.prev)], ['变动', (it.delta > 0 ? '+' : '') + money(it.delta)], ['变化率', it.prev ? pct(it.delta, it.prev) : '新增']]);
     return `<li class="${onClick ? 'clickable' : ''}" data-idx="${i}" ${onClick ? 'tabindex="0" role="button"' : ''} data-tip="${esc(tip)}"><span class="rank-no">${i + 1}</span>
-      <div><div class="rank-top"><span class="rank-label">${esc(it.label)}${it.sub ? `<small>${esc(it.sub)}</small>` : ''}</span><span class="rank-val ${it.delta > 0 ? 'bad-text' : 'ok-text'}">${it.delta > 0 ? '+' : '−'}${esc(money(Math.abs(it.delta)))}</span></div>
+      <div><div class="rank-top"><span class="rank-label" title="${esc(it.label + (it.sub ? " · " + it.sub : ""))}">${esc(it.label)}${it.sub ? `<small>${esc(it.sub)}</small>` : ''}</span><span class="rank-val ${it.delta > 0 ? 'bad-text' : 'ok-text'}">${it.delta > 0 ? '+' : '−'}${esc(money(Math.abs(it.delta)))}</span></div>
       <div class="rank-bot"><span class="dv-bar"><span class="neg">${it.delta < 0 ? `<i style="width:${w}%"></i>` : ''}</span><span class="pos">${it.delta > 0 ? `<i style="width:${w}%"></i>` : ''}</span></span>
       <span class="rank-meta">${deltaPill(it.cur, it.prev)}</span></div></div></li>`;
   }).join('')}</ol>`;
@@ -158,7 +161,7 @@ export function stackRank(el, rows, parts, { fmt = compact, limit = 10, onClick,
     const tot = sum(r.parts, v => v);
     const tip = tipRows(r.label, parts.map((p, j) => [p.label, `${intFmt(r.parts[j])}（${pct(r.parts[j], tot)}）`, p.color]).concat([['合计', intFmt(tot), '']]));
     return `<li class="${onClick ? 'clickable' : ''}" data-idx="${i}" ${onClick ? 'tabindex="0" role="button"' : ''} data-tip="${esc(tip)}"><span class="rank-no">${i + 1}</span>
-      <div><div class="rank-top"><span class="rank-label">${esc(r.label)}</span><span class="rank-val">${esc(fmt(tot))}</span></div>
+      <div><div class="rank-top"><span class="rank-label" title="${esc(r.label)}">${esc(r.label)}</span><span class="rank-val">${esc(fmt(tot))}</span></div>
       <div class="rank-bot"><span class="rank-bar"><span class="stack" style="width:${Math.max(1, tot / max * 100).toFixed(1)}%">${r.parts.map((v, j) => (v > 0 ? `<i style="flex:${v} 1 0;background:${parts[j].color}"></i>` : '')).join('')}</span></span>
       <span class="rank-meta">${meta ? meta(r) : ''}</span></div></div></li>`;
   }).join('')}</ol>${rows.length > limit ? `<div class="more">另有 ${rows.length - limit} 项未显示</div>` : ''}`;
@@ -172,7 +175,7 @@ export function segbar(parts, { thin = false } = {}) {
   const darkText = c => /--s4\b/.test(c);
   return `<div class="segbar ${thin ? 'thin' : ''}" role="img" aria-label="${esc(parts.filter(p => p.value > 0).map(p => `${p.label} ${pct(p.value, total)}`).join('，'))}">${parts.filter(p => p.value > 0).map(p => {
     const share = p.value / total * 100;
-    return `<div style="flex:${p.value} 1 0;background:${p.color}" class="${darkText(p.color) ? 'dk' : ''}" data-tip="${esc(tipRows(p.label, [['金额', money(p.value)], ['占比', share.toFixed(1) + '%']]))}">${!thin && share >= 10 ? share.toFixed(0) + '%' : ''}</div>`;
+    return `<div style="flex:${p.value} 1 0;background:${p.color}" class="${darkText(p.color) ? 'dk' : ''}" data-tip="${esc(tipRows(p.label, [['金额', money(p.value)], ['占比', share.toFixed(1) + '%']]))}">${!thin && share >= 10 ? `<span>${share.toFixed(0)}%</span>` : ''}</div>`;
   }).join('')}</div>`;
 }
 export const legendList = (parts, total, clickable = false) => `<div class="lgl">${parts.filter(p => p.value > 0).map((p, i) => `<div class="li ${clickable && p.id != null && p.id !== '__other' ? 'clickable' : ''}" data-pid="${esc(p.id ?? '')}" ${clickable ? 'tabindex="0"' : ''}><i style="background:${p.color}"></i><span title="${esc(p.label)}">${esc(p.label)}</span><b>${esc(money(p.value))}</b><em>${pct(p.value, total)}</em></div>`).join('')}</div>`;

@@ -1,5 +1,5 @@
 /* 账单明细：逐条账单（与阿里云实例账单一一对应），用于核对与导出 */
-import { $, esc, state, ui, money, moneyFine, intFmt, numFmt, sum, num, METRICS, keyShort, keyDesc, wsName, channelLabel, filterLines, aggAll, totalTokens, icon, help, segCtl, periodTag, DIMS, NONE_KEY, app } from '../core.js';
+import { $, esc, state, ui, money, moneyFine, intFmt, numFmt, sum, num, METRICS, keyShort, keyDesc, wsName, channelLabel, filterLines, aggAll, totalTokens, icon, help, segCtl, periodTag, DIMS, NONE_KEY, app, copyBtn } from '../core.js';
 import { table } from '../table.js';
 
 export function render(v) {
@@ -37,7 +37,7 @@ export function render(v) {
       { key: 'discountAll', label: '优惠与券', align: 'r', fmt: x => moneyFine(x) },
       { key: 'pretax', label: '应付金额', align: 'r', fmt: x => `<b style="font-weight:600">${moneyFine(x)}</b>` },
       { key: 'stopFlag', label: '用完即停', fmt: x => (x === '1' ? '已开启' : x === '0' ? '未开启' : '-') },
-      { key: 'instanceId', label: '实例ID', cls: 'mono' },
+      { key: 'instanceId', label: '实例ID', cls: 'mono', fmt: x => (x ? `${esc(x)}${copyBtn(x, '复制实例ID')}` : '—') },
     ],
     csvExtra: [
       { label: 'API Key ID', val: r => r.apiKeyId }, { label: '业务空间ID', val: r => r.workspaceId }, { label: '计费项编码', val: r => r.io }, { label: '渠道编码', val: r => r.channel },

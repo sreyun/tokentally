@@ -86,7 +86,12 @@ export const I = {
   plug: '<path d="M9 2v6M15 2v6M6 8h12v4a6 6 0 0 1-12 0zM12 18v4"/>',
   sync: '<path d="M21 12a9 9 0 0 1-15.5 6.2L3 16M3 12a9 9 0 0 1 15.5-6.2L21 8"/><path d="M21 3v5h-5M3 21v-5h5"/>',
   terminal: '<path d="M4 17l6-5-6-5M12 19h8"/>',
+  send: '<path d="M22 2L11 13M22 2l-7 20-4-9-9-4z"/>',
+  copy: '<rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1"/>',
+  chevL: '<path d="M15 6l-6 6 6 6"/>', chevR: '<path d="M9 6l6 6-6 6"/>',
 };
+/** 复制按钮（行内小图标），点击由 main.js 统一处理 */
+export const copyBtn = (text, label = '复制') => (text ? `<button type="button" class="copy" data-copy="${esc(text)}" title="${esc(label)}：${esc(text)}" aria-label="${esc(label)} ${esc(text)}">${icon('copy')}</button>` : '');
 export const icon = (n, cls = 'ico') => `<svg class="${cls}" viewBox="0 0 24 24" aria-hidden="true">${I[n] || ''}</svg>`;
 
 /* =========================================================================
@@ -124,7 +129,13 @@ export async function http(method, url, body) {
   if (body !== undefined) headers['Content-Type'] = 'application/json';
   if (method !== 'GET') headers['X-CSRF-Token'] = state.csrf;
   const res = await fetch(url, { method, headers, body: body !== undefined ? JSON.stringify(body) : undefined, credentials: 'same-origin' });
-  if (res.status === 401) { location.href = '/login'; throw new Error('未登录或会话已过期'); }
+  if (res.status === 401) {
+    // 把原因（会话过期 / 被强制退出）带到登录页显示
+    const j = await res.json().catch(() => ({}));
+    try { if (state.me) sessionStorage.setItem('bc.loginMsg', j.error || '会话已过期，请重新登录'); } catch { /* ignore */ }
+    location.href = '/login' + location.hash;
+    throw new Error(j.error || '未登录或会话已过期');
+  }
   const j = await res.json().catch(() => ({}));
   if (!res.ok) throw Object.assign(new Error(j.error || res.statusText), { status: res.status, code: j.code });
   return j;
@@ -271,7 +282,18 @@ export const DIMS = {
 /* =========================================================================
  * 过滤与聚合
  * ========================================================================= */
+/* 同一数据数组 + 同一筛选条件的结果会被多个视图/组件重复请求，按数组弱引用缓存，数据刷新后自动失效 */
+const filterMemo = new WeakMap();
 export function filterLines(arr = state.lines) {
+  if (!arr) return [];
+  const sig = JSON.stringify(ui.f);
+  const hit = filterMemo.get(arr);
+  if (hit && hit.sig === sig) return hit.out;
+  const out = filterLinesRaw(arr);
+  filterMemo.set(arr, { sig, out });
+  return out;
+}
+function filterLinesRaw(arr) {
   const f = ui.f, q = f.q.trim().toLowerCase();
   return arr.filter(l => {
     if (f.ws && (f.ws === '__nows' ? !!l.wsKey : l.wsKey !== f.ws)) return false;

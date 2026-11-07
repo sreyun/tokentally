@@ -10,6 +10,15 @@
   const user = document.getElementById('username');
   const pw = document.getElementById('password');
   const toggle = document.getElementById('togglePw');
+  const caps = document.getElementById('caps');
+  try {
+    const m = sessionStorage.getItem('bc.loginMsg');
+    if (m) { err.textContent = m.slice(0, 120); sessionStorage.removeItem('bc.loginMsg'); }
+  } catch { /* ignore */ }
+  const capsCheck = e => { if (e.getModifierState) caps.hidden = !e.getModifierState('CapsLock'); };
+  pw.addEventListener('keydown', capsCheck);
+  pw.addEventListener('keyup', capsCheck);
+  pw.addEventListener('blur', () => { caps.hidden = true; });
   toggle.addEventListener('click', () => {
     const show = pw.type === 'password';
     pw.type = show ? 'text' : 'password';

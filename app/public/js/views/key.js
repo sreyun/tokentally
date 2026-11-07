@@ -2,7 +2,7 @@
 import {
   $, esc, state, ui, app, http, money, moneyShort, compact, intFmt, pct, sum, uniq, metricVal, METRICS, NONE_KEY, DIMS, keyObj, keyShort, keyDesc, wsName,
   aggregate, aggAll, sortedAggs, totalTokens, deltaPill, tipRows, icon, help, segCtl, fmtTime, budgetOf, budgetLevel, forecastOf, channelLabel,
-  WEEK, weekday, ioInfo, num, periodTag, daysBetween,
+  WEEK, weekday, ioInfo, num, periodTag, daysBetween, copyBtn,
 } from '../core.js';
 import { columnChart, rankList, segbar, legendList, legendHtml } from '../charts.js';
 import { table, dataBar } from '../table.js';
@@ -10,7 +10,7 @@ import { billDimsHtml } from './models.js';
 
 export function render(v, id) {
   const k = keyObj(id);
-  if (!k && id !== NONE_KEY) { v.innerHTML = `<button class="back" data-go="#/keys">${icon('x')} 返回 API Key 分析</button><div class="panel empty"><h2>未找到该 API Key</h2><div>ID ${esc(id)} 不在已同步的 Key 列表和当前账单中。</div></div>`; return; }
+  if (!k && id !== NONE_KEY) { v.innerHTML = `<button class="back" data-back="#/keys">${icon('chevL')}返回</button><div class="panel empty"><h2>未找到该 API Key</h2><div>ID ${esc(id)} 不在已同步的 Key 列表和当前账单中。</div><div class="row" style="justify-content:center;margin-top:14px"><button class="btn primary" data-go="#/keys">查看全部 API Key</button></div></div>`; return; }
   const of = l => (l.apiKeyId || NONE_KEY) === id;
   const lines = state.lines.filter(of), prevLines = state.prev.filter(of), daily = state.daily.filter(of), hist = state.history.filter(of);
   const a = aggAll(lines), pa = aggAll(prevLines);
@@ -29,17 +29,29 @@ export function render(v, id) {
     : k.source === 'deleted' ? `<span class="pill bad">已删除 ${fmtTime(k.deletedAt, false)}</span>` : k.source === 'bill' ? '<span class="pill warn">不在 Key 列表</span>'
       : k.disabled ? '<span class="pill bad">已禁用</span>' : '<span class="pill good">启用</span>';
   const ipOpen = k && (!(k.accessIps || []).length || k.accessIps.some(x => x === '0.0.0.0/0' || x === '::/0'));
+  // 上一个 / 下一个：按本期费用从高到低，其次按 ID
+  const costOf = new Map(allByKey.map(x => [x.key, x.cost]));
+  const order = [...state.apiKeys.keys(), ...(costOf.has(NONE_KEY) ? [NONE_KEY] : [])]
+    .sort((x, y) => (costOf.get(y) || 0) - (costOf.get(x) || 0) || String(y).localeCompare(String(x), 'en', { numeric: true }));
+  const pos = order.indexOf(id), prevId = pos > 0 ? order[pos - 1] : null, nextId = pos >= 0 && pos < order.length - 1 ? order[pos + 1] : null;
 
   v.innerHTML = `
-    <button class="back" data-go="#/keys"><svg class="ico" viewBox="0 0 24 24"><path d="M15 6l-6 6 6 6"/></svg>API Key 分析</button>
+    <div class="row" style="justify-content:space-between;margin-bottom:6px">
+      <button class="back" style="margin:0" data-back="#/keys">${icon('chevL')}返回</button>
+      <div class="pager-nav" role="group" aria-label="切换 API Key">
+        <button class="btn sm" ${prevId ? `data-go="#/key/${esc(prevId)}" data-nav="prev" title="上一个（[）：${esc(keyShort(prevId))}"` : 'disabled'}>${icon('chevL')}上一个</button>
+        <span class="muted">${pos + 1} / ${order.length}</span>
+        <button class="btn sm" ${nextId ? `data-go="#/key/${esc(nextId)}" data-nav="next" title="下一个（]）：${esc(keyShort(nextId))}"` : 'disabled'}>下一个${icon('chevR')}</button>
+      </div>
+    </div>
     <div class="entity-h">
       <span class="entity-ico">${icon('key')}</span>
       <div class="entity-t"><h2>${esc(keyShort(id))} ${statusPill}${k && !k.description && id !== NONE_KEY ? '<span class="pill warn">无描述</span>' : ''}</h2>
         <div class="sub">${id === NONE_KEY ? '账单实例ID中 ApiKeyID 为空：控制台体验、订阅套餐、托管智能体、Batch 等非 API Key 调用'
-          : `ID <span class="mono">${esc(id)}</span> · <span class="mono">${esc(k.apiKeyValue || '—')}</span> · 业务空间 ${esc(wsName(k.wsKey))}${k.wsKey ? ` <span class="mono">${esc(k.wsKey)}</span>` : ''} · 创建于 ${fmtTime(k.gmtCreate, false)}`}</div></div>
-      <div class="row"><span class="lbl muted" style="font-size:12px">口径</span>${segMetric()}<button class="btn" data-key-detail>${icon('list')}账单明细</button></div>
+          : `ID <span class="mono">${esc(id)}</span>${copyBtn(id, '复制 Key ID')} · <span class="mono">${esc(k.apiKeyValue || '—')}</span> · 业务空间 ${esc(wsName(k.wsKey))}${k.wsKey ? ` <span class="mono">${esc(k.wsKey)}</span>${copyBtn(k.wsKey, '复制业务空间ID')}` : ''} · 创建于 ${fmtTime(k.gmtCreate, false)}`}</div></div>
+      <div class="row"><span class="lbl muted" style="font-size:12px">费用口径</span>${segMetric()}<button class="btn" data-key-detail>${icon('list')}账单明细</button></div>
     </div>
-    <div class="kpi-row">
+    <div class="kpi-wrap"><div class="kpi-row">
       ${tile('wallet', `本期费用 · ${METRICS[ui.f.metric]}`, money(a.cost), deltaPill(a.cost, pa.cost), state.compareLabel, `上期 ${money(pa.cost)} · 原价 ${moneyShort(a.gross)}`)}
       ${tile('layers', '费用排名', rank ? `第 ${rank}<small>/ ${allByKey.length}</small>` : '—', '', '', `占全部费用 ${pct(a.cost, totalAll)}`)}
       ${tile('token', 'Token 总量', compact(tokens), deltaPill(tokens, ptokens, { neutral: true }), state.compareLabel, `输入 ${compact(a.tIn)} · 输出 ${compact(a.tOut)}`)}
@@ -47,7 +59,7 @@ export function render(v, id) {
       ${tile('cache', '缓存命中率', hit == null ? '—' : (hit * 100).toFixed(1) + '%', hit == null ? '' : deltaPill(hit, pHit, { pp: true, goodWhenUp: true }), hit == null ? '' : state.compareLabel, hit == null ? '—' : `命中 ${compact(a.tCache)} Token`)}
       ${budget ? budgetTile(a.pretax, budget, fc?.value ?? null)
         : tile('calendar', fc ? '预计本月' : '近 7 / 30 天', fc ? money(fc.value) : `${moneyShort(act?.c7 || 0)}<small>/ ${moneyShort(act?.c30 || 0)}</small>`, '', '', fc ? `日均 ${money(fc.avg)}` : `最近消费 ${act?.lastDay || '—'}`)}
-    </div>
+    </div></div>
     <div class="bi">
       <section class="panel c8"><div class="panel-h"><h3>每日费用</h3><span class="sub">按模型堆叠 · 虚线为日均</span></div><div class="legend" id="kLegend"></div><div class="chart" id="kDaily"></div></section>
       <section class="panel c4"><div class="panel-h"><h3>模型构成</h3><span class="sub">${a.models.size} 个模型</span></div><div id="kModels"></div></section>
@@ -76,7 +88,7 @@ export function render(v, id) {
   $('#kLegend', v).innerHTML = series.length > 1 ? legendHtml(series) : '';
   const totalDaily = sum(daily, metricVal);
   const calDays = daysBetween(p.from, p.to < state.today ? p.to : state.today);
-  columnChart($('#kDaily', v), { xs: days, series, cell: (x, s) => cell.get(x + '|' + s) || 0, avg: days.length ? totalDaily / Math.max(1, calDays) : null, height: 260, xLabel: x => x.slice(5), tipTitle: x => `${x}（周${WEEK[weekday(x)]}）`, empty: '本期无按日费用' });
+  columnChart($('#kDaily', v), { xs: days, series, cell: (x, s) => cell.get(x + '|' + s) || 0, avg: days.length ? totalDaily / Math.max(1, calDays) : null, height: 260, xLabel: x => x.slice(5), tipTitle: x => `${x}（周${WEEK[weekday(x)]}）`, empty: '本期无按日费用', onX: x => app.openDay(x, id), clickHint: '点击查看当日明细' });
 
   // 模型构成
   const mAgg = sortedAggs(aggregate(lines, l => l.model)).filter(x => x.cost > 0);
@@ -92,7 +104,7 @@ export function render(v, id) {
   if (hRank.length > 6) hSeries.push({ id: '__other', label: '其他模型', color: 'var(--other)' });
   const hc = new Map(); hist.forEach(l => { const kk = l.date + '|' + (hColored.includes(l.model) ? l.model : '__other'); hc.set(kk, (hc.get(kk) || 0) + metricVal(l)); });
   $('#kHLegend', v).innerHTML = hSeries.length > 1 ? legendHtml(hSeries) : '';
-  columnChart($('#kHist', v), { xs: hm, series: hSeries, cell: (x, s) => hc.get(x + '|' + s) || 0, height: 220, xLabel: x => x.slice(2), tipTitle: x => `${x} 账期`, weekend: false, empty: '暂无历史账期数据', onX: x => app.setPeriod({ mode: 'month', cycle: x }) });
+  columnChart($('#kHist', v), { xs: hm, series: hSeries, cell: (x, s) => hc.get(x + '|' + s) || 0, height: 220, xLabel: x => x.slice(2), tipTitle: x => `${x} 账期`, weekend: false, empty: '暂无历史账期数据', onX: x => app.setPeriod({ mode: 'month', cycle: x }), clickHint: '点击切换到该账期' });
 
   $('#kDims', v).innerHTML = billDimsHtml(lines);
 
