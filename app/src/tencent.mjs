@@ -231,6 +231,15 @@ export function tcModelOf(d, c, endpointModel) {
   return `[${d.ProductCodeName || d.BusinessCodeName || '腾讯云其他费用'}]`;
 }
 
+/** 直接按 API Key 计费的费用项名称：优先组件配置中的模型，否则用计费组件名（如“[联网搜索]”） */
+function keyFeeName(d, c, endpointModel) {
+  for (const cfg of Array.isArray(c.ComponentConfig) ? c.ComponentConfig : []) {
+    if (/模型|model/i.test(cfg.Name || '') && cfg.Value) return String(cfg.Value);
+  }
+  const name = String(c.ComponentCodeName || '').trim() || stripIo(c.ItemCodeName) || String(d.ProductCodeName || '').replace(/^.*?[-—]/, '') || '腾讯云其他费用';
+  return `[${name}]`;
+}
+
 /**
  * 账单明细 → 归一化账单行（与阿里云 normalizeBillItem 字段一致，另含 day）。
  * 同一 日 × 资源 × 模型 × 计费项 × 单价 合并（按量计费按小时出账，合并到日）。
@@ -242,11 +251,12 @@ export function tencentBillRows(details, { region, endpointModel = new Map(), ke
     if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) continue;
     const rid = String(d.ResourceId || '');
     for (const c of Array.isArray(d.ComponentSet) ? d.ComponentSet : []) {
-      const model = tcModelOf(d, c, endpointModel);
       const item = c.ItemCodeName || c.ComponentCodeName || '';
       const io = tcIo(`${c.ComponentCodeName || ''} ${c.ItemCodeName || ''}`);
       let keyId = keyIds.has(rid) ? rid : '';
       for (const cfg of Array.isArray(c.ComponentConfig) ? c.ComponentConfig : []) if (!keyId && keyIds.has(String(cfg.Value || ''))) keyId = String(cfg.Value);
+      // 资源本身是 API Key（如联网搜索按次计费）：资源名称是 Key 名称而不是模型，按计费组件归类为“[费用项]”
+      const model = keyId === rid && rid ? keyFeeName(d, c, endpointModel) : tcModelOf(d, c, endpointModel);
       const unit = c.UsedAmountUnit || '';
       const k = [day, rid, model, io, item, c.SinglePrice ?? '', c.PriceUnit || '', unit, keyId].join('\u0001');
       let r = m.get(k);

@@ -3,7 +3,7 @@ import {
   $, esc, state, ui, app, money, moneyShort, compact, intFmt, pct, sum, uniq, metricVal, METRICS, NONE_KEY, DIMS, keyShort, wsName,
   filterLines, aggregate, aggAll, sortedAggs, totalTokens, topModels, deltaPill, tipRows, icon, help, segCtl, forecastOf, budgetOf,
   budgetBar, activeFilterCount, channelLabel, addDays, daysBetween, WEEK, weekday, isCurrentMonth, lastDayOf as lastDayOfCycle,
-  multiCloud, hasTags, PROVIDERS,
+  multiCloud, hasTags, PROVIDERS, usageFiltered, usageAgg,
 } from '../core.js';
 import { sparkline, columnChart, lineChart, rankList, divergingList, segbar, legendList, topParts, legendHtml, bindActivate } from '../charts.js';
 import { computeInsights, cacheSavings } from '../insights.js';
@@ -43,6 +43,8 @@ export function render(v) {
   const budget = p.mode === 'month' && !activeFilterCount() ? budgetOf() : null;
   const saved = cacheSavings(lines);
   const prevFullCost = sum(filterLines(state.prevFull), metricVal);
+  // 仅当筛选后全部为腾讯云账单时，Token 卡片附带请求数与单次平均（阿里云账单无请求数，混合时不展示以免误导）
+  const uf = usageFiltered(), ua = uf && lines.length && lines.every(l => l.provider === "tencent") ? usageAgg(uf, () => "a").get("a") : null;
 
   v.innerHTML = `
   <div class="kpis">
@@ -62,7 +64,7 @@ export function render(v) {
     ${fc ? kpi('forecast', '预计本月费用', moneyShort(fc.value), deltaPill(fc.value, prevFullCost), '较上月全月', `按 ${fc.fullDays} 个完整日的日均推算`)
       : kpi('calendar', '日均费用', money(avgDay), '', '', `${calDays} 天 · 峰值 ${peakText(days, dayCost)}`)}
     ${kpi('key', '活跃 API Key', `${active}<small>/ ${state.apiKeys.size}</small>`, deltaPill(active, pActive, { neutral: true }), state.compareLabel, top1 ? `最高：${keyShort(top1.key)} 占 ${pct(top1.cost, cur.cost)}` : '—')}
-    ${kpi('token', 'Token 总量', noTok ? '—' : compact(tokens), noTok ? '' : deltaPill(tokens, pTokens, { neutral: true }), noTok ? '' : state.compareLabel, noTok ? '当前数据无用量' : `输入 ${compact(cur.tIn)} · 输出 ${compact(cur.tOut)}`, intFmt(tokens))}
+    ${kpi('token', 'Token 总量', noTok ? '—' : compact(tokens), noTok ? '' : deltaPill(tokens, pTokens, { neutral: true }), noTok ? '' : state.compareLabel, noTok ? '当前数据无用量' : ua && ua.requests ? `请求 ${compact(ua.requests)} 次 · 单次 ${intFmt(ua.tokens / ua.requests)} Token` : `输入 ${compact(cur.tIn)} · 输出 ${compact(cur.tOut)}`, intFmt(tokens))}
     ${kpi('unit', '每百万 Token 成本', perM == null ? '—' : money(perM), perM == null ? '' : deltaPill(perM, pPerM), perM == null ? '' : state.compareLabel, '费用 ÷ 总 Token × 10⁶')}
     ${kpi('cache', '缓存命中率', hit == null ? '—' : (hit * 100).toFixed(1) + '%', hit == null ? '' : deltaPill(hit, pHit, { pp: true, goodWhenUp: true }), hit == null ? '' : state.compareLabel, saved > 0.01 ? `估算节省 ${moneyShort(saved)}` : hit == null ? '—' : `命中 ${compact(cur.tCache)} Token`)}
     ${kpi('model', '使用模型', String(byModel.size), '', '', byModel.size ? `主力：${sortedAggs(byModel)[0].key}` : '—')}

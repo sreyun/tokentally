@@ -2,7 +2,7 @@
 import {
   $, esc, state, ui, app, money, moneyShort, compact, intFmt, pct, sum, uniq, metricVal, METRICS, NONE_KEY, DIMS, keyObj, keyDesc, keyShort, wsName,
   filterLines, aggregate, sortedAggs, newAgg, totalTokens, topModels, unitsText, deltaPill, tipRows, icon, help, segCtl, fmtTime, budgetOf, budgetLevel,
-  forecastOf, isCurrentMonth, periodTag, copyBtn, PROVIDERS, provTag, multiCloud, isAdmin, modal, http, toast, NO_CC, perCall, daysBetween,
+  forecastOf, isCurrentMonth, periodTag, copyBtn, PROVIDERS, provTag, multiCloud, isAdmin, modal, http, toast, NO_CC, perCall, daysBetween, usageFiltered, usageAgg,
 } from '../core.js';
 import { table, dataBar } from '../table.js';
 import { heatmap, dayCols } from '../charts.js';
@@ -67,6 +67,7 @@ export function keyRows() {
   });
   const month = state.data.period.mode === 'month';
   const allocKeys = new Set(lines.filter(l => l.alloc).map(l => l.apiKeyId || NONE_KEY));
+  const usageByKey = usageAgg(usageFiltered() || [], u => u.apiKeyId);
   const pp = state.data.period, calDays = Math.max(1, daysBetween(pp.from, pp.to < state.today ? pp.to : state.today));
   return { total, rows: ids.map(id => {
     const k = keyObj(id) || {}, a = byKey.get(id) || newAgg(id), p = pByKey.get(id), act = state.keyActivity.get(id);
@@ -80,7 +81,7 @@ export function keyRows() {
     const budget = month ? budgetOf(id === NONE_KEY ? null : id) : null;
     const fc = budget && isCurrentMonth() ? forecastOf(dByKey.get(id) || [], l => l.pretax) : null;
     const ipOpen = !(k.accessIps || []).length || (k.accessIps || []).some(x => x === '0.0.0.0/0' || x === '::/0');
-    const us = state.usage.get(id);
+    const us = usageByKey.get(id);
     return {
       provider: k.provider || (id === NONE_KEY ? '' : 'aliyun'), costCenter: k.costCenter || '', owner: k.owner || '', note: k.note || '', remark: k.remark || '',
       requests: us ? us.requests : null, failRate: us && us.requests ? us.fails / us.requests : null, alloc: allocKeys.has(id) ? 1 : 0,

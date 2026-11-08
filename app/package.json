@@ -1,6 +1,6 @@
 {
   "name": "bailian-cost",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "TokenTally：阿里云百炼 + 腾讯云 TokenHub 大模型 API Key 费用与用量分析（SQLite 持久化、定时同步、登录鉴权、告警推送）",
   "private": true,
   "type": "module",

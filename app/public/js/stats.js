@@ -1,0 +1,84 @@
+/* =========================================================================
+ * Token 消耗与调用统计：单个 API Key / 单个模型共用
+ *  - Token：总量与结构（输入非缓存 / 缓存命中 / 输出 / 向量）、输出/输入比、日均、峰值日、消耗天数、按次计费用量
+ *  - 调用（腾讯云 TokenHub 用量统计）：请求次数、成功率、单次平均 Token（输入 / 输出 / 缓存命中）、单次平均费用、每千次费用
+ * ========================================================================= */
+import { esc, state, ui, money, compact, intFmt, uniq, sum, METRICS, WEEK, weekday, daysBetween, totalTokens, deltaPill, unitsText, icon, help, perCall } from './core.js';
+import { columnChart, legendHtml } from './charts.js';
+
+export const periodDays = p => Math.max(1, daysBetween(p.from, p.to < state.today ? p.to : state.today));
+
+/**
+ * a / pa：本期与上期聚合（aggAll）；daily：本期按日账单行；us：用量汇总（usageAgg 的一项，可为空）
+ * scope：'key' | 'model'；provider：用于无用量时的说明
+ */
+export function tokenStatsHtml({ a, pa, daily, us, period, scope = 'key', provider = 'aliyun', compact: dense = false, unavailable = false }) {
+  const tokens = totalTokens(a), ptokens = totalTokens(pa);
+  const calDays = periodDays(period);
+  const dayTok = new Map();
+  daily.forEach(l => { if (l.tokens) dayTok.set(l.date, (dayTok.get(l.date) || 0) + l.tokens); });
+  const peak = [...dayTok.entries()].sort((x, y) => y[1] - x[1])[0];
+  const active = [...dayTok.values()].filter(x => x > 0).length;
+  const pc = perCall(us, a.cost);
+  const units = unitsText(a);
+  const cell = (label, value, sub = '', cls = '') => `<div class="tok-cell ${cls}"><span>${esc(label)}</span><b>${value}</b>${sub ? `<em>${sub}</em>` : ''}</div>`;
+  const share = x => (tokens ? `占 ${(x / tokens * 100).toFixed(1)}%` : '');
+  const nIn = a.tIn - a.tCache;
+  const why = unavailable ? '当前按 Token 类型 / 计费项 / 渠道筛选，请求次数无法按这些维度拆分；清除这些筛选后显示。'
+    : provider === 'tencent' ? `该周期 TokenHub 用量统计中没有该${scope === 'key' ? ' Key' : '模型'}的调用记录。`
+      : `阿里云费用中心账单只包含 Token 用量与费用，不提供调用次数，因此无法计算单次平均消耗；可在百炼控制台“模型观测”中查看${scope === 'key' ? '该 Key' : '该模型'}的调用量。`;
+  return `<div class="tok-grid ${dense ? 'dense' : ''}">
+      <div class="tok-group"><h4>Token 消耗</h4><div class="tok-cells">
+        ${cell('总 Token', compact(tokens), `${deltaPill(tokens, ptokens, { neutral: true })} <span class="muted">${esc(state.compareLabel)}</span>`, 'big')}
+        ${cell('输入（非缓存）', compact(nIn), share(nIn))}
+        ${cell('缓存命中', compact(a.tCache), a.tIn ? `命中率 ${(a.tCache / a.tIn * 100).toFixed(1)}%` : '')}
+        ${cell('输出', compact(a.tOut), share(a.tOut))}
+        ${a.tEmb ? cell('向量', compact(a.tEmb), share(a.tEmb)) : ''}
+        ${cell('输出 / 输入', a.tIn ? (a.tOut / a.tIn * 100).toFixed(1) + '%' : '—', '输出 Token ÷ 输入 Token')}
+        ${cell('日均 Token', compact(tokens / calDays), `按 ${calDays} 个自然日`)}
+        ${cell('峰值日', peak ? compact(peak[1]) : '—', peak ? `${peak[0].slice(5)}（周${WEEK[weekday(peak[0])]}）` : '')}
+        ${cell('消耗天数', `${active}<small>/ ${calDays}</small>`, active ? `活跃日均 ${compact(tokens / active)}` : '')}
+        ${cell('每百万 Token 成本', tokens ? money(a.cost / tokens * 1e6) : '—', `${METRICS[ui.f.metric]} ÷ Token × 10⁶`)}
+        ${units ? cell('按次 / 其他计费用量', esc(units), '非 Token 计费项') : ''}
+      </div></div>
+      <div class="tok-group"><h4>调用</h4>${pc ? `<div class="tok-cells">
+        ${cell('请求次数', intFmt(pc.requests), `日均 ${intFmt(pc.requests / calDays)} 次${scope === 'model' && us.keys ? ` · ${us.keys.size} 个 Key` : ''}`, 'big')}
+        ${cell('成功率', (pc.success * 100).toFixed(2) + '%', `失败 ${intFmt(pc.fails)} 次`, pc.success < 0.95 ? 'bad' : pc.success < 0.99 ? 'warn' : '')}
+        ${cell('单次平均 Token', intFmt(pc.tokPer), `输入 ${intFmt(pc.inPer)} · 输出 ${intFmt(pc.outPer)}`)}
+        ${cell('单次平均费用', money(pc.costPer, pc.costPer < 0.01 ? 4 : 3), `每千次 ${money(pc.costPerK)}`)}
+        ${cell('单次平均缓存命中', intFmt(us.cache / pc.requests), us.input ? `占输入 ${(us.cache / us.input * 100).toFixed(1)}%` : '')}
+      </div>` : `<div class="tok-empty">${icon('info')}<div><b>暂无调用次数数据</b><span>${esc(why)}</span></div></div>`}</div>
+    </div>`;
+}
+
+const TOKS = [['in', '输入（非缓存）', 'var(--s1)'], ['hit', '缓存命中', 'var(--s3)'], ['out', '输出', 'var(--s2)'], ['emb', '向量', 'var(--s7)'], ['other', '其他', 'var(--other)']];
+const tType = l => (l.ioi.dir === 'in' ? (l.ioi.cache === 'hit' ? 'hit' : 'in') : ['out', 'emb'].includes(l.ioi.dir) ? l.ioi.dir : 'other');
+
+/** 每日 Token（按类型堆叠） */
+export function drawDailyTokens(el, legendEl, daily, period, { onX, height = 240 } = {}) {
+  const tcell = new Map();
+  daily.forEach(l => { if (l.tokens == null) return; const kk = l.date + '|' + tType(l); tcell.set(kk, (tcell.get(kk) || 0) + l.tokens); });
+  const series = TOKS.filter(([t]) => [...tcell.keys()].some(k => k.endsWith('|' + t))).map(([t, label, color]) => ({ id: t, label, color }));
+  const days = uniq(daily.filter(l => l.tokens).map(l => l.date)).sort();
+  const total = sum(daily, l => l.tokens || 0);
+  if (legendEl) legendEl.innerHTML = series.length > 1 ? legendHtml(series) : '';
+  columnChart(el, {
+    xs: days, series, cell: (x, s) => tcell.get(x + '|' + s) || 0, avg: days.length ? total / periodDays(period) : null, height, fmt: compact,
+    xLabel: x => x.slice(5), tipTitle: x => `${x}（周${WEEK[weekday(x)]}）`, empty: '本期无 Token 用量（可能为按次计费的模型）', onX, clickHint: onX ? '点击查看当日明细' : '',
+  });
+}
+
+/** 每日调用次数（成功 / 失败），悬停显示单次平均 Token */
+export function drawDailyRequests(el, legendEl, us, period, { height = 240 } = {}) {
+  const days = [...us.days.keys()].sort();
+  if (legendEl) legendEl.innerHTML = legendHtml([{ label: '成功', color: 'var(--s3)' }, { label: '失败', color: 'var(--s8)' }]);
+  columnChart(el, {
+    xs: days, series: [{ id: 'ok', label: '成功', color: 'var(--s3)' }, { id: 'fail', label: '失败', color: 'var(--s8)' }], height, fmt: x => intFmt(x),
+    cell: (x, s) => { const d = us.days.get(x); return d ? (s === 'ok' ? d.requests - d.fails : d.fails) : 0; },
+    avg: days.length ? us.requests / periodDays(period) : null, xLabel: x => x.slice(5),
+    tipTitle: x => { const d = us.days.get(x); return `${x}（周${WEEK[weekday(x)]}）${d && d.requests ? ` · 单次平均 ${intFmt(d.tokens / d.requests)} Token` : ''}`; },
+    empty: '本期无调用记录',
+  });
+}
+
+export const reqHelp = () => help('来自腾讯云 TokenHub 用量统计（按 API Key × 模型 × 日）。悬停查看当日请求数、失败数与单次平均 Token。');

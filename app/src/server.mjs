@@ -16,7 +16,7 @@ import { selfTest, AliyunClient, explainAliyunError, callLog, MS_REGIONS, BSS_EN
 import { tc3SelfTest, TencentClient, explainTencentError, TC_REGIONS, TC_SITES } from './tencent.mjs';
 import { loadMasterKey, hashPassword, verifyPassword, burnPasswordCheck, checkPasswordPolicy, randomPassword, maskId, sha256 } from './crypto.mjs';
 
-const VERSION = '1.2.0';
+const VERSION = '1.2.1';
 const log = (...a) => console.log(new Date().toISOString(), ...a);
 
 {

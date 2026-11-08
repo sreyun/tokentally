@@ -2,12 +2,13 @@
 import {
   $, esc, state, ui, app, http, money, moneyShort, compact, intFmt, pct, sum, uniq, metricVal, METRICS, NONE_KEY, DIMS, keyObj, keyShort, keyDesc, wsName,
   aggregate, aggAll, sortedAggs, totalTokens, deltaPill, tipRows, icon, help, segCtl, fmtTime, budgetOf, budgetLevel, forecastOf, channelLabel,
-  WEEK, weekday, ioInfo, num, periodTag, daysBetween, copyBtn, PROVIDERS, provTag, isAdmin, perCall, unitsText,
+  WEEK, weekday, ioInfo, num, periodTag, daysBetween, copyBtn, PROVIDERS, provTag, isAdmin, usageAgg, normModel,
 } from '../core.js';
 import { columnChart, rankList, segbar, legendList, legendHtml } from '../charts.js';
 import { table, dataBar } from '../table.js';
 import { billDimsHtml } from './models.js';
 import { editTags } from './keys.js';
+import { tokenStatsHtml, drawDailyTokens, drawDailyRequests } from '../stats.js';
 
 export function render(v, id) {
   const k = keyObj(id);
@@ -25,7 +26,9 @@ export function render(v, id) {
   const budget = p.mode === 'month' ? budgetOf(id) : null;
   const fc = forecastOf(daily, l => l.pretax);
   const act = state.keyActivity.get(id);
-  const us = state.usage.get(id);
+  const kRows = state.usageRows.filter(u => u.apiKeyId === id);
+  const us = kRows.length ? usageAgg(kRows, () => id).get(id) : null;
+  const usByModel = usageAgg(kRows, u => normModel(u.model));
   const days = uniq(daily.map(l => l.date)).sort();
   const statusPill = id === NONE_KEY ? '<span class="pill neutral">非 Key 调用</span>'
     : k.source === 'deleted' ? `<span class="pill bad">已删除 ${fmtTime(k.deletedAt, false)}</span>` : k.source === 'bill' ? '<span class="pill warn">不在 Key 列表</span>'
@@ -67,7 +70,8 @@ export function render(v, id) {
         : tile('calendar', fc ? '预计本月' : '近 7 天', fc ? money(fc.value) : moneyShort(act?.c7 || 0), '', '', fc ? `日均 ${money(fc.avg)}` : `近 30 天 ${moneyShort(act?.c30 || 0)} · 最近 ${act?.lastDay ? act.lastDay.slice(5) : '—'}`)}
     </div></div>
     <div class="bi">
-      ${tokenPanel(id, a, pa, daily, us, p)}
+      <section class="panel c12"><div class="panel-h"><h3>Token 消耗与调用统计</h3>${help('Token 来自账单用量；请求次数、成功率与单次平均来自腾讯云 TokenHub 用量统计（阿里云账单不提供调用次数）。单次平均费用 = 本期费用 ÷ 请求次数。')}<span class="sub">${esc(p.mode === 'month' ? p.cycle + ' 账期' : `${p.from} ~ ${p.to}`)} · ${METRICS[ui.f.metric]}</span></div>
+        ${tokenStatsHtml({ a, pa, daily, us, period: p, scope: 'key', provider: k?.provider || 'aliyun' })}</section>
       <section class="panel ${us ? 'c6' : 'c12'}"><div class="panel-h"><h3>每日 Token 消耗</h3><span class="sub">按 Token 类型堆叠 · 虚线为日均</span></div><div class="legend" id="kTokLegend"></div><div class="chart" id="kTok"></div></section>
       ${us ? `<section class="panel c6"><div class="panel-h"><h3>每日调用次数</h3>${help('来自腾讯云 TokenHub 用量统计（按 API Key × 模型 × 日）。悬停查看当日请求数、失败数与单次平均 Token。')}<span class="sub">成功 / 失败</span></div><div class="legend" id="kReqLegend"></div><div class="chart" id="kReq"></div></section>` : ''}
       <section class="panel c8"><div class="panel-h"><h3>每日费用</h3><span class="sub">按模型堆叠 · 虚线为日均</span></div><div class="legend" id="kLegend"></div><div class="chart" id="kDaily"></div></section>
@@ -99,30 +103,9 @@ export function render(v, id) {
   const calDays = daysBetween(p.from, p.to < state.today ? p.to : state.today);
   columnChart($('#kDaily', v), { xs: days, series, cell: (x, s) => cell.get(x + '|' + s) || 0, avg: days.length ? totalDaily / Math.max(1, calDays) : null, height: 260, xLabel: x => x.slice(5), tipTitle: x => `${x}（周${WEEK[weekday(x)]}）`, empty: '本期无按日费用', onX: x => app.openDay(x, id), clickHint: '点击查看当日明细' });
 
-  // 每日 Token（按类型堆叠）
-  const TOKS = [['in', '输入（非缓存）', 'var(--s1)'], ['hit', '缓存命中', 'var(--s3)'], ['out', '输出', 'var(--s2)'], ['emb', '向量', 'var(--s7)'], ['other', '其他', 'var(--other)']];
-  const tcell = new Map();
-  const tType = l => (l.ioi.dir === 'in' ? (l.ioi.cache === 'hit' ? 'hit' : 'in') : ['out', 'emb'].includes(l.ioi.dir) ? l.ioi.dir : 'other');
-  daily.forEach(l => { if (l.tokens == null) return; const kk = l.date + '|' + tType(l); tcell.set(kk, (tcell.get(kk) || 0) + l.tokens); });
-  const tSeries = TOKS.filter(([t]) => [...tcell.keys()].some(k => k.endsWith('|' + t))).map(([t, label, color]) => ({ id: t, label, color }));
-  const tDays = uniq(daily.filter(l => l.tokens).map(l => l.date)).sort();
-  const tTotal = sum(daily, l => l.tokens || 0);
-  $('#kTokLegend', v).innerHTML = tSeries.length > 1 ? legendHtml(tSeries) : '';
-  columnChart($('#kTok', v), {
-    xs: tDays, series: tSeries, cell: (x, s) => tcell.get(x + '|' + s) || 0, avg: tDays.length ? tTotal / Math.max(1, calDays) : null, height: 240, fmt: compact,
-    xLabel: x => x.slice(5), tipTitle: x => `${x}（周${WEEK[weekday(x)]}）`, empty: '本期无 Token 用量（可能为按次计费的模型）', onX: x => app.openDay(x, id), clickHint: '点击查看当日明细',
-  });
-  if (us) {
-    const rd = [...us.days.keys()].sort();
-    $('#kReqLegend', v).innerHTML = legendHtml([{ label: '成功', color: 'var(--s3)' }, { label: '失败', color: 'var(--s8)' }]);
-    columnChart($('#kReq', v), {
-      xs: rd, series: [{ id: 'ok', label: '成功', color: 'var(--s3)' }, { id: 'fail', label: '失败', color: 'var(--s8)' }], height: 240, fmt: x => intFmt(x),
-      cell: (x, s) => { const dd = us.days.get(x); return dd ? (s === 'ok' ? dd.requests - dd.fails : dd.fails) : 0; },
-      avg: rd.length ? us.requests / Math.max(1, calDays) : null, xLabel: x => x.slice(5),
-      tipTitle: x => { const dd = us.days.get(x); return `${x}（周${WEEK[weekday(x)]}）${dd && dd.requests ? ` · 单次平均 ${intFmt(dd.tokens / dd.requests)} Token` : ''}`; },
-      empty: '本期无调用记录',
-    });
-  }
+  // 每日 Token（按类型堆叠）与每日调用次数
+  drawDailyTokens($('#kTok', v), $('#kTokLegend', v), daily, p, { onX: x => app.openDay(x, id) });
+  if (us) drawDailyRequests($('#kReq', v), $('#kReqLegend', v), us, p);
 
   // 模型构成
   const mAgg = sortedAggs(aggregate(lines, l => l.model)).filter(x => x.cost > 0);
@@ -166,7 +149,7 @@ export function render(v, id) {
     ],
     footer: rs => ['合计', money(sum(rs, r => r.cost)), deltaPill(sum(rs, r => r.cost), sum(rs, r => r.prev)), '', intFmt(sum(rs, r => r.tIn)), '', intFmt(sum(rs, r => r.tOut)), '', '', ...(us ? [intFmt(us.requests), us.requests ? (us.fails / us.requests * 100).toFixed(2) + '%' : '—', us.requests ? intFmt(us.tokens / us.requests) : '—', us.requests ? money(a.cost / us.requests, 4) : '—'] : [])],
   }).setRows(mAgg.map(x => {
-    const t = totalTokens(x), um = us?.models.get(x.key);
+    const t = totalTokens(x), um = usByModel.get(normModel(x.key));
     return { model: x.key, cost: x.cost, prev: pm.get(x.key)?.cost || 0, share: a.cost ? x.cost / a.cost : 0, tIn: x.tIn, tOut: x.tOut, hit: x.tIn ? x.tCache / x.tIn : null, perM: t ? x.cost / t * 1e6 : null, days: uniq(daily.filter(l => l.model === x.key && metricVal(l) > 0).map(l => l.date)).length, req: um ? um.requests : null, fail: um && um.requests ? um.fails / um.requests : null, tokPer: um && um.requests ? um.tokens / um.requests : null, costPer: um && um.requests ? x.cost / um.requests : null };
   }));
   $('#csvM', v).onclick = () => tm.csv(`Key_${id}_模型明细_${periodTag()}.csv`);
@@ -196,44 +179,6 @@ export function render(v, id) {
   v.querySelector('[data-key-detail]').onclick = () => app.setFilter({ key: id }, '#/detail', true);
   v.querySelector('[data-edit-tags]')?.addEventListener('click', () => editTags([id]));
   loadChanges(v, id);
-}
-
-/** Token 消耗与调用统计：总量与结构、日均 / 峰值、请求数、成功率、单次平均 Token / 费用 */
-function tokenPanel(id, a, pa, daily, us, p) {
-  const tokens = totalTokens(a), ptokens = totalTokens(pa);
-  const calDays = Math.max(1, daysBetween(p.from, p.to < state.today ? p.to : state.today));
-  const dayTok = new Map();
-  daily.forEach(l => { if (l.tokens) dayTok.set(l.date, (dayTok.get(l.date) || 0) + l.tokens); });
-  const peak = [...dayTok.entries()].sort((x, y) => y[1] - x[1])[0];
-  const active = [...dayTok.values()].filter(x => x > 0).length;
-  const pc = perCall(us, a.cost);
-  const units = unitsText(a);
-  const cell = (label, value, sub = '', cls = '') => `<div class="tok-cell ${cls}"><span>${esc(label)}</span><b>${value}</b>${sub ? `<em>${sub}</em>` : ''}</div>`;
-  const share = x => (tokens ? `占 ${(x / tokens * 100).toFixed(1)}%` : '');
-  const nIn = a.tIn - a.tCache;
-  return `<section class="panel c12"><div class="panel-h"><h3>Token 消耗与调用统计</h3>${help('Token 来自账单用量；请求次数、成功率与单次平均来自腾讯云 TokenHub 用量统计（阿里云账单不提供调用次数）。单次平均费用 = 本期费用 ÷ 请求次数。')}
-      <span class="sub">${esc(p.mode === 'month' ? p.cycle + ' 账期' : `${p.from} ~ ${p.to}`)} · ${METRICS[ui.f.metric]}</span></div>
-    <div class="tok-grid">
-      <div class="tok-group"><h4>Token 消耗</h4><div class="tok-cells">
-        ${cell('总 Token', compact(tokens), `${deltaPill(tokens, ptokens, { neutral: true })} <span class="muted">${esc(state.compareLabel)}</span>`, 'big')}
-        ${cell('输入（非缓存）', compact(nIn), share(nIn))}
-        ${cell('缓存命中', compact(a.tCache), a.tIn ? `命中率 ${(a.tCache / a.tIn * 100).toFixed(1)}%` : '')}
-        ${cell('输出', compact(a.tOut), share(a.tOut))}
-        ${a.tEmb ? cell('向量', compact(a.tEmb), share(a.tEmb)) : ''}
-        ${cell('输出 / 输入', a.tIn ? (a.tOut / a.tIn * 100).toFixed(1) + '%' : '—', '输出 Token ÷ 输入 Token')}
-        ${cell('日均 Token', compact(tokens / calDays), `按 ${calDays} 个自然日`)}
-        ${cell('峰值日', peak ? compact(peak[1]) : '—', peak ? `${peak[0].slice(5)}（周${WEEK[weekday(peak[0])]}）` : '')}
-        ${cell('消耗天数', `${active}<small>/ ${calDays}</small>`, active ? `活跃日均 ${compact(tokens / active)}` : '')}
-        ${units ? cell('按次 / 其他计费用量', esc(units), '非 Token 计费项') : ''}
-      </div></div>
-      <div class="tok-group"><h4>调用</h4>${pc ? `<div class="tok-cells">
-        ${cell('请求次数', intFmt(pc.requests), `日均 ${intFmt(pc.requests / calDays)} 次`, 'big')}
-        ${cell('成功率', (pc.success * 100).toFixed(2) + '%', `失败 ${intFmt(pc.fails)} 次`, pc.success < 0.95 ? 'bad' : pc.success < 0.99 ? 'warn' : '')}
-        ${cell('单次平均 Token', intFmt(pc.tokPer), `输入 ${intFmt(pc.inPer)} · 输出 ${intFmt(pc.outPer)}`)}
-        ${cell('单次平均费用', money(pc.costPer, pc.costPer < 0.01 ? 4 : 3), `每千次 ${money(pc.costPerK)}`)}
-        ${cell('单次平均缓存命中', intFmt(us.cache / pc.requests), us.input ? `占输入 ${(us.cache / us.input * 100).toFixed(1)}%` : '')}
-      </div>` : `<div class="tok-empty">${icon('info')}<div><b>暂无调用次数数据</b><span>${(keyObj(id)?.provider || 'aliyun') === 'aliyun' ? '阿里云费用中心账单只包含 Token 用量与费用，不提供调用次数，因此无法计算单次平均消耗；可在百炼控制台“模型观测”中查看该 Key 的调用量。' : '该周期 TokenHub 用量统计中没有该 Key 的调用记录。'}</span></div></div>`}</div>
-    </div></section>`;
 }
 
 function budgetTile(used, budget, fcv) {

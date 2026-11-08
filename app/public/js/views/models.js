@@ -1,8 +1,9 @@
 /* 模型分析：模型费用、Token 结构、单位成本、计费维度、Key × 模型矩阵、模型详情抽屉 */
 import {
   $, esc, state, ui, app, money, moneyShort, compact, intFmt, pct, sum, uniq, metricVal, METRICS, NONE_KEY, DIMS, keyShort,
-  filterLines, aggregate, aggAll, sortedAggs, totalTokens, unitsText, deltaPill, tipRows, icon, help, segCtl, ioInfo, num, periodTag, WEEK, weekday, copyBtn, PROVIDERS, provTag, multiCloud,
+  filterLines, aggregate, aggAll, sortedAggs, totalTokens, unitsText, deltaPill, tipRows, icon, help, segCtl, ioInfo, num, periodTag, WEEK, weekday, copyBtn, PROVIDERS, provTag, multiCloud, usageFiltered, usageAgg, normModel,
 } from '../core.js';
+import { tokenStatsHtml, drawDailyTokens, drawDailyRequests, periodDays, reqHelp } from '../stats.js';
 import { columnChart, rankList, stackRank, segbar, legendHtml } from '../charts.js';
 import { table, dataBar } from '../table.js';
 
@@ -27,6 +28,8 @@ export function billDimsHtml(lines) {
 
 function modelRows(lines, prevLines, daily) {
   const by = aggregate(lines, l => l.model), pby = aggregate(prevLines, l => l.model);
+  const ub = usageAgg(usageFiltered() || [], u => normModel(u.model));
+  const calDays = periodDays(state.data.period);
   const provs = new Map();
   for (const l of lines) { if (!provs.has(l.model)) provs.set(l.model, new Set()); provs.get(l.model).add(l.provider); }
   const total = sum([...by.values()], a => a.cost);
@@ -35,6 +38,8 @@ function modelRows(lines, prevLines, daily) {
     return {
       model: a.key, cost: a.cost, prev: pby.get(a.key)?.cost || 0, share: total ? a.cost / total : 0, gross: a.gross, tIn: a.tIn, tCache: a.tCache, tOut: a.tOut, tEmb: a.tEmb, tokens: t,
       hit: a.tIn ? a.tCache / a.tIn : null, ioRatio: a.tIn ? a.tOut / a.tIn : null, perM: t ? a.cost / t * 1e6 : null, keys: a.keys.size, keyList: [...a.keys].map(k => keyShort(k)).join('、'), providers: [...(provs.get(a.key) || [])],
+      ...(um => ({ requests: um ? um.requests : null, failRate: um && um.requests ? um.fails / um.requests : null, tokPer: um && um.requests ? um.tokens / um.requests : null, costPer: um && um.requests ? a.cost / um.requests : null, uTokens: um ? um.tokens : 0 }))(ub.get(normModel(a.key))),
+      dayTok: t / calDays,
       wss: a.wss.size, items: a.items.size, units: unitsText(a), days: uniq(daily.filter(l => l.model === a.key && metricVal(l) > 0).map(l => l.date)).length,
     };
   });
@@ -45,6 +50,8 @@ export function render(v) {
   const rows = modelRows(lines, prevLines, daily);
   const all = aggAll(lines), tok = totalTokens(all);
   const priciest = rows.filter(r => r.perM != null && r.tokens > 1e5).sort((a, b) => b.perM - a.perM)[0];
+  const hasUsage = rows.some(r => r.requests != null);
+  const reqN = sum(rows, r => r.requests || 0), reqTok = sum(rows, r => (r.requests ? r.uTokens : 0));
   v.innerHTML = `
     <div class="stat-strip">
       <div><span>使用模型</span><b>${rows.filter(r => r.cost > 0).length}</b></div>
@@ -54,8 +61,9 @@ export function render(v) {
       <div><span>缓存命中率</span><b>${all.tIn ? pct(all.tCache, all.tIn) : '-'}</b></div>
       <div><span>输出 / 输入</span><b>${all.tIn ? (all.tOut / all.tIn * 100).toFixed(1) + '%' : '-'}</b></div>
       <div><span>单价最高（>10 万 Token）</span><b title="${esc(priciest?.model || '')}">${priciest ? esc(priciest.model) : '-'}</b></div>
+      ${reqN ? `<div><span>请求次数（腾讯云）</span><b>${compact(reqN)}</b></div><div><span>单次平均 Token</span><b>${intFmt(reqTok / reqN)}</b></div>` : ''}
     </div>
-    <section class="panel"><div class="panel-h"><h3>模型明细</h3><span class="sub">点击行查看模型详情（使用该模型的 Key、每日费用、计费项）</span>
+    <section class="panel"><div class="panel-h"><h3>模型明细</h3><span class="sub">点击行查看模型详情（Token 与调用统计、使用该模型的 Key、每日费用、计费项）</span>
       <div class="actions">${segCtl('density', { normal: '标准', compact: '紧凑' })}<button class="btn sm" id="csvM">${icon('download')}导出</button></div></div><div id="tblM"></div></section>
     <div class="bi" style="margin-top:14px">
       <section class="panel c6"><div class="panel-h"><h3>Token 用量结构</h3><span class="sub">按总 Token 排序</span></div><div id="mdTok"></div></section>
@@ -66,9 +74,10 @@ export function render(v) {
       <section class="panel c12"><div class="panel-h"><h3>模型 × 计费项明细</h3><span class="sub">按模型、计费项与单价汇总</span><div class="actions"><button class="btn sm" id="csvI">${icon('download')}导出</button></div></div><div id="tblI"></div></section>
     </div>`;
   const max = Math.max(0, ...rows.map(r => r.cost));
+  let cols;
   const t = table('models', $('#tblM', v), {
     sort: 'cost', pageSize: 0, caption: '模型明细', onRowClick: r => openModel(r.model),
-    columns: [
+    columns: cols = [
       { key: 'model', label: '模型', fmt: (x, r) => `<span class="sw" style="background:${DIMS.model.color(x)}"></span><span class="mono">${esc(x)}</span>${multiCloud() ? r.providers.map(p => provTag(p)).join('') : ''}`, csv: r => r.model },
       { key: 'cost', label: `费用（${METRICS[ui.f.metric]}）`, align: 'r', fmt: x => dataBar(x, max), csv: r => r.cost.toFixed(6) },
       { key: 'chg', label: state.compareLabel, align: 'r', fmt: (x, r) => deltaPill(r.cost, r.prev), sortVal: r => r.cost - r.prev, csv: r => (r.cost - r.prev).toFixed(6) },
@@ -79,12 +88,19 @@ export function render(v) {
       { key: 'ioRatio', label: '输出/输入', align: 'r', fmt: x => (x == null ? '-' : (x * 100).toFixed(1) + '%'), sortVal: r => r.ioRatio ?? -1 },
       { key: 'tEmb', label: '向量 Token', align: 'r', fmt: x => (x ? intFmt(x) : '-') },
       { key: 'perM', label: '¥/百万Token', align: 'r', fmt: x => (x == null ? '-' : money(x)), sortVal: r => r.perM ?? -1 },
+      { key: 'dayTok', label: '日均 Token', title: '总 Token ÷ 统计周期内已过的自然日数', align: 'r', fmt: x => (x ? compact(x) : '-'), csv: r => Math.round(r.dayTok) },
+      ...(hasUsage ? [
+        { key: 'requests', label: '请求数', title: '来自腾讯云 TokenHub 用量统计（阿里云账单不含请求数）', align: 'r', fmt: x => (x == null ? '<span class="muted">—</span>' : intFmt(x)), sortVal: r => r.requests ?? -1 },
+        { key: 'failRate', label: '失败率', align: 'r', fmt: x => (x == null ? '<span class="muted">—</span>' : `<span class="${x >= 0.05 ? 'bad-text' : x >= 0.01 ? 'warn-text' : ''}">${(x * 100).toFixed(2)}%</span>`), sortVal: r => r.failRate ?? -1, csv: r => (r.failRate == null ? '' : (r.failRate * 100).toFixed(2) + '%') },
+        { key: 'tokPer', label: '单次均 Token', title: '单次平均 Token = 总 Token ÷ 请求数', align: 'r', fmt: x => (x == null ? '<span class="muted">—</span>' : intFmt(x)), sortVal: r => r.tokPer ?? -1, csv: r => (r.tokPer == null ? '' : Math.round(r.tokPer)) },
+        { key: 'costPer', label: '单次均费用', title: '单次平均费用 = 本期费用 ÷ 请求数', align: 'r', fmt: x => (x == null ? '<span class="muted">—</span>' : money(x, x < 0.01 ? 4 : 3)), sortVal: r => r.costPer ?? -1, csv: r => (r.costPer == null ? '' : r.costPer.toFixed(6)) },
+      ] : []),
       { key: 'keys', label: 'Key 数', align: 'r', fmt: (x, r) => `<span title="${esc(r.keyList)}">${x}</span>` },
       { key: 'days', label: '使用天数', align: 'r' },
       { key: 'units', label: '其他用量' },
     ],
     csvExtra: [{ label: '使用的 Key', val: r => r.keyList }, { label: '原价', val: r => r.gross.toFixed(6) }, { label: '缓存命中 Token', val: r => Math.round(r.tCache) }],
-    footer: rs => ['合计', money(sum(rs, r => r.cost)), deltaPill(sum(rs, r => r.cost), sum(rs, r => r.prev)), '', intFmt(sum(rs, r => r.tIn)), '', intFmt(sum(rs, r => r.tOut)), '', '', '', '', '', ''],
+    footer: rs => cols.map(c => ({ model: `合计 ${rs.length} 个`, cost: money(sum(rs, r => r.cost)), chg: deltaPill(sum(rs, r => r.cost), sum(rs, r => r.prev)), tIn: intFmt(sum(rs, r => r.tIn)), tOut: intFmt(sum(rs, r => r.tOut)), requests: hasUsage ? intFmt(sum(rs, r => r.requests || 0)) : '', tokPer: (() => { const n = sum(rs, r => r.requests || 0); return n ? intFmt(sum(rs, r => (r.requests ? r.uTokens : 0)) / n) : ''; })() }[c.key] ?? '')),
   }).setRows(rows);
   $('#csvM', v).onclick = () => t.csv(`模型消耗_${periodTag()}.csv`);
 
@@ -168,6 +184,10 @@ export function openModel(model) {
   const lines = filterLines().filter(of), prevLines = filterLines(state.prev).filter(of), daily = filterLines(state.daily).filter(of);
   const a = aggAll(lines), pa = aggAll(prevLines), tot = sum(filterLines(), metricVal);
   const t = totalTokens(a), pt = totalTokens(pa);
+  const uf = usageFiltered(), nm = normModel(model);
+  const mRows = (uf || []).filter(u => normModel(u.model) === nm);
+  const us = mRows.length ? usageAgg(mRows, () => 'm').get('m') : null;
+  const usByKey = usageAgg(mRows, u => u.apiKeyId);
   $('#drawerTitle').textContent = model;
   $('#drawerTags').innerHTML = `<span class="pill neutral">模型</span>${copyBtn(model, '复制模型名')}`;
   $('#drawerActions').innerHTML = `<button class="btn sm" data-dact="filter">按此模型筛选</button><button class="btn sm" data-dact="detail">账单明细</button>`;
@@ -184,11 +204,16 @@ export function openModel(model) {
       ${tile('unit', '每百万 Token', t ? money(a.cost / t * 1e6) : '—', t && pt ? deltaPill(a.cost / t, pa.cost / pt) : '', state.compareLabel, '费用 ÷ Token × 10⁶')}
       ${tile('cache', '缓存命中率', a.tIn ? pct(a.tCache, a.tIn) : '—', a.tIn && pa.tIn ? deltaPill(a.tCache / a.tIn, pa.tCache / pa.tIn, { pp: true, goodWhenUp: true }) : '', state.compareLabel, `${a.keys.size} 个 Key 使用`)}
     </div></div>
+    <section><h3>Token 消耗与调用统计 ${help('Token 来自账单用量；请求次数与单次平均来自腾讯云 TokenHub 用量统计（阿里云账单不提供调用次数）。受当前全局筛选影响。')}</h3>${tokenStatsHtml({ a, pa, daily, us, period: state.data.period, scope: 'model', provider: lines.length && lines.every(l => l.provider === 'tencent') ? 'tencent' : 'aliyun', compact: true, unavailable: uf === null })}</section>
+    <section><h3>每日 Token 消耗</h3><div class="legend" id="dmTokLegend"></div><div class="chart" id="dmTok"></div></section>
+    ${us ? `<section><h3>每日调用次数 ${reqHelp()}</h3><div class="legend" id="dmReqLegend"></div><div class="chart" id="dmReq"></div></section>` : ''}
     <section><h3>每日费用（按 API Key）</h3><div class="legend" id="dmLegend"></div><div class="chart" id="dmDaily"></div></section>
     <section><h3>使用该模型的 API Key</h3><div id="dmKeys"></div></section>
     <section><h3>计费项</h3><div id="dmItems"></div></section>`;
   if (!d.open) d.showModal();
   d.querySelector('.dlg-b').scrollTop = 0;
+  drawDailyTokens($('#dmTok'), $('#dmTokLegend'), daily, state.data.period, { height: 200 });
+  if (us) drawDailyRequests($('#dmReq'), $('#dmReqLegend'), us, state.data.period, { height: 200 });
   const days = uniq(daily.map(l => l.date)).sort();
   const ranked = sortedAggs(aggregate(daily, DIMS.key.of)).map(x => x.key);
   const colored = ranked.filter(k => DIMS.key.color(k) !== 'var(--other)'), others = ranked.filter(k => !colored.includes(k));
@@ -198,7 +223,7 @@ export function openModel(model) {
   $('#dmLegend').innerHTML = series.length > 1 ? legendHtml(series) : '';
   columnChart($('#dmDaily'), { xs: days, series, cell: (x, s) => cell.get(x + '|' + s) || 0, height: 220, xLabel: x => x.slice(5), tipTitle: x => x, empty: '暂无按日数据' });
   const pk = aggregate(prevLines, DIMS.key.of);
-  rankList($('#dmKeys'), sortedAggs(aggregate(lines, DIMS.key.of)).map(x => ({ id: x.key, label: keyShort(x.key), sub: x.key !== NONE_KEY ? x.key : '', value: x.cost, prev: pk.get(x.key)?.cost ?? 0, color: DIMS.key.color(x.key) })),
+  rankList($('#dmKeys'), sortedAggs(aggregate(lines, DIMS.key.of)).map(x => ({ id: x.key, label: keyShort(x.key), sub: [`${compact(totalTokens(x))} Token`, (u => (u && u.requests ? `${intFmt(u.requests)} 次 · 单次 ${intFmt(u.tokens / u.requests)} Token` : ''))(usByKey.get(x.key === NONE_KEY ? '' : x.key))].filter(Boolean).join(' · '), value: x.cost, prev: pk.get(x.key)?.cost ?? 0, color: DIMS.key.color(x.key) })),
     { total: a.cost, showDelta: true, limit: 20, onClick: it => { if (it.id !== NONE_KEY) { d.close(); app.go(`#/key/${it.id}`); } } });
   const byItem = aggregate(lines, l => `${l.io}\u0001${l.listPrice}\u0001${l.listPriceUnit}`);
   table('modelItems', $('#dmItems'), {

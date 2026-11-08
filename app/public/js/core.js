@@ -294,6 +294,39 @@ function mapUsage(block) {
   const g = (r, c) => (idx[c] == null ? 0 : num(r[idx[c]]));
   return block.rows.map(r => ({ provider: r[idx.provider], day: idx.day == null ? '' : r[idx.day], apiKeyId: r[idx.api_key_id] || '', model: r[idx.model], requests: g(r, 'requests'), fails: g(r, 'fails'), input: g(r, 'input_tokens'), output: g(r, 'output_tokens'), cache: g(r, 'cache_tokens'), tokens: g(r, 'total_tokens') }));
 }
+/** 模型名规范化：用量统计与账单中的模型名大小写 / 分隔符可能不同 */
+export const normModel = s => String(s || '').toLowerCase().replace(/[^a-z0-9.]/g, '');
+/**
+ * 按当前全局筛选过滤用量行（云厂商、Key、模型、成本中心、业务空间）。
+ * Token 类型 / 计费项 / 渠道筛选无法作用于请求数，此时返回 null（页面显示“—”而不是错误的数字）。
+ */
+export function usageFiltered(rows = state.usageRows) {
+  const f = ui.f;
+  if (f.dir || f.item || f.channel !== '__all') return null;
+  const nm = f.model ? normModel(f.model) : '';
+  return rows.filter(u => {
+    if (f.provider && u.provider !== f.provider) return false;
+    if (f.key && u.apiKeyId !== f.key) return false;
+    if (nm && normModel(u.model) !== nm) return false;
+    const k = state.apiKeys.get(u.apiKeyId);
+    if (f.cc && (f.cc === NO_CC ? !!k?.costCenter : k?.costCenter !== f.cc)) return false;
+    if (f.ws && (f.ws === '__nows' ? !!k?.wsKey : (k?.wsKey || '') !== f.ws)) return false;
+    return true;
+  });
+}
+/** 用量行按维度汇总：请求数、失败数、Token（含按日） */
+export function usageAgg(rows, keyFn) {
+  const m = new Map();
+  for (const u of rows || []) {
+    const id = keyFn(u);
+    const a = m.get(id) || { requests: 0, fails: 0, tokens: 0, input: 0, output: 0, cache: 0, days: new Map(), keys: new Set() };
+    a.requests += u.requests; a.fails += u.fails; a.tokens += u.tokens; a.input += u.input; a.output += u.output; a.cache += u.cache; a.keys.add(u.apiKeyId);
+    const d = a.days.get(u.day) || { requests: 0, fails: 0, tokens: 0 };
+    d.requests += u.requests; d.fails += u.fails; d.tokens += u.tokens; a.days.set(u.day, d);
+    m.set(id, a);
+  }
+  return m;
+}
 /** 用量统计口径：请求数可用时计算单次平均 Token / 费用（Token 取用量统计，费用取账单） */
 export function perCall(us, cost) {
   if (!us || !us.requests) return null;
