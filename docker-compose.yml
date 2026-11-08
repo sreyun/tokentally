@@ -6,7 +6,7 @@
 services:
   app:
     build: .
-    image: bailian-cost:1.3.0
+    image: bailian-cost:1.4.0
     container_name: bailian-cost
     restart: unless-stopped
     env_file: .env

@@ -95,11 +95,182 @@ async function aliyun(el) {
       <p class="hint" style="margin:0 0 10px">系统策略 <b>AliyunBailianReadOnlyAccess</b> + <b>AliyunBSSReadOnlyAccess</b>，或下方最小权限自定义策略：</p>
       <pre class="code">${esc(JSON.stringify(POLICY, null, 2))}</pre>
       <p class="hint" style="margin:10px 0 0">建议为本系统创建专用 RAM 用户，只授予只读权限并定期轮换 AccessKey。更换 Key 后系统会立即重新同步。</p>
-    </section></div>`;
+    </section></div>
+    <div class="bi" style="margin-top:16px" id="callsBox"></div>`;
   bindCredForm(el, {
     form: $('#akForm', el), idField: 'accessKeyId', secretField: 'accessKeySecret', settingsKey: 'aliyun', reload: () => aliyun(el),
     testBody: fd => (fd ? { provider: 'aliyun', accessKeyId: fd.accessKeyId, accessKeySecret: fd.accessKeySecret } : { provider: 'aliyun' }),
   });
+  callsPanel($('#callsBox', el), s.aliyunCalls, () => aliyun(el));
+}
+
+/* ---------------- 阿里云调用次数：百炼监控投递 → 云监控 Prometheus ---------------- */
+const promQL = c => {
+  if (!c.metric || !c.keyLabel) return '';
+  const sel = c.filter ? `${c.metric}{${c.filter}}` : c.metric;
+  const by = [c.keyLabel, c.modelLabel].filter(Boolean).join(', ');
+  return c.aggregation === 'sum' ? `sum by (${by}) (sum_over_time(${sel}[1d]))` : `sum by (${by}) (increase(${sel}[1d]))`;
+};
+function callsPanel(box, c, reload) {
+  const last = c.last;
+  const lastHtml = !last ? '<div><span>最近同步</span><b>尚未同步</b></div>' : last.ok
+    ? `<div><span>最近同步</span><b>${esc(fmtTime(last.at))}</b></div>
+       <div><span>数据范围</span><b>${last.from ? `${esc(last.from)} ~ ${esc(last.to)}` : '无数据'}</b></div>
+       <div><span>调用次数</span><b>${Number(last.requests || 0).toLocaleString()} 次</b>${last.unmatched ? `<span class="hint warn-text">${last.unmatched} 个 Key 标签值未匹配</span>` : ''}</div>`
+    : `<div><span>最近同步</span><b class="bad-text">${esc(fmtTime(last.at))} 失败</b><span class="hint bad-text">${esc(last.error || '')}</span></div>`;
+  box.innerHTML = `
+    <section class="panel c7"><div class="panel-h"><h3>调用次数（云监控 Prometheus）</h3>${help('百炼公开 OpenAPI 与费用中心账单不含调用次数。百炼“监控告警”数据开启“监控数据投递”后写入云监控 Prometheus 实例，本系统通过其标准 HTTP API 只读查询，按 API Key × 模型 × 日 汇总。')}
+        <span class="sp"></span><span class="state ${c.enabled ? 'on' : 'off'}">${c.enabled ? '已启用' : '未启用'}</span></div>
+      <div class="kv" style="margin-bottom:14px">${lastHtml}</div>
+      <form id="callsForm" class="form-grid" autocomplete="off">
+        <label class="chk full"><input type="checkbox" name="enabled" ${c.enabled ? 'checked' : ''}> 启用：随阿里云账单同步读取调用次数（单次平均 Token / 费用、成功率、每日调用图）</label>
+        <label class="field full"><span>Prometheus HTTP API 地址</span><input class="inp mono" name="url" value="${esc(c.url)}" placeholder="云监控 Prometheus 实例“设置”页中的 HTTP API 地址（公网或 VPC 内网）" spellcheck="false"></label>
+        <label class="field"><span>认证方式</span><select class="inp" name="authType">${Object.entries(c.authTypes || {}).map(([k, l]) => opt(k, l, c.authType)).join('')}</select></label>
+        <label class="field" data-auth="bearer raw"><span>Token</span><input class="inp mono" name="token" type="password" placeholder="${c.secretSet ? '已加密保存，留空表示不修改' : '实例开启鉴权时填写'}" autocomplete="new-password" spellcheck="false"></label>
+        <label class="field" data-auth="basic"><span>用户名</span><input class="inp mono" name="username" value="${esc(c.username)}" autocomplete="off" spellcheck="false"></label>
+        <label class="field" data-auth="basic"><span>密码</span><input class="inp mono" name="password" type="password" placeholder="${c.secretSet ? '已加密保存，留空表示不修改' : ''}" autocomplete="new-password"></label>
+        <div class="row full"><button class="btn" type="button" data-discover>${icon('search')}发现指标</button><span class="hint">读取实例中的指标名与标签，自动推荐下方映射</span></div>
+        <div class="full" data-discover-out></div>
+        <label class="field"><span>调用次数指标</span><input class="inp mono" name="metric" value="${esc(c.metric)}" list="promMetrics" spellcheck="false" placeholder="发现后自动填写"></label>
+        <label class="field"><span>失败次数指标（可选）</span><input class="inp mono" name="failMetric" value="${esc(c.failMetric)}" list="promMetrics" spellcheck="false" placeholder="用于成功率"></label>
+        <label class="field"><span>API Key 标签</span><input class="inp mono" name="keyLabel" value="${esc(c.keyLabel)}" list="promLabels" spellcheck="false"></label>
+        <label class="field"><span>模型标签（可选）</span><input class="inp mono" name="modelLabel" value="${esc(c.modelLabel)}" list="promLabels" spellcheck="false"></label>
+        <label class="field"><span>统计方式</span><select class="inp" name="aggregation">${opt('increase', '计数器：increase（累计值）', c.aggregation)}${opt('sum', '周期值：sum_over_time（每点为该周期次数）', c.aggregation)}</select></label>
+        <label class="field"><span>回读天数</span><input class="inp" name="lookbackDays" type="number" min="1" max="400" value="${esc(c.lookbackDays)}"></label>
+        <label class="field full"><span>过滤条件（可选）</span><input class="inp mono" name="filter" value="${esc(c.filter)}" placeholder='如 region="cn-beijing"，多个用逗号分隔' spellcheck="false"></label>
+        <div class="field full"><span>查询语句（每个自然日）</span><pre class="code" data-ql>${esc(promQL(c) || '—')}</pre></div>
+        <label class="chk full" ${c.secretSet ? '' : 'hidden'}><input type="checkbox" name="clearToken"> 清除已保存的 Token / 密码</label>
+        <label class="field full" data-confirm hidden><span>当前登录密码</span><input class="inp" name="confirmPassword" type="password" autocomplete="current-password" maxlength="256"><small class="hint">修改 Prometheus 地址或认证信息属于敏感操作，需要再次验证身份</small></label>
+        <div class="row full"><button class="btn primary" type="submit">保存配置</button><button class="btn" type="button" data-preview>预览近 7 天</button><button class="btn" type="button" data-calls-sync ${c.enabled ? '' : 'disabled'}>${icon('sync')}立即同步</button></div>
+        <datalist id="promMetrics"></datalist><datalist id="promLabels"></datalist>
+      </form>
+    </section>
+    <section class="panel c5"><div class="panel-h"><h3>接入步骤</h3></div>
+      <ol class="hint" style="margin:0;padding-left:18px;line-height:1.9">
+        <li>百炼控制台 → <b>监控告警</b> → 开启<b>监控数据投递</b>，选择（或新建）云监控 Prometheus 实例</li>
+        <li>在云监控 / 可观测监控 Prometheus 版控制台打开该实例的<b>设置</b>页，复制 <b>HTTP API 地址</b>；实例开启鉴权时同时复制 Token</li>
+        <li>填入左侧后点<b>发现指标</b>，系统自动识别调用次数 / 失败次数指标与 API Key、模型标签</li>
+        <li>点<b>预览近 7 天</b>，与百炼控制台“模型用量”中的调用次数核对一致后，勾选启用并保存</li>
+      </ol>
+      <h4 class="sec-h">说明</h4>
+      <ul class="hint" style="margin:0;padding-left:18px;line-height:1.8">
+        <li>只读查询：仅调用 Prometheus 的查询接口，Token 以 AES-256-GCM 加密保存、不回显</li>
+        <li>调用次数从开启投递之日起才有数据；系统每次同步回读最近 N 天，Prometheus 中已过期的日期保留本地已同步的记录</li>
+        <li>单次平均 Token 取同日同 Key 同模型的<b>账单 Token</b>，与费用口径一致；修改指标映射会清空已同步的阿里云调用次数并重新读取</li>
+        <li>VPC 内网地址需本系统部署在同一 VPC；云服务器元数据地址与本机回环地址禁止访问</li>
+      </ul>
+    </section>
+    <section class="panel c12" data-preview-panel hidden><div class="panel-h"><h3>预览</h3><span class="sub" data-preview-sub></span></div><div data-preview-out></div></section>`;
+
+  const form = $('#callsForm', box), pw = form.elements.confirmPassword, confirmBox = $('[data-confirm]', form);
+  const val = n => form.elements[n].value.trim();
+  const cfgNow = () => ({ url: val('url'), authType: form.elements.authType.value, username: val('username'), metric: val('metric'), failMetric: val('failMetric'), keyLabel: val('keyLabel'), modelLabel: val('modelLabel'), aggregation: form.elements.aggregation.value, filter: val('filter'), lookbackDays: val('lookbackDays') });
+  const authBody = () => ({ ...cfgNow(), token: form.elements.token.value.trim(), password: form.elements.password.value });
+  const needConfirm = () => !!(form.elements.token.value.trim() || form.elements.password.value || form.elements.clearToken.checked || (c.secretSet && c.url && val('url').replace(/\/+$/, '').replace(/\/api\/v1$/, '') !== c.url));
+  const sync = () => {
+    const t = form.elements.authType.value;
+    form.querySelectorAll('[data-auth]').forEach(x => { x.hidden = !x.dataset.auth.split(' ').includes(t); });
+    $('[data-ql]', form).textContent = promQL(cfgNow()) || '—';
+    confirmBox.hidden = !needConfirm();
+  };
+  sync();
+  form.addEventListener('input', e => { app.dirty = true; if (e.target === pw) pw.classList.remove('invalid'); else sync(); });
+  form.addEventListener('change', sync);
+
+  const fill = (list, el) => { $(el, form).innerHTML = [...new Set(list)].map(x => `<option value="${esc(x)}"></option>`).join(''); };
+  const busy = async (btn, fn) => { btn.disabled = true; try { await fn(); } finally { btn.disabled = false; } };
+  $('[data-discover]', form).onclick = e => busy(e.currentTarget, async () => {
+    const out = $('[data-discover-out]', form);
+    out.innerHTML = '<div class="muted">正在读取指标…</div>';
+    try {
+      const d = await http('POST', '/api/admin/aliyun-calls/discover', authBody());
+      fill(d.candidates.map(x => x.name), '#promMetrics');
+      fill(d.candidates.flatMap(x => x.labels), '#promLabels');
+      if (!d.candidates.length) { out.innerHTML = `<div class="notice warn">${icon('warn')}<div><b>未找到疑似调用次数的指标</b><span class="why">实例共有 ${d.totalMetrics} 个指标。请确认百炼已开启监控数据投递到该实例（投递后约数分钟出现数据），或手动填写指标名。</span></div></div>`; return; }
+      out.innerHTML = `<div class="hint" style="margin-bottom:6px">实例共 ${d.totalMetrics} 个指标，以下为疑似调用相关的候选（点“使用”填入映射）：</div>
+        <div class="tbl-wrap" style="max-height:260px"><table class="dt compact"><thead><tr><th>指标名</th><th>标签</th><th>推荐 Key / 模型标签</th><th></th></tr></thead><tbody>
+        ${d.candidates.slice(0, 15).map((x, i) => `<tr><td class="mono">${esc(x.name)}${x.fail ? ' <span class="pill warn">失败</span>' : ''}</td><td class="mono" style="white-space:normal">${esc(x.labels.join(', ') || '—')}</td><td class="mono">${esc(x.keyLabel || '—')} / ${esc(x.modelLabel || '—')}</td><td><button class="btn sm" type="button" data-use="${i}">使用</button></td></tr>`).join('')}
+        </tbody></table></div>`;
+      const use = x => {
+        const f = form.elements;
+        if (x.fail) f.failMetric.value = x.name;
+        else { f.metric.value = x.name; f.keyLabel.value = x.keyLabel || f.keyLabel.value; f.modelLabel.value = x.modelLabel || f.modelLabel.value; f.aggregation.value = /_total$|_count$|counter/i.test(x.name) ? 'increase' : 'sum'; }
+        app.dirty = true; sync();
+      };
+      out.querySelectorAll('[data-use]').forEach(b => { b.onclick = () => use(d.candidates[Number(b.dataset.use)]); });
+      if (d.guess && !val('metric')) {
+        const f = form.elements;
+        Object.assign(f.metric, { value: d.guess.metric }); f.failMetric.value = d.guess.failMetric || ''; f.keyLabel.value = d.guess.keyLabel || ''; f.modelLabel.value = d.guess.modelLabel || ''; f.aggregation.value = d.guess.aggregation;
+        app.dirty = true; sync();
+        toast('已按推荐填写指标映射，请预览核对');
+      }
+    } catch (ex) { out.innerHTML = `<div class="bad-text">${esc(ex.message)}</div>`; }
+  });
+
+  const panel = $('[data-preview-panel]', box);
+  $('[data-preview]', form).onclick = e => busy(e.currentTarget, async () => {
+    panel.hidden = false;
+    const out = $('[data-preview-out]', panel);
+    out.innerHTML = '<div class="muted">正在查询…</div>';
+    try {
+      const p = await http('POST', '/api/admin/aliyun-calls/preview', { ...authBody(), days: 7 });
+      $('[data-preview-sub]', panel).textContent = `${p.from} ~ ${p.to} · ${p.calls} 次查询`;
+      const max = Math.max(1, ...p.days.map(x => x.requests));
+      out.innerHTML = `
+        <div class="kv" style="margin-bottom:12px">
+          <div><span>调用次数（已匹配 Key）</span><b>${Number(p.total).toLocaleString()} 次</b></div>
+          <div><span>失败次数</span><b>${val('failMetric') ? Number(p.fails).toLocaleString() + ' 次' : '未配置失败次数指标'}</b></div>
+          <div><span>未匹配的 Key 标签值</span><b>${p.unmatched.length ? `<span class="warn-text">${p.unmatched.length} 个 · ${Number(p.unmatchedTotal).toLocaleString()} 次</span>` : '无'}</b></div>
+        </div>
+        ${p.days.length ? `<div class="hint" style="margin-bottom:4px">每日调用次数</div><div class="test-list" style="margin:0 0 12px">${p.days.map(x => `<div style="grid-template-columns:86px 1fr 90px"><span class="mono">${esc(x.day.slice(5))}</span><span class="progress" style="align-self:center"><i style="width:${(x.requests / max * 100).toFixed(1)}%"></i></span><span class="mono" style="text-align:right">${Number(x.requests).toLocaleString()}</span></div>`).join('')}</div>` : `<div class="notice warn">${icon('warn')}<div><b>近 7 天没有查询到调用次数</b><span class="why">请检查指标名、标签与统计方式；投递刚开启时需等待数分钟。</span></div></div>`}
+        ${p.unmatched.length ? `<div class="notice warn" style="margin-bottom:12px">${icon('warn')}<div><b>以下 API Key 标签值未匹配到已同步的阿里云 Key（不会入库）</b><span class="why mono">${p.unmatched.map(u => `${esc(u.value || '（空）')} · ${u.requests} 次`).join('；')}</span><span class="why">请确认选择的是 API Key ID 标签，或先在“数据同步”中同步 Key。</span></div></div>` : ''}
+        <div id="callsPrev"></div>`;
+      table('callsPrev', $('#callsPrev', out), {
+        sort: 'requests', pageSize: 20, stickyFirst: false, empty: '无数据',
+        columns: [
+          { key: 'apiKeyId', label: 'API Key', fmt: (x, r) => `<span class="mono">${esc(x || '（无 API Key）')}</span>${r.name ? ` <span class="muted">${esc(r.name)}</span>` : ''}` },
+          { key: 'model', label: '模型', fmt: x => `<span class="mono">${esc(x || '—')}</span>` },
+          { key: 'requests', label: '调用次数', align: 'r', fmt: x => Number(x).toLocaleString() },
+          { key: 'fails', label: '失败', align: 'r', fmt: x => Number(x).toLocaleString() },
+          { key: 'tokens', label: '账单 Token', align: 'r', fmt: x => Math.round(x).toLocaleString() },
+          { key: 'tokPer', label: '单次平均 Token', align: 'r', fmt: x => (x == null ? '—' : Math.round(x).toLocaleString()) },
+        ],
+      }).setRows(p.rows.map(r => ({ ...r, tokPer: r.requests && r.tokens ? r.tokens / r.requests : null })));
+    } catch (ex) { out.innerHTML = `<div class="bad-text">${esc(ex.message)}</div>`; }
+  });
+
+  $('[data-calls-sync]', form).onclick = e => busy(e.currentTarget, async () => {
+    try {
+      const r = await http('POST', '/api/admin/aliyun-calls/sync', {});
+      toast(r.from ? `已同步 ${r.from} ~ ${r.to}：${Number(r.requests).toLocaleString()} 次调用` : '同步完成，但没有查询到调用次数', '', 4000);
+      app.reload?.(); reload();
+    } catch (ex) { toast('同步失败：' + ex.message, 'err', 5000); }
+  });
+
+  form.onsubmit = async e => {
+    e.preventDefault();
+    const body = { ...cfgNow(), enabled: form.elements.enabled.checked, clearToken: form.elements.clearToken.checked };
+    const tk = form.elements.token.value.trim(), pass = form.elements.password.value;
+    if (tk) body.token = tk;
+    if (pass) body.password = pass;
+    if (needConfirm()) {
+      if (!pw.value) { confirmBox.hidden = false; pw.classList.add('invalid'); pw.focus(); toast('修改地址或认证信息需输入当前登录密码', 'err'); return; }
+      body.confirmPassword = pw.value;
+    }
+    const remap = c.metric && ['url', 'metric', 'failMetric', 'keyLabel', 'modelLabel', 'aggregation', 'filter'].some(k => String(body[k] || '').replace(/\/+$/, '') !== String(c[k] || ''));
+    if (remap && !confirm('修改了指标映射或地址，保存后将清空已同步的阿里云调用次数并按新配置重新读取。是否继续？')) return;
+    const btn = form.querySelector('[type=submit]');
+    btn.disabled = true;
+    try {
+      await http('PUT', '/api/admin/settings', { aliyunCalls: body });
+      app.dirty = false;
+      toast(body.enabled ? '已保存，将随下一次阿里云账单同步读取调用次数（也可点“立即同步”）' : '配置已保存');
+      await app.refreshStatus(); reload();
+    } catch (ex) {
+      if (ex.status === 403) { pw.value = ''; pw.classList.add('invalid'); pw.focus(); }
+      toast('保存失败：' + ex.message, 'err', 4000);
+    } finally { btn.disabled = false; }
+  };
 }
 
 /* ---------------- 腾讯云接入 ---------------- */
@@ -229,7 +400,7 @@ function runSummary(r) {
     const d = JSON.parse(r.detail || 'null');
     if (!d) return r.error || '';
     if (r.kind === 'meta') return `业务空间 ${d.workspaces} · API Key ${d.apiKeys} · 变更 ${d.changes}${r.error ? ' · ' + r.error : ''}`;
-    return (d.cycles || []).map(c => (c.demo ? `${c.cycle} 演示数据` : c.skipped ? `${c.cycle} 跳过` : c.failed ? `${c.cycle} 失败` : c.lines != null ? `${c.cycle}：${c.lines} 行 · 分摊 ¥${Number(c.allocated || 0).toFixed(2)}${c.estimated ? ' · 估算' : ''}${c.final ? ' · 终版' : ''}` : `${c.cycle}：月 ${c.monthly} / 日 ${c.daily} 条${c.final ? ' · 终版' : ''}`)).join('；') + (r.error ? ' · ' + r.error : '');
+    return (d.cycles || []).map(c => (c.demo ? `${c.cycle} 演示数据` : c.skipped ? `${c.cycle} 跳过` : c.failed ? `${c.cycle} 失败` : c.lines != null ? `${c.cycle}：${c.lines} 行 · 分摊 ¥${Number(c.allocated || 0).toFixed(2)}${c.estimated ? ' · 估算' : ''}${c.final ? ' · 终版' : ''}` : `${c.cycle}：月 ${c.monthly} / 日 ${c.daily} 条${c.final ? ' · 终版' : ''}`)).join('；') + (d.calls ? (d.calls.error ? '；调用次数同步失败' : `；调用次数 ${Number(d.calls.requests || 0).toLocaleString()} 次`) : '') + (r.error ? ' · ' + r.error : '');
   } catch { return r.error || ''; }
 }
 
@@ -610,7 +781,7 @@ async function security(el) {
   const ACT = {
     'login.success': '登录成功', 'login.fail': '登录失败', logout: '退出登录', 'password.change': '修改密码', 'password.change.fail': '修改密码失败', 'password.change.lock': '改密错误过多强制退出',
     'user.create': '创建用户', 'user.update': '修改用户', 'user.delete': '删除用户', 'user.bootstrap': '初始化管理员', 'settings.update': '修改设置',
-    'aliyun.ak.update': '更新阿里云 AccessKey', 'aliyun.ak.update.fail': '更新 AccessKey 验证失败', 'aliyun.ak.bootstrap': '导入阿里云 AccessKey', 'aliyun.test': '测试阿里云连接',
+    'aliyun.ak.update': '更新阿里云 AccessKey', 'aliyun.ak.update.fail': '更新 AccessKey 验证失败', 'aliyun.ak.bootstrap': '导入阿里云 AccessKey', 'aliyun.test': '测试阿里云连接', 'aliyun.calls.secret': '修改调用次数 Prometheus 地址 / 认证', 'aliyun.calls.secret.fail': '修改 Prometheus 认证验证失败', 'aliyun.calls.secret.lock': '修改 Prometheus 认证多次验证失败', 'aliyun.calls.sync': '同步阿里云调用次数',
     'tencent.key.update': '更新腾讯云密钥', 'tencent.key.update.fail': '更新腾讯云密钥验证失败', 'tencent.key.bootstrap': '导入腾讯云密钥', 'tencent.test': '测试腾讯云连接',
     'sync.trigger': '触发同步', 'budgets.update': '修改预算', 'keytags.update': '修改成本中心 / 负责人', 'alert.update': '修改告警设置', 'alert.test': '发送测试消息', 'alert.test.fail': '测试消息失败',
     'alert.sent': '告警 / 报表已发送', 'alert.report.send': '手动发送报表', 'backup.create': '创建备份', 'backup.download': '下载备份', 'backup.download.fail': '下载备份验证失败', 'demo.clear': '清除演示数据',

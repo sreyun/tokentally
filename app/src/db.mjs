@@ -4,6 +4,7 @@
  */
 import { DatabaseSync, backup as sqliteBackup } from 'node:sqlite';
 import { encrypt, decrypt, sha256, randomToken } from './crypto.mjs';
+import { DEFAULT_CALLS } from './prom.mjs';
 
 const SCHEMA_V1 = `
 CREATE TABLE IF NOT EXISTS settings (k TEXT PRIMARY KEY, v TEXT, updated_at INTEGER);
@@ -213,6 +214,8 @@ export class Store {
   setSecret(k, v) { this.setSetting(k, v ? encrypt(this.key, v, k) : null); }
   aliyunSettings() { return { ...DEFAULT_ALIYUN, ...(this.getSetting('aliyun', {}) || {}) }; }
   tencentSettings() { return { ...DEFAULT_TENCENT, ...(this.getSetting('tencent', {}) || {}) }; }
+  /** 阿里云调用次数（百炼监控投递 → 云监控 Prometheus） */
+  aliyunCallsSettings() { return { ...DEFAULT_CALLS, ...(this.getSetting('aliyunCalls', {}) || {}) }; }
   syncSettings() { return { ...DEFAULT_SYNC, ...(this.getSetting('sync', {}) || {}) }; }
   budgets() { return { ...DEFAULT_BUDGETS, ...(this.getSetting('budgets', {}) || {}) }; }
   branding() { return { ...DEFAULT_BRANDING, ...(this.getSetting('branding', {}) || {}) }; }
@@ -481,6 +484,12 @@ export class Store {
         requests=requests+excluded.requests, fails=fails+excluded.fails`);
       for (const r of rows) ins.run(provider, r.day, r.api_key_id, r.model, r.input_tokens || 0, r.output_tokens || 0, r.cache_tokens || 0, r.total_tokens || 0, r.requests || 0, r.fails || 0, now);
     });
+  }
+  clearUsage(provider) { this.q('DELETE FROM usage_lines WHERE provider = ?').run(provider); }
+  /** 阿里云按日账单 Token：日 × Key × 模型 × 计费项（用于调用次数的单次平均 Token） */
+  billTokenCells(provider, from, to) {
+    return this.q(`SELECT period AS day, COALESCE(api_key_id, '') AS api_key_id, COALESCE(model, '') AS model, io, SUM(tokens) AS tokens
+      FROM bill_lines WHERE provider = ? AND granularity = 'D' AND period >= ? AND period <= ? AND tokens > 0 GROUP BY period, api_key_id, model, io`).all(provider, from, to);
   }
   usageRows(provider, from, to) {
     return this.q('SELECT day, api_key_id, model, input_tokens, output_tokens, cache_tokens, total_tokens, requests, fails FROM usage_lines WHERE provider = ? AND day >= ? AND day <= ?').all(provider, from, to);

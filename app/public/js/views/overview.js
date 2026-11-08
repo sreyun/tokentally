@@ -3,7 +3,7 @@ import {
   $, esc, state, ui, app, money, moneyShort, compact, intFmt, pct, sum, uniq, metricVal, METRICS, NONE_KEY, DIMS, keyShort, wsName,
   filterLines, aggregate, aggAll, sortedAggs, totalTokens, topModels, deltaPill, tipRows, icon, help, segCtl, forecastOf, budgetOf,
   budgetBar, activeFilterCount, channelLabel, addDays, daysBetween, WEEK, weekday, isCurrentMonth, lastDayOf as lastDayOfCycle,
-  multiCloud, hasTags, PROVIDERS, usageFiltered, usageAgg,
+  multiCloud, hasTags, PROVIDERS, usageFiltered, usageAgg, callsOn,
 } from '../core.js';
 import { sparkline, columnChart, lineChart, rankList, divergingList, segbar, legendList, topParts, legendHtml, bindActivate } from '../charts.js';
 import { computeInsights, cacheSavings } from '../insights.js';
@@ -43,8 +43,8 @@ export function render(v) {
   const budget = p.mode === 'month' && !activeFilterCount() ? budgetOf() : null;
   const saved = cacheSavings(lines);
   const prevFullCost = sum(filterLines(state.prevFull), metricVal);
-  // 仅当筛选后全部为腾讯云账单时，Token 卡片附带请求数与单次平均（阿里云账单无请求数，混合时不展示以免误导）
-  const uf = usageFiltered(), ua = uf && lines.length && lines.every(l => l.provider === "tencent") ? usageAgg(uf, () => "a").get("a") : null;
+  // 仅当筛选后的账单全部来自有调用次数数据源的云厂商时，Token 卡片附带请求数与单次平均（否则会低估单次平均，不展示以免误导）
+  const uf = usageFiltered(), ua = uf && lines.length && lines.every(l => callsOn(l.provider)) ? usageAgg(uf, () => "a").get("a") : null;
 
   v.innerHTML = `
   <div class="kpis">

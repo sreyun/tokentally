@@ -98,9 +98,10 @@ export function seedDemo(store, today) {
                 if (u.cache) rows.push(lineRow({ provider, keyId: k.id, ws, model, io: 'input_token_cache', tokens: u.cache, price: p.cache, discount: disc, day }));
                 rows.push(lineRow({ provider, keyId: k.id, ws, model, io: 'output_token', tokens: u.output, price: p.out, discount: disc, day }));
               }
-              if (provider === 'tencent') {
-                const requests = Math.round(u.input / (1600 + 900 * rnd('r' + model + k.id)));
-                usageRows.push({ day, api_key_id: k.id, model, input_tokens: u.input, output_tokens: u.output, cache_tokens: u.cache, total_tokens: u.input + u.output, requests, fails: Math.round(requests * 0.012 * (0.5 + rnd('f' + day + k.id))) });
+              // 调用次数：腾讯云来自 TokenHub 用量；阿里云模拟“监控数据投递”最近 60 天的数据（Token 与账单一致）
+              if (provider === 'tencent' || day >= addDays(today, -59)) {
+                const requests = Math.max(1, Math.round(u.input / (1600 + 900 * rnd('r' + model + k.id))));
+                usageRows.push({ provider, day, api_key_id: k.id, model, input_tokens: u.input, output_tokens: p.emb ? 0 : u.output, cache_tokens: p.emb ? 0 : u.cache, total_tokens: p.emb ? u.input : u.input + u.output, requests, fails: Math.round(requests * 0.012 * (0.5 + rnd('f' + day + k.id))) });
               }
             }
           }
@@ -121,8 +122,8 @@ export function seedDemo(store, today) {
         store.markCycle(provider, cycle, [code], final);
       }
     }
-    const ins = store.q(`INSERT INTO usage_lines(provider, day, api_key_id, model, input_tokens, output_tokens, cache_tokens, total_tokens, requests, fails, synced_at) VALUES('tencent',?,?,?,?,?,?,?,?,?,?)`);
-    for (const u of usageRows) ins.run(u.day, u.api_key_id, u.model, u.input_tokens, u.output_tokens, u.cache_tokens, u.total_tokens, u.requests, u.fails, now);
+    const ins = store.q(`INSERT INTO usage_lines(provider, day, api_key_id, model, input_tokens, output_tokens, cache_tokens, total_tokens, requests, fails, synced_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`);
+    for (const u of usageRows) ins.run(u.provider, u.day, u.api_key_id, u.model, u.input_tokens, u.output_tokens, u.cache_tokens, u.total_tokens, u.requests, u.fails, now);
   });
   // 预算：总预算略高于上月，部分 Key 设置预算（其中一个会超出）
   const last = store.q("SELECT SUM(pretax) AS c FROM bill_lines WHERE granularity = 'M' AND period = ?").get(addMonths(cur, -1)).c || 0;

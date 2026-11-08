@@ -1,7 +1,7 @@
 /* 模型分析：模型费用、Token 结构、单位成本、计费维度、Key × 模型矩阵、模型详情抽屉 */
 import {
   $, esc, state, ui, app, money, moneyShort, compact, intFmt, pct, sum, uniq, metricVal, METRICS, NONE_KEY, DIMS, keyShort,
-  filterLines, aggregate, aggAll, sortedAggs, totalTokens, unitsText, deltaPill, tipRows, icon, help, segCtl, ioInfo, num, periodTag, WEEK, weekday, copyBtn, PROVIDERS, provTag, multiCloud, usageFiltered, usageAgg, normModel,
+  filterLines, aggregate, aggAll, sortedAggs, totalTokens, unitsText, deltaPill, tipRows, icon, help, segCtl, ioInfo, num, periodTag, WEEK, weekday, copyBtn, PROVIDERS, provTag, multiCloud, usageFiltered, usageAgg, normModel, REQ_SRC,
 } from '../core.js';
 import { tokenStatsHtml, drawDailyTokens, drawDailyRequests, periodDays, reqHelp } from '../stats.js';
 import { columnChart, rankList, stackRank, segbar, legendHtml } from '../charts.js';
@@ -90,7 +90,7 @@ export function render(v) {
       { key: 'perM', label: '¥/百万Token', align: 'r', fmt: x => (x == null ? '-' : money(x)), sortVal: r => r.perM ?? -1 },
       { key: 'dayTok', label: '日均 Token', title: '总 Token ÷ 统计周期内已过的自然日数', align: 'r', fmt: x => (x ? compact(x) : '-'), csv: r => Math.round(r.dayTok) },
       ...(hasUsage ? [
-        { key: 'requests', label: '请求数', title: '来自腾讯云 TokenHub 用量统计（阿里云账单不含请求数）', align: 'r', fmt: x => (x == null ? '<span class="muted">—</span>' : intFmt(x)), sortVal: r => r.requests ?? -1 },
+        { key: 'requests', label: '请求数', title: REQ_SRC, align: 'r', fmt: x => (x == null ? '<span class="muted">—</span>' : intFmt(x)), sortVal: r => r.requests ?? -1 },
         { key: 'failRate', label: '失败率', align: 'r', fmt: x => (x == null ? '<span class="muted">—</span>' : `<span class="${x >= 0.05 ? 'bad-text' : x >= 0.01 ? 'warn-text' : ''}">${(x * 100).toFixed(2)}%</span>`), sortVal: r => r.failRate ?? -1, csv: r => (r.failRate == null ? '' : (r.failRate * 100).toFixed(2) + '%') },
         { key: 'tokPer', label: '单次均 Token', title: '单次平均 Token = 总 Token ÷ 请求数', align: 'r', fmt: x => (x == null ? '<span class="muted">—</span>' : intFmt(x)), sortVal: r => r.tokPer ?? -1, csv: r => (r.tokPer == null ? '' : Math.round(r.tokPer)) },
         { key: 'costPer', label: '单次均费用', title: '单次平均费用 = 本期费用 ÷ 请求数', align: 'r', fmt: x => (x == null ? '<span class="muted">—</span>' : money(x, x < 0.01 ? 4 : 3)), sortVal: r => r.costPer ?? -1, csv: r => (r.costPer == null ? '' : r.costPer.toFixed(6)) },
@@ -204,7 +204,7 @@ export function openModel(model) {
       ${tile('unit', '每百万 Token', t ? money(a.cost / t * 1e6) : '—', t && pt ? deltaPill(a.cost / t, pa.cost / pt) : '', state.compareLabel, '费用 ÷ Token × 10⁶')}
       ${tile('cache', '缓存命中率', a.tIn ? pct(a.tCache, a.tIn) : '—', a.tIn && pa.tIn ? deltaPill(a.tCache / a.tIn, pa.tCache / pa.tIn, { pp: true, goodWhenUp: true }) : '', state.compareLabel, `${a.keys.size} 个 Key 使用`)}
     </div></div>
-    <section><h3>Token 消耗与调用统计 ${help('Token 来自账单用量；请求次数与单次平均来自腾讯云 TokenHub 用量统计（阿里云账单不提供调用次数）。受当前全局筛选影响。')}</h3>${tokenStatsHtml({ a, pa, daily, us, period: state.data.period, scope: 'model', provider: lines.length && lines.every(l => l.provider === 'tencent') ? 'tencent' : 'aliyun', compact: true, unavailable: uf === null })}</section>
+    <section><h3>Token 消耗与调用统计 ${help(`Token 来自账单用量；请求次数与单次平均：${REQ_SRC}。受当前全局筛选影响。`)}</h3>${tokenStatsHtml({ a, pa, daily, us, period: state.data.period, scope: 'model', provider: lines.length && lines.every(l => l.provider === 'tencent') ? 'tencent' : 'aliyun', compact: true, unavailable: uf === null })}</section>
     <section><h3>每日 Token 消耗</h3><div class="legend" id="dmTokLegend"></div><div class="chart" id="dmTok"></div></section>
     ${us ? `<section><h3>每日调用次数 ${reqHelp()}</h3><div class="legend" id="dmReqLegend"></div><div class="chart" id="dmReq"></div></section>` : ''}
     <section><h3>每日费用（按 API Key）</h3><div class="legend" id="dmLegend"></div><div class="chart" id="dmDaily"></div></section>

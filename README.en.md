@@ -36,7 +36,7 @@ TokenTally syncs keys and bills (read-only) into a local SQLite database, analys
 
 - **Bill-accurate per-key cost** — Alibaba Cloud instance bills map to keys directly. Tencent Cloud bills carry no key dimension, so TokenTally allocates the *real* bill amount by each key's token share per day / model / billing item; key totals match the bill exactly.
 - **Multi-dimensional analysis** — key, model, workspace, cost center, owner, cloud, billing item, day, ISO week, weekday; free-form pivot with drill-down, CSV export and print / PDF.
-- **Token & call statistics** — token structure, cache hit rate, unit cost, daily average and peak for every key and model; Tencent keys also get requests, success rate and average tokens / cost per request.
+- **Token & call statistics** — token structure, cache hit rate, unit cost, daily average and peak for every key and model, plus requests, success rate and average tokens / cost per request (Tencent TokenHub usage; Alibaba Cloud via the CloudMonitor Prometheus instance that Bailian monitoring exports to).
 - **Alerts & reports** — up to 5 channels; budget, spend anomaly, sync failure, key changes, plus daily / weekly / monthly reports with @mentions and signed webhooks.
 - **Key governance** — automatic findings with severity and advice.
 - **Security first** — AES-256-GCM encrypted credentials, read-only cloud permissions, password re-confirmation for sensitive actions, CSRF / CSP / rate limiting / audit log, SSRF-safe webhooks.
@@ -77,6 +77,7 @@ Open `http://localhost:8080` and sign in with the initial password from the log 
 flowchart LR
   A["Alibaba Cloud<br/>Model Studio + Expense Center"] --> S["Scheduled sync"]
   T["Tencent Cloud<br/>TokenHub + Billing"] --> S
+  P["CloudMonitor Prometheus (optional)<br/>Bailian call counts"] --> S
   S --> AL["Usage-based allocation<br/>(Tencent)"] --> DB[("SQLite")]
   DB --> W["Web dashboard"]
   DB --> N["Alerts & reports"] --> IM["DingTalk / Feishu / WeCom / Webhook"]
@@ -89,13 +90,13 @@ flowchart LR
 
 ## FAQ
 
-**Why are request counts missing for Alibaba Cloud keys?** Neither the public Model Studio OpenAPI (all 38 operations of version 2026-02-10) nor the Expense Center bills return call counts — only tokens and amounts. Call counts are available in the Bailian console's monitoring page and can be exported to a CloudMonitor Prometheus instance; integrating that is on the roadmap. Tencent TokenHub's usage API returns request counts directly.
+**Where do Alibaba Cloud request counts come from?** Neither the public Model Studio OpenAPI (all 38 operations of version 2026-02-10) nor the Expense Center bills return call counts — only tokens and amounts. Call counts live in the Bailian console's monitoring page and can be exported ("监控数据投递") to a CloudMonitor Prometheus instance. Since v1.4, TokenTally reads them from that instance: under **系统管理 → 阿里云接入 → 调用次数**, enter the Prometheus HTTP API address (and token), click "发现指标" to auto-detect the metric and labels, preview the last 7 days, then enable it. Average tokens per call use the bill tokens of the same day, key and model. Tencent TokenHub's usage API returns request counts directly.
 
 ## Roadmap
 
 - [x] Alibaba Cloud Model Studio, Tencent Cloud TokenHub
 - [x] Cost centers, budgets, alerts, reports, demo mode, backups, metrics
-- [ ] Alibaba Cloud call counts via CloudMonitor Prometheus
+- [x] Alibaba Cloud call counts via CloudMonitor Prometheus
 - [ ] More platforms (Volcengine Ark, Baidu Qianfan, …)
 - [ ] Excel reports & scheduled email, SSO / LDAP
 

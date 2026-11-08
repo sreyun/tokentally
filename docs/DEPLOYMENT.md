@@ -8,7 +8,7 @@
 |---|---|
 | 服务器 | Linux x86_64 / arm64，1 核 1 GB 起（账单规模较大时建议 2 核 2 GB） |
 | 软件 | Docker 20.10+、Docker Compose v2 |
-| 出网 | `*.aliyuncs.com`（阿里云）、`*.tencentcloudapi.com`（腾讯云）、告警渠道域名（oapi.dingtalk.com / open.feishu.cn / qyapi.weixin.qq.com） |
+| 出网 | `*.aliyuncs.com`（阿里云）、`*.tencentcloudapi.com`（腾讯云）、告警渠道域名（oapi.dingtalk.com / open.feishu.cn / qyapi.weixin.qq.com）；接入阿里云调用次数时还需能访问云监控 Prometheus 的 HTTP API 地址 |
 | 入网 | 8080（直连）或 80/443（启用 HTTPS profile） |
 
 ## 2. 首次部署
@@ -73,6 +73,21 @@ location / {
 
 - 创建 RAM 用户（仅 OpenAPI 调用访问），授予 `AliyunBailianReadOnlyAccess` + `AliyunBSSReadOnlyAccess` 或 README 中的最小权限策略
 - 百炼 OpenAPI 地域默认 `cn-beijing`；国际站账号选择费用中心“国际站”
+
+#### 阿里云调用次数（可选，v1.4+）
+
+百炼 OpenAPI 与费用中心账单不含调用次数。开启百炼“监控数据投递”后，调用次数写入云监控 Prometheus 实例，TokenTally 通过其标准 HTTP API（`/api/v1/query_range` 等）只读查询：
+
+1. 百炼控制台 → 监控告警 → 开启**监控数据投递**，选择（或新建）云监控 Prometheus 实例
+2. 打开该 Prometheus 实例的“设置”页，复制 **HTTP API 地址**：本系统部署在同一 VPC 时用内网地址，否则用公网地址；实例开启鉴权时同时复制 Token
+3. 系统管理 → 阿里云接入 → **调用次数**：填写地址与认证方式 → “发现指标”自动推荐调用次数 / 失败次数指标与 API Key、模型标签 → “预览近 7 天”与百炼控制台“模型用量”核对 → 勾选启用并保存
+
+说明：
+
+- 调用次数随阿里云账单同步更新（默认每 60 分钟），每次回读最近 N 天（默认 62 天，可调整）；Prometheus 中已过期的日期保留本地已同步的记录
+- 单次平均 Token 取同日同 Key 同模型的账单 Token；模型名对不上时，该 Key 当日剩余的账单 Token 按调用次数比例分配，保证 Key 级单次平均与账单一致
+- 修改 Prometheus 地址或认证信息需二次验证；Token 以 AES-256-GCM 加密保存、不回显；修改指标映射会清空已同步的阿里云调用次数并按新配置重新读取
+- 安全限制：只允许 http / https，不跟随重定向；云服务器元数据地址（100.100.100.200、169.254.0.0/16）与本机回环地址禁止访问（同机部署的 Prometheus 可设置 `PROM_ALLOW_LOOPBACK=true`）
 
 ### 腾讯云 TokenHub
 
@@ -159,5 +174,7 @@ scrape_configs:
 | 腾讯云费用出现在“无 API Key” | 该部分账单在 TokenHub 用量中找不到对应模型（控制台体验、非 API Key 调用、超过 90 天的账期等） |
 | 已保存的密钥无法解密 | `APP_MASTER_KEY` 被更换；恢复原主密钥，或在管理页重新填写访问密钥与告警渠道 |
 | 告警未收到 | 在“告警通知”中点“测试”；查看渠道卡片的最近错误；钉钉“自定义关键词”需包含“费用” |
+| 阿里云调用次数“发现指标”找不到指标 | 确认百炼已开启监控数据投递且投递到所填实例（投递后约数分钟出现数据）；HTTP API 地址填写实例“设置”页中的地址；VPC 内网地址需本系统位于同一 VPC |
+| 调用次数提示“标签值未匹配” | 所选 API Key 标签的值不是 API Key ID（或 Key 尚未同步）；在“发现指标”结果中改选正确的标签，或先同步 API Key |
 | 页面放着不动一段时间后要求重新登录 | 正常：后台轮询不会延长会话，空闲超过 `SESSION_IDLE_MINUTES`（默认 120 分钟）后需重新登录 |
 | 忘记管理员密码 | 由另一位管理员在“用户管理”中重置；只有一个管理员时，停止服务后清空 users 表并重启，系统按 `.env` 重新创建初始管理员（账单与配置不受影响） |

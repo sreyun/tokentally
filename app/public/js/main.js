@@ -94,7 +94,7 @@ async function loadData({ silent = false, background = false } = {}) {
   state.loading = true;
   $('#topbar').classList.add('loading');
   if (state.data && !silent) $('#content').classList.add('dim');
-  if (!state.data) renderSkeleton();
+  if (!state.data && !ROUTES[parseHash().name]?.noData) renderSkeleton(); // 管理页等不依赖账单数据的页面已渲染，不覆盖
   const p = ui.period;
   const q = p.mode === 'month' ? `mode=month&cycle=${encodeURIComponent(p.cycle)}` : `mode=range&from=${p.from}&to=${p.to}`;
   const errs = [];
@@ -106,8 +106,9 @@ async function loadData({ silent = false, background = false } = {}) {
   state.loading = false;
   $('#topbar').classList.remove('loading');
   $('#content').classList.remove('dim');
-  // 在管理页面静默刷新时不重绘，避免清空正在编辑的表单
-  if (silent && route.name === 'admin') { renderNav(); return; }
+  // 管理页不依赖账单数据：数据加载完成后只刷新导航与提示，不重绘页面，避免清空正在编辑的表单
+  // （首次打开管理页时数据在页面渲染后才返回，之前会重绘并丢失已输入的内容）
+  if (route.name === 'admin') { renderNav(); if (!silent) renderNotices(ROUTES.admin, errs); return; }
   render(errs);
 }
 

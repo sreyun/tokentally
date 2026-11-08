@@ -2,13 +2,13 @@
 import {
   $, esc, state, ui, app, http, money, moneyShort, compact, intFmt, pct, sum, uniq, metricVal, METRICS, NONE_KEY, DIMS, keyObj, keyShort, keyDesc, wsName,
   aggregate, aggAll, sortedAggs, totalTokens, deltaPill, tipRows, icon, help, segCtl, fmtTime, budgetOf, budgetLevel, forecastOf, channelLabel,
-  WEEK, weekday, ioInfo, num, periodTag, daysBetween, copyBtn, PROVIDERS, provTag, isAdmin, usageAgg, normModel,
+  WEEK, weekday, ioInfo, num, periodTag, daysBetween, copyBtn, PROVIDERS, provTag, isAdmin, usageAgg, normModel, REQ_SRC,
 } from '../core.js';
 import { columnChart, rankList, segbar, legendList, legendHtml } from '../charts.js';
 import { table, dataBar } from '../table.js';
 import { billDimsHtml } from './models.js';
 import { editTags } from './keys.js';
-import { tokenStatsHtml, drawDailyTokens, drawDailyRequests } from '../stats.js';
+import { tokenStatsHtml, drawDailyTokens, drawDailyRequests, reqHelp } from '../stats.js';
 
 export function render(v, id) {
   const k = keyObj(id);
@@ -70,10 +70,10 @@ export function render(v, id) {
         : tile('calendar', fc ? '预计本月' : '近 7 天', fc ? money(fc.value) : moneyShort(act?.c7 || 0), '', '', fc ? `日均 ${money(fc.avg)}` : `近 30 天 ${moneyShort(act?.c30 || 0)} · 最近 ${act?.lastDay ? act.lastDay.slice(5) : '—'}`)}
     </div></div>
     <div class="bi">
-      <section class="panel c12"><div class="panel-h"><h3>Token 消耗与调用统计</h3>${help('Token 来自账单用量；请求次数、成功率与单次平均来自腾讯云 TokenHub 用量统计（阿里云账单不提供调用次数）。单次平均费用 = 本期费用 ÷ 请求次数。')}<span class="sub">${esc(p.mode === 'month' ? p.cycle + ' 账期' : `${p.from} ~ ${p.to}`)} · ${METRICS[ui.f.metric]}</span></div>
+      <section class="panel c12"><div class="panel-h"><h3>Token 消耗与调用统计</h3>${help(`Token 来自账单用量；请求次数、成功率与单次平均：${REQ_SRC}。单次平均费用 = 本期费用 ÷ 请求次数。`)}<span class="sub">${esc(p.mode === 'month' ? p.cycle + ' 账期' : `${p.from} ~ ${p.to}`)} · ${METRICS[ui.f.metric]}</span></div>
         ${tokenStatsHtml({ a, pa, daily, us, period: p, scope: 'key', provider: k?.provider || 'aliyun' })}</section>
       <section class="panel ${us ? 'c6' : 'c12'}"><div class="panel-h"><h3>每日 Token 消耗</h3><span class="sub">按 Token 类型堆叠 · 虚线为日均</span></div><div class="legend" id="kTokLegend"></div><div class="chart" id="kTok"></div></section>
-      ${us ? `<section class="panel c6"><div class="panel-h"><h3>每日调用次数</h3>${help('来自腾讯云 TokenHub 用量统计（按 API Key × 模型 × 日）。悬停查看当日请求数、失败数与单次平均 Token。')}<span class="sub">成功 / 失败</span></div><div class="legend" id="kReqLegend"></div><div class="chart" id="kReq"></div></section>` : ''}
+      ${us ? `<section class="panel c6"><div class="panel-h"><h3>每日调用次数</h3>${reqHelp()}<span class="sub">成功 / 失败</span></div><div class="legend" id="kReqLegend"></div><div class="chart" id="kReq"></div></section>` : ''}
       <section class="panel c8"><div class="panel-h"><h3>每日费用</h3><span class="sub">按模型堆叠 · 虚线为日均</span></div><div class="legend" id="kLegend"></div><div class="chart" id="kDaily"></div></section>
       <section class="panel c4"><div class="panel-h"><h3>模型构成</h3><span class="sub">${a.models.size} 个模型</span></div><div id="kModels"></div></section>
       <section class="panel c6"><div class="panel-h"><h3>月度费用</h3>${help('近 12 个账期的账期账单，按模型堆叠；范围取决于同步回溯月数。')}</div><div class="legend" id="kHLegend"></div><div class="chart" id="kHist"></div></section>

@@ -14,7 +14,7 @@ export function openDay(date, keyId) {
   const prevLines = pool.filter(l => l.date === prevDay && ofKey(l));
   const a = aggAll(lines), pa = aggAll(prevLines);
   const t = totalTokens(a), pt = totalTokens(pa);
-  // 腾讯云 Key：当日请求数（TokenHub 用量统计）
+  // 当日请求数（腾讯云 TokenHub 用量统计 / 阿里云云监控 Prometheus）
   const du = keyId ? state.usage.get(keyId)?.days.get(date) : null;
   $('#drawerTitle').textContent = `${date}（周${WEEK[weekday(date)]}）${keyId ? ' · ' + keyShort(keyId) : ''}`;
   $('#drawerTags').innerHTML = '<span class="pill neutral">当日明细</span>';

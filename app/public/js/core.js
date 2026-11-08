@@ -272,7 +272,7 @@ export function applyData(d) {
   state.prevDaily = mapLines(d.prevDaily);
   state.history = mapLines(d.history);
   state.keyActivity = new Map((d.keyActivity || []).map(a => [a.apiKeyId || NONE_KEY, a]));
-  // 请求次数 / 失败次数（腾讯云 TokenHub 用量统计提供；阿里云账单不含请求数）
+  // 请求次数 / 失败次数：腾讯云来自 TokenHub 用量统计，阿里云来自百炼监控投递的云监控 Prometheus（可选）
   state.usageRows = mapUsage(d.usage);
   state.usage = new Map();
   for (const u of state.usageRows) {
@@ -322,19 +322,25 @@ export function usageAgg(rows, keyFn) {
   const m = new Map();
   for (const u of rows || []) {
     const id = keyFn(u);
-    const a = m.get(id) || { requests: 0, fails: 0, tokens: 0, input: 0, output: 0, cache: 0, days: new Map(), keys: new Set() };
-    a.requests += u.requests; a.fails += u.fails; a.tokens += u.tokens; a.input += u.input; a.output += u.output; a.cache += u.cache; a.keys.add(u.apiKeyId);
+    const a = m.get(id) || { requests: 0, fails: 0, tokens: 0, input: 0, output: 0, cache: 0, days: new Map(), keys: new Set(), providers: new Set() };
+    a.requests += u.requests; a.fails += u.fails; a.tokens += u.tokens; a.input += u.input; a.output += u.output; a.cache += u.cache; a.keys.add(u.apiKeyId); a.providers.add(u.provider);
     const d = a.days.get(u.day) || { requests: 0, fails: 0, tokens: 0 };
     d.requests += u.requests; d.fails += u.fails; d.tokens += u.tokens; a.days.set(u.day, d);
     m.set(id, a);
   }
   return m;
 }
-/** 用量统计口径：请求数可用时计算单次平均 Token / 费用（Token 取用量统计，费用取账单） */
+/** 调用次数来源说明（列标题 / 帮助文字） */
+export const REQ_SRC = '腾讯云来自 TokenHub 用量统计；阿里云来自百炼监控投递的云监控 Prometheus（在“系统管理 → 阿里云接入”中启用）';
+/** 该云厂商是否有调用次数数据源 */
+export const callsOn = p => p === 'tencent' || (p === 'aliyun' && !!state.status?.calls?.aliyun);
+/** 失败次数是否可信：阿里云只有配置了失败次数指标才有 */
+export const failsKnown = us => !us?.providers?.has('aliyun') || !!state.status?.calls?.aliyunFails;
+/** 用量统计口径：请求数可用时计算单次平均 Token / 费用（Token 取用量统计 / 同日同 Key 同模型的账单 Token，费用取账单） */
 export function perCall(us, cost) {
   if (!us || !us.requests) return null;
   const ok = us.requests - us.fails;
-  return { requests: us.requests, fails: us.fails, success: us.requests ? ok / us.requests : null, tokPer: us.tokens / us.requests, inPer: us.input / us.requests, outPer: us.output / us.requests, costPer: cost / us.requests, costPerK: cost / us.requests * 1000 };
+  return { requests: us.requests, fails: us.fails, success: us.requests && failsKnown(us) ? ok / us.requests : null, tokPer: us.tokens / us.requests, inPer: us.input / us.requests, outPer: us.output / us.requests, costPer: cost / us.requests, costPerK: cost / us.requests * 1000 };
 }
 
 function finalize() {

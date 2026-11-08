@@ -1,9 +1,9 @@
 /* =========================================================================
  * Token 消耗与调用统计：单个 API Key / 单个模型共用
  *  - Token：总量与结构（输入非缓存 / 缓存命中 / 输出 / 向量）、输出/输入比、日均、峰值日、消耗天数、按次计费用量
- *  - 调用（腾讯云 TokenHub 用量统计）：请求次数、成功率、单次平均 Token（输入 / 输出 / 缓存命中）、单次平均费用、每千次费用
+ *  - 调用（腾讯云 TokenHub 用量统计；阿里云百炼监控投递的云监控 Prometheus）：请求次数、成功率、单次平均 Token（输入 / 输出 / 缓存命中）、单次平均费用、每千次费用
  * ========================================================================= */
-import { esc, state, ui, money, compact, intFmt, uniq, sum, METRICS, WEEK, weekday, daysBetween, totalTokens, deltaPill, unitsText, icon, help, perCall } from './core.js';
+import { esc, state, ui, money, compact, intFmt, uniq, sum, METRICS, WEEK, weekday, daysBetween, totalTokens, deltaPill, unitsText, icon, help, perCall, REQ_SRC } from './core.js';
 import { columnChart, legendHtml } from './charts.js';
 
 export const periodDays = p => Math.max(1, daysBetween(p.from, p.to < state.today ? p.to : state.today));
@@ -26,7 +26,8 @@ export function tokenStatsHtml({ a, pa, daily, us, period, scope = 'key', provid
   const nIn = a.tIn - a.tCache;
   const why = unavailable ? '当前按 Token 类型 / 计费项 / 渠道筛选，请求次数无法按这些维度拆分；清除这些筛选后显示。'
     : provider === 'tencent' ? `该周期 TokenHub 用量统计中没有该${scope === 'key' ? ' Key' : '模型'}的调用记录。`
-      : `本系统使用的阿里云接口（百炼 OpenAPI 与费用中心账单）只返回 Token 用量与费用，不含调用次数。调用次数在百炼控制台“监控告警”中按模型 / API Key 提供，开启“监控数据投递”到云监控 Prometheus 后可通过其查询接口获取；当前可在控制台查看${scope === 'key' ? '该 Key' : '该模型'}的调用量。`;
+      : state.status?.calls?.aliyun ? `该周期云监控 Prometheus 中没有该${scope === 'key' ? ' Key' : '模型'}的调用记录（调用次数从开启百炼“监控数据投递”之日起才有数据）。`
+        : `阿里云百炼 OpenAPI 与费用中心账单不含调用次数。管理员可在“系统管理 → 阿里云接入 → 调用次数”中接入百炼监控投递的云监控 Prometheus，接入后显示${scope === 'key' ? '该 Key' : '该模型'}的请求次数、成功率与单次平均；也可在百炼控制台“监控告警”中查看。`;
   return `<div class="tok-grid ${dense ? 'dense' : ''}">
       <div class="tok-group"><h4>Token 消耗</h4><div class="tok-cells">
         ${cell('总 Token', compact(tokens), `${deltaPill(tokens, ptokens, { neutral: true })} <span class="muted">${esc(state.compareLabel)}</span>`, 'big')}
@@ -43,7 +44,7 @@ export function tokenStatsHtml({ a, pa, daily, us, period, scope = 'key', provid
       </div></div>
       <div class="tok-group"><h4>调用</h4>${pc ? `<div class="tok-cells">
         ${cell('请求次数', intFmt(pc.requests), `日均 ${intFmt(pc.requests / calDays)} 次${scope === 'model' && us.keys ? ` · ${us.keys.size} 个 Key` : ''}`, 'big')}
-        ${cell('成功率', (pc.success * 100).toFixed(2) + '%', `失败 ${intFmt(pc.fails)} 次`, pc.success < 0.95 ? 'bad' : pc.success < 0.99 ? 'warn' : '')}
+        ${pc.success == null ? cell('成功率', '—', '阿里云未配置失败次数指标') : cell('成功率', (pc.success * 100).toFixed(2) + '%', `失败 ${intFmt(pc.fails)} 次`, pc.success < 0.95 ? 'bad' : pc.success < 0.99 ? 'warn' : '')}
         ${cell('单次平均 Token', intFmt(pc.tokPer), `输入 ${intFmt(pc.inPer)} · 输出 ${intFmt(pc.outPer)}`)}
         ${cell('单次平均费用', money(pc.costPer, pc.costPer < 0.01 ? 4 : 3), `每千次 ${money(pc.costPerK)}`)}
         ${cell('单次平均缓存命中', intFmt(us.cache / pc.requests), us.input ? `占输入 ${(us.cache / us.input * 100).toFixed(1)}%` : '')}
@@ -81,4 +82,4 @@ export function drawDailyRequests(el, legendEl, us, period, { height = 240 } = {
   });
 }
 
-export const reqHelp = () => help('来自腾讯云 TokenHub 用量统计（按 API Key × 模型 × 日）。悬停查看当日请求数、失败数与单次平均 Token。');
+export const reqHelp = () => help(`${REQ_SRC}，按 API Key × 模型 × 日。悬停查看当日请求数、失败数与单次平均 Token。`);

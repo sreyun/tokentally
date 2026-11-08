@@ -2,7 +2,7 @@
 import {
   $, esc, state, ui, app, money, moneyShort, compact, intFmt, pct, sum, uniq, metricVal, METRICS, NONE_KEY, DIMS, keyObj, keyDesc, keyShort, wsName,
   filterLines, aggregate, sortedAggs, newAgg, totalTokens, topModels, unitsText, deltaPill, tipRows, icon, help, segCtl, fmtTime, budgetOf, budgetLevel,
-  forecastOf, isCurrentMonth, periodTag, copyBtn, PROVIDERS, provTag, multiCloud, isAdmin, modal, http, toast, NO_CC, perCall, daysBetween, usageFiltered, usageAgg,
+  forecastOf, isCurrentMonth, periodTag, copyBtn, PROVIDERS, provTag, multiCloud, isAdmin, modal, http, toast, NO_CC, perCall, daysBetween, usageFiltered, usageAgg, REQ_SRC,
 } from '../core.js';
 import { table, dataBar } from '../table.js';
 import { heatmap, dayCols } from '../charts.js';
@@ -148,8 +148,8 @@ export function render(v) {
     { key: 'perM', label: '¥/百万Token', title: '费用 ÷ 总 Token × 10⁶', align: 'r', fmt: x => (x == null ? '-' : money(x)), sortVal: r => r.perM ?? -1 },
     { key: 'dayTok', label: '日均 Token', title: '总 Token ÷ 统计周期内已过的自然日数', align: 'r', fmt: x => (x ? compact(x) : '-'), csv: r => Math.round(r.dayTok) },
     ...(hasUsage ? [
-      { key: 'requests', label: '请求数', title: '来自腾讯云 TokenHub 用量统计（阿里云账单不含请求数）', align: 'r', fmt: x => (x == null ? '<span class="muted">—</span>' : intFmt(x)), sortVal: r => r.requests ?? -1 },
-      { key: 'tokPer', label: '单次均 Token', title: '单次平均 Token = 总 Token ÷ 请求数（TokenHub 用量统计）', align: 'r', fmt: x => (x == null ? '<span class="muted">—</span>' : intFmt(x)), sortVal: r => r.tokPer ?? -1, csv: r => (r.tokPer == null ? '' : Math.round(r.tokPer)) },
+      { key: 'requests', label: '请求数', title: REQ_SRC, align: 'r', fmt: x => (x == null ? '<span class="muted">—</span>' : intFmt(x)), sortVal: r => r.requests ?? -1 },
+      { key: 'tokPer', label: '单次均 Token', title: '单次平均 Token = 总 Token ÷ 请求数（阿里云取同日同 Key 同模型的账单 Token）', align: 'r', fmt: x => (x == null ? '<span class="muted">—</span>' : intFmt(x)), sortVal: r => r.tokPer ?? -1, csv: r => (r.tokPer == null ? '' : Math.round(r.tokPer)) },
       { key: 'costPer', label: '单次均费用', title: '单次平均费用 = 本期费用 ÷ 请求数', align: 'r', fmt: x => (x == null ? '<span class="muted">—</span>' : money(x, x < 0.01 ? 4 : 3)), sortVal: r => r.costPer ?? -1, csv: r => (r.costPer == null ? '' : r.costPer.toFixed(6)) },
       { key: 'failRate', label: '失败率', title: '失败请求 ÷ 请求数', align: 'r', fmt: x => (x == null ? '<span class="muted">—</span>' : `<span class="${x >= 0.05 ? 'bad-text' : x >= 0.01 ? 'warn-text' : ''}">${(x * 100).toFixed(2)}%</span>`), sortVal: r => r.failRate ?? -1, csv: r => (r.failRate == null ? '' : (r.failRate * 100).toFixed(2) + '%') },
     ] : []),

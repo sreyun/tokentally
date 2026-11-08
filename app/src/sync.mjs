@@ -10,6 +10,7 @@ import {
   TencentClient, normalizeTencentKey, tencentBillRows, rollupMonth, allocate, parseSeries, priceTable, estimateRows,
   tcWorkspaceId, tcWorkspaceName, TC_PRODUCT_RE,
 } from './tencent.mjs';
+import { PromClient, fetchCalls, buildUsageRows } from './prom.mjs';
 
 const BAILIAN_RE = /百炼|bailian|model\s*studio|dashscope|灵积/i;
 export const PROVIDER_LIST = ['aliyun', 'tencent'];
@@ -60,8 +61,9 @@ const SECRET_KEYS = {
 const PERM_RE = /Unauthorized|OperationDenied|AuthFailure\.Unauthorized|NotAuthorized|Forbidden|NoPermission/i;
 
 export class SyncService {
-  constructor({ store, tz, log, tencentEndpoint = '' }) {
-    Object.assign(this, { store, tz, log, tencentEndpoint });
+  constructor({ store, tz, log, tencentEndpoint = '', promAllowLoopback = false }) {
+    Object.assign(this, { store, tz, log, tencentEndpoint, promAllowLoopback });
+    this.callsBusy = null;
     this.running = {};     // `${provider}:${kind}` → runId
     this.progress = {};
     this.lastAttempt = {};
@@ -250,7 +252,52 @@ export class SyncService {
       this.store.markCycle('aliyun', cycle, codes, final && !failedDays);
       summary.cycles.push({ cycle, codes, monthly, daily, final });
     }
+    // 调用次数（可选）：账单入库后再读取，单次平均 Token 使用刚同步的按日账单
+    if (this.callsConfig()) {
+      P('读取调用次数（云监控 Prometheus）…');
+      try { summary.calls = await this.syncAliyunCalls(); for (const w of summary.calls.warnings) warnings.push(w); } catch (e) { warnings.push(`调用次数同步失败：${e.message}`); summary.calls = { error: e.message }; }
+    }
     return summary;
+  }
+
+  /* ---------- 阿里云调用次数：百炼监控投递 → 云监控 Prometheus ---------- */
+  callsConfig() {
+    const c = this.store.aliyunCallsSettings();
+    return c.enabled && c.url && c.metric && c.keyLabel ? c : null;
+  }
+  promClient(cfg, override = {}) {
+    let token = '', password = '';
+    try { token = this.store.getSecret('aliyunCalls.token'); password = this.store.getSecret('aliyunCalls.password'); } catch { throw new Error('Prometheus 认证信息无法解密（主密钥已变化），请重新填写'); }
+    return new PromClient({ url: cfg.url, authType: cfg.authType, username: cfg.username, token, password, ...override, allowLoopback: this.promAllowLoopback });
+  }
+  /** 读取最近 lookbackDays 天的调用次数并写入用量表；Prometheus 无数据的更早日期保留已有记录（数据保留期过后不丢历史） */
+  async syncAliyunCalls({ cfg = this.callsConfig(), client } = {}) {
+    if (!cfg) throw new Error('尚未启用阿里云调用次数');
+    if (this.callsBusy) return this.callsBusy;
+    const t0 = Date.now();
+    this.callsBusy = (async () => {
+      const warnings = [];
+      client ||= this.promClient(cfg);
+      const today = todayIn(this.tz), from = addDays(today, -(cfg.lookbackDays - 1));
+      try {
+        const cells = await fetchCalls(client, cfg, { from, to: today, tz: this.tz });
+        const keys = this.store.listApiKeys().filter(k => k.provider === 'aliyun');
+        const { rows, unmatched, firstDay } = buildUsageRows(cells, { keys, billTokens: this.store.billTokenCells('aliyun', from, today) });
+        if (firstDay) this.store.replaceUsage('aliyun', firstDay, today, rows);
+        else warnings.push(`云监控 Prometheus 最近 ${cfg.lookbackDays} 天没有调用次数数据，请确认已开启百炼“监控数据投递”且指标映射正确`);
+        if (unmatched.size) {
+          const sample = [...unmatched.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3).map(([v, n]) => `${String(v).slice(0, 40)}（${n} 次）`).join('、');
+          warnings.push(`调用次数中有 ${unmatched.size} 个 API Key 标签值未匹配到已同步的阿里云 Key，已忽略：${sample}`);
+        }
+        const result = { ok: true, at: Date.now(), from: firstDay || null, to: today, rows: rows.length, requests: rows.reduce((s, r) => s + r.requests, 0), unmatched: unmatched.size, calls: client.calls, ms: Date.now() - t0, warnings };
+        this.store.setSetting('aliyunCalls.last', { ...result, warnings: warnings.slice(0, 3) });
+        return result;
+      } catch (e) {
+        this.store.setSetting('aliyunCalls.last', { ok: false, at: Date.now(), error: String(e.message || e).slice(0, 300) });
+        throw e;
+      }
+    })();
+    try { return await this.callsBusy; } finally { this.callsBusy = null; }
   }
 
   /* ===================== 腾讯云 TokenHub ===================== */

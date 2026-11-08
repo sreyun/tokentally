@@ -138,6 +138,8 @@ select.inp { padding-right: 6px; cursor: pointer; }
 .seg.scroll button { flex: none; }
 .chk { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; font-size: 13px; color: var(--ink-2); white-space: nowrap; }
 .chk input { width: 15px; height: 15px; accent-color: var(--accent); }
+.chk.full { white-space: normal; align-items: flex-start; line-height: 1.5; }
+.chk.full input { flex: none; margin-top: 2px; }
 .field { display: flex; flex-direction: column; gap: 5px; font-size: 12.5px; color: var(--ink-2); min-width: 0; }
 .field > span { font-weight: 500; white-space: nowrap; }
 .field .inp { width: 100%; }

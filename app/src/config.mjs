@@ -44,6 +44,8 @@ export const config = {
   publicUrl: /^https?:\/\/[^\s/?#]+(\/[^\s?#]*)?$/i.test((env.PUBLIC_URL || '').trim()) ? env.PUBLIC_URL.trim() : '',
   /** 可选：允许通用 Webhook 指向内网地址（默认禁止，防 SSRF） */
   alertAllowPrivate: bool(env.ALERT_ALLOW_PRIVATE),
+  /** 可选：允许阿里云调用次数的 Prometheus 地址指向本机回环（同机部署的 Prometheus / 测试用；元数据地址始终禁止） */
+  promAllowLoopback: bool(env.PROM_ALLOW_LOOPBACK),
   login: {
     maxFailuresPerUser: int(env.LOGIN_MAX_FAILURES, 5, 3, 20),
     lockMinutes: int(env.LOGIN_LOCK_MINUTES, 15, 1, 24 * 60),

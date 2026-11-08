@@ -15,9 +15,10 @@ import { AlertService, ALERT_TYPES, EVENT_TYPES, MAX_CHANNELS, validateWebhook, 
 import { selfTest, AliyunClient, explainAliyunError, callLog, MS_REGIONS, BSS_ENDPOINTS } from './aliyun.mjs';
 import { tc3SelfTest, TencentClient, explainTencentError, TC_REGIONS, TC_SITES } from './tencent.mjs';
 import { seedDemo, clearDemo } from './demo.mjs';
+import { PromClient, validateCalls, discover, fetchCalls, buildUsageRows, buildQuery, DEFAULT_CALLS, MAPPING_FIELDS, PROM_AUTH } from './prom.mjs';
 import { loadMasterKey, hashPassword, verifyPassword, burnPasswordCheck, checkPasswordPolicy, randomPassword, maskId, sha256 } from './crypto.mjs';
 
-const VERSION = '1.3.0';
+const VERSION = '1.4.0';
 const log = (...a) => console.log(new Date().toISOString(), ...a);
 
 {
@@ -80,7 +81,7 @@ if (config.demo && !store.getSetting('demo', false) && !anyConfigured() && store
   seedDemo(store, todayIn(config.billTz));
   log('已生成演示数据（DEMO_DATA=true）。在“系统管理”中配置真实访问密钥后，演示数据会被自动清除。');
 }
-const sync = new SyncService({ store, tz: config.billTz, log, tencentEndpoint: config.tencentEndpoint });
+const sync = new SyncService({ store, tz: config.billTz, log, tencentEndpoint: config.tencentEndpoint, promAllowLoopback: config.promAllowLoopback });
 const alerts = new AlertService({ store, tz: config.billTz, log, publicUrl: config.publicUrl, allowPrivate: config.alertAllowPrivate, providers: () => sync.configured() });
 sync.onBillsSynced = () => alerts.check('bills');
 sync.onRunFinished = (p, kind) => { if (kind === 'meta') alerts.check('sync'); };
@@ -361,6 +362,8 @@ function statusOut() {
   return {
     version: VERSION, today: todayIn(config.billTz), tz: config.billTz,
     aliyun: providers.aliyun, providers, anyConfigured: anyConfigured(), branding: store.branding(), demo: !!store.getSetting('demo', false),
+    // 调用次数数据源：阿里云需启用云监控 Prometheus（演示模式内置模拟数据）
+    calls: ((c, demo) => ({ aliyun: !!c || demo, aliyunFails: !!c?.failMetric || demo }))(sync.callsConfig(), !!store.getSetting('demo', false)),
     sync: sync.status(), data: dataRangeCached(),
   };
 }
@@ -372,6 +375,7 @@ function adminSettingsOut() {
   return {
     aliyun: { ...store.aliyunSettings(), accessKeyId: maskId(id), secretState: secretState('aliyun') },
     tencent: { ...store.tencentSettings(), secretId: maskId(tid), secretState: secretState('tencent'), endpointOverride: !!config.tencentEndpoint },
+    aliyunCalls: aliyunCallsOut(),
     sync: store.syncSettings(),
     alerts: alerts.out(),
     branding: store.branding(),
@@ -409,6 +413,31 @@ const AK_SECRET_RE = /^[A-Za-z0-9]{16,64}$/;
 const TC_ID_RE = /^[A-Za-z0-9]{16,128}$/;
 const TC_KEY_RE = /^[A-Za-z0-9]{16,128}$/;
 const int = (v, min, max, d) => { const n = parseInt(v, 10); return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : d; };
+const pick = (o, ks) => Object.fromEntries(ks.filter(k => o && o[k] !== undefined).map(k => [k, o[k]]));
+function callsSecretSet() {
+  try { return !!(store.getSecret('aliyunCalls.token') || store.getSecret('aliyunCalls.password')); } catch { return true; }
+}
+/**
+ * 发现 / 预览用的 Prometheus 客户端：使用页面上填写的地址与认证；未填写 Token 时，只有地址与已保存地址一致才使用已保存的 Token，
+ * 避免把已保存的 Token 发往新填写的地址
+ */
+function callsClientFrom(b) {
+  const cur = store.aliyunCallsSettings();
+  let cfg;
+  try { cfg = validateCalls({ ...cur, ...pick(b, Object.keys(DEFAULT_CALLS)), enabled: false }); } catch (e) { throw new HttpError(400, e.message); }
+  if (!cfg.url) throw new HttpError(400, '请填写 Prometheus HTTP API 地址');
+  const token = typeof b.token === 'string' ? b.token.trim() : '', password = typeof b.password === 'string' ? b.password : '';
+  let auth = { token, password };
+  if (!token && !password && cfg.authType !== 'none') {
+    if (cfg.url !== cur.url || cfg.authType !== cur.authType) throw new HttpError(400, '地址或认证方式与已保存的不同，请重新填写 Token / 密码');
+    try { auth = { token: store.getSecret('aliyunCalls.token'), password: store.getSecret('aliyunCalls.password') }; } catch { throw new HttpError(400, '已保存的认证信息无法解密，请重新填写'); }
+  }
+  return { cfg, client: new PromClient({ url: cfg.url, authType: cfg.authType, username: cfg.username, ...auth, allowLoopback: config.promAllowLoopback }) };
+}
+function aliyunCallsOut() {
+  const c = store.aliyunCallsSettings();
+  return { ...c, secretSet: callsSecretSet(), last: store.getSetting('aliyunCalls.last', null), authTypes: PROM_AUTH, query: c.metric && c.keyLabel ? buildQuery(c) : '' };
+}
 
 async function putSettings(body, ctx) {
   const changed = [];
@@ -471,6 +500,29 @@ async function putSettings(body, ctx) {
       store.audit(ctx.user.username, ctx.ip, 'tencent.key.update', { secretId: maskId(id || store.getSecret('tencent.secretId')) });
     }
     if ((id || key || next.region !== cur.region || next.site !== cur.site) && secretState('tencent') === 'ok') sync.run('meta', 'key-changed', { provider: 'tencent' });
+  }
+  if (body.aliyunCalls) {
+    const c = body.aliyunCalls, cur = store.aliyunCallsSettings();
+    let next;
+    try { next = validateCalls({ ...cur, ...pick(c, Object.keys(DEFAULT_CALLS)) }); } catch (e) { throw new HttpError(400, e.message); }
+    const token = typeof c.token === 'string' ? c.token.trim() : '';
+    const password = typeof c.password === 'string' ? c.password : '';
+    if (token.length > 4096 || /[\r\n]/.test(token)) throw new HttpError(400, 'Token 格式不正确');
+    if (password.length > 512 || /[\r\n]/.test(password)) throw new HttpError(400, '密码格式不正确');
+    // 更换认证信息或地址都属于敏感操作：地址变化后原 Token 会发往新地址，因此同样需要二次验证
+    const secretChange = token || password || c.clearToken || (next.url !== cur.url && cur.url && callsSecretSet());
+    if (secretChange) {
+      if (!c.confirmPassword) throw new HttpError(400, '修改 Prometheus 地址或认证信息需要输入当前登录密码确认');
+      await confirmCurrentPassword(ctx, c.confirmPassword, 'aliyun.calls.secret', '当前登录密码不正确');
+    }
+    const mappingChanged = MAPPING_FIELDS.some(k => (next[k] || '') !== (cur[k] || ''));
+    store.setSetting('aliyunCalls', next);
+    for (const k of Object.keys(next)) if (next[k] !== cur[k]) changed.push(`aliyunCalls.${k}`);
+    if (c.clearToken) { store.setSecret('aliyunCalls.token', ''); store.setSecret('aliyunCalls.password', ''); changed.push('aliyunCalls.secret'); }
+    if (token) { store.setSecret('aliyunCalls.token', token); changed.push('aliyunCalls.token'); }
+    if (password) { store.setSecret('aliyunCalls.password', password); changed.push('aliyunCalls.password'); }
+    if (secretChange) store.audit(ctx.user.username, ctx.ip, 'aliyun.calls.secret', { url: next.url });
+    if (mappingChanged && (cur.metric || cur.url)) { store.clearUsage('aliyun'); store.setSetting('aliyunCalls.last', null); changed.push('aliyunCalls.cleared'); }
   }
   if (body.branding) {
     const b = body.branding, cur = store.branding();
@@ -680,6 +732,45 @@ route('POST', '/api/admin/sync', async (req, res, ctx) => {
   const runs = targets.map(p => sync.run(kind, `manual:${ctx.user.username}`, { provider: p, cycles, force: !!b.force }));
   store.audit(ctx.user.username, ctx.ip, 'sync.trigger', { kind, providers: targets, cycles, force: !!b.force });
   return json(req, res, 200, { runs, runId: runs[0].runId, alreadyRunning: runs.every(r => r.alreadyRunning) });
+}, { admin: true });
+/* 阿里云调用次数：发现指标 / 预览 / 立即同步 */
+route('POST', '/api/admin/aliyun-calls/discover', async (req, res) => {
+  const { client } = callsClientFrom(await readJson(req));
+  try { return json(req, res, 200, await discover(client)); } catch (e) { throw new HttpError(502, e.message); }
+}, { admin: true });
+route('POST', '/api/admin/aliyun-calls/preview', async (req, res) => {
+  const b = await readJson(req);
+  const { cfg, client } = callsClientFrom(b);
+  if (!cfg.metric || !cfg.keyLabel) throw new HttpError(400, '请先选择调用次数指标与 API Key 标签');
+  const days = int(b.days, 1, 31, 7), today = todayIn(config.billTz), from = addDays(today, -(days - 1));
+  let cells;
+  try { cells = await fetchCalls(client, cfg, { from, to: today, tz: config.billTz }); } catch (e) { throw new HttpError(502, e.message); }
+  const keys = store.listApiKeys().filter(k => k.provider === 'aliyun');
+  const { rows, unmatched } = buildUsageRows(cells, { keys, billTokens: store.billTokenCells('aliyun', from, today) });
+  const agg = new Map();
+  for (const r of rows) {
+    const k = r.api_key_id + '\u0001' + r.model;
+    const a = agg.get(k) || { apiKeyId: r.api_key_id, model: r.model, requests: 0, fails: 0, tokens: 0, days: 0 };
+    a.requests += r.requests; a.fails += r.fails; a.tokens += r.total_tokens; a.days++;
+    agg.set(k, a);
+  }
+  const names = new Map(keys.map(k => [k.api_key_id, k.description || '']));
+  const list = [...agg.values()].map(a => ({ ...a, name: names.get(a.apiKeyId) || '' })).sort((x, y) => y.requests - x.requests);
+  const byDay = new Map();
+  for (const r of rows) byDay.set(r.day, (byDay.get(r.day) || 0) + r.requests);
+  return json(req, res, 200, {
+    from, to: today, query: buildQuery(cfg), calls: client.calls,
+    total: list.reduce((s, a) => s + a.requests, 0), fails: list.reduce((s, a) => s + a.fails, 0),
+    days: [...byDay.entries()].sort().map(([day, requests]) => ({ day, requests })),
+    rows: list.slice(0, 200), more: Math.max(0, list.length - 200),
+    unmatched: [...unmatched.entries()].sort((a, b2) => b2[1] - a[1]).slice(0, 20).map(([value, requests]) => ({ value: String(value).slice(0, 80), requests })),
+    unmatchedTotal: [...unmatched.values()].reduce((s, n) => s + n, 0),
+  });
+}, { admin: true });
+route('POST', '/api/admin/aliyun-calls/sync', async (req, res, ctx) => {
+  if (!sync.callsConfig()) throw new HttpError(400, '请先保存并启用调用次数配置');
+  store.audit(ctx.user.username, ctx.ip, 'aliyun.calls.sync', null);
+  try { return json(req, res, 200, await sync.syncAliyunCalls()); } catch (e) { throw new HttpError(502, e.message); }
 }, { admin: true });
 route('PUT', '/api/admin/budgets', async (req, res, ctx) => {
   const b = await readJson(req);
