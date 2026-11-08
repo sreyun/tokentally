@@ -671,3 +671,6 @@ dialog.modal .dlg-b { max-height: calc(100vh - 140px); }
 .tok-grid.dense { grid-template-columns: 1fr; gap: 14px; }
 .tok-grid.dense .tok-cells { grid-template-columns: repeat(auto-fill, minmax(128px, 1fr)); }
 .drawer .tok-cell { background: var(--surface-2); }
+
+.notice > div { flex: 1; min-width: 0; }
+.notice .notice-x { margin: -4px -6px -4px 4px; flex: none; }

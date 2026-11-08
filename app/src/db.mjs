@@ -2,7 +2,7 @@
  * SQLite 持久化（node:sqlite，无第三方依赖）
  * v3 起支持多云：业务空间 / API Key / 账单 / 同步记录均带 provider（aliyun | tencent）
  */
-import { DatabaseSync } from 'node:sqlite';
+import { DatabaseSync, backup as sqliteBackup } from 'node:sqlite';
 import { encrypt, decrypt, sha256, randomToken } from './crypto.mjs';
 
 const SCHEMA_V1 = `
@@ -158,9 +158,12 @@ export class Store {
     this.db = new DatabaseSync(file);
     this.key = masterKey;
     this.stmts = new Map();
-    this.db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000; PRAGMA synchronous = NORMAL;');
+    // WAL + NORMAL：读写并发与崩溃安全兼顾；限制 WAL 文件大小，临时排序放内存
+    this.db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000; PRAGMA synchronous = NORMAL; PRAGMA journal_size_limit = 67108864; PRAGMA temp_store = MEMORY;');
     this.migrate();
   }
+  /** 定期更新查询规划统计信息（SQLite 推荐在长连接上周期性执行） */
+  optimize() { try { this.db.exec('PRAGMA optimize;'); } catch { /* ignore */ } }
 
   q(sql) {
     let s = this.stmts.get(sql);
@@ -243,7 +246,8 @@ export class Store {
       .run(sha256(token), userId, csrf, now, now, now + maxMs, ip || '', String(ua || '').slice(0, 200));
     return { token, csrf };
   }
-  getSession(token, idleMs) {
+  /** touch=false：后台轮询请求不刷新空闲计时，空闲超时才能真正生效 */
+  getSession(token, idleMs, touch = true) {
     if (!token) return null;
     const s = this.q(`SELECT s.id_hash, s.user_id, s.csrf, s.last_seen, s.expires_at, u.username, u.role, u.disabled, u.must_change
       FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.id_hash = ?`).get(sha256(token));
@@ -252,7 +256,7 @@ export class Store {
       if (s) this.q('DELETE FROM sessions WHERE id_hash = ?').run(s.id_hash);
       return null;
     }
-    if (now - s.last_seen > 60_000) this.q('UPDATE sessions SET last_seen = ? WHERE id_hash = ?').run(now, s.id_hash);
+    if (touch && now - s.last_seen > 60_000) this.q('UPDATE sessions SET last_seen = ? WHERE id_hash = ?').run(now, s.id_hash);
     return s;
   }
   deleteSession(idHash) { this.q('DELETE FROM sessions WHERE id_hash = ?').run(idHash); }
@@ -269,6 +273,7 @@ export class Store {
     const yearAgo = Date.now() - 365 * 864e5;
     this.q('DELETE FROM audit_log WHERE ts < ?').run(yearAgo);
     this.q('DELETE FROM sync_runs WHERE started_at < ?').run(Date.now() - 90 * 864e5);
+    this.optimize();
   }
 
   /* ---------------- 业务空间 / API Key 同步 ---------------- */
@@ -572,8 +577,8 @@ export class Store {
   failStaleRuns() { this.q("UPDATE sync_runs SET status = 'error', error = '服务重启，任务中断', finished_at = ? WHERE status = 'running'").run(Date.now()); }
 
   /* ---------------- 备份 ---------------- */
-  /** 在线一致性备份（VACUUM INTO 生成完整的单文件数据库副本） */
-  backupTo(file) {
-    this.db.prepare('VACUUM INTO ?').run(file);
+  /** 在线一致性备份：SQLite 增量备份 API，分批复制页面，不长时间阻塞请求处理 */
+  async backupTo(file) {
+    return sqliteBackup(this.db, file, { rate: 256 });
   }
 }

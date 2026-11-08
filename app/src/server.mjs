@@ -14,9 +14,10 @@ import { SyncService, todayIn, addDays, addMonths, isCycleFinal, hourIn, PROVIDE
 import { AlertService, ALERT_TYPES, EVENT_TYPES, MAX_CHANNELS, validateWebhook, cleanMobiles } from './alerts.mjs';
 import { selfTest, AliyunClient, explainAliyunError, callLog, MS_REGIONS, BSS_ENDPOINTS } from './aliyun.mjs';
 import { tc3SelfTest, TencentClient, explainTencentError, TC_REGIONS, TC_SITES } from './tencent.mjs';
+import { seedDemo, clearDemo } from './demo.mjs';
 import { loadMasterKey, hashPassword, verifyPassword, burnPasswordCheck, checkPasswordPolicy, randomPassword, maskId, sha256 } from './crypto.mjs';
 
-const VERSION = '1.2.1';
+const VERSION = '1.3.0';
 const log = (...a) => console.log(new Date().toISOString(), ...a);
 
 {
@@ -74,6 +75,11 @@ if (master.source === 'file') log('提示：未设置 APP_MASTER_KEY，主密钥
 for (const p of PROVIDER_LIST) if (secretState(p) === 'undecryptable') log(`警告：已保存的${PROVIDERS[p]}密钥无法用当前主密钥解密，请在“系统管理”中重新配置。`);
 if (config.tencentEndpoint) log(`注意：腾讯云 API 地址已被 TENCENT_ENDPOINT_OVERRIDE 覆盖为 ${config.tencentEndpoint}（仅用于测试或私有网关）`);
 
+if (store.getSetting('demo', false) && anyConfigured()) { clearDemo(store); log('检测到已配置云厂商访问密钥，已清除演示数据'); }
+if (config.demo && !store.getSetting('demo', false) && !anyConfigured() && store.q('SELECT COUNT(*) AS n FROM bill_lines').get().n === 0) {
+  seedDemo(store, todayIn(config.billTz));
+  log('已生成演示数据（DEMO_DATA=true）。在“系统管理”中配置真实访问密钥后，演示数据会被自动清除。');
+}
 const sync = new SyncService({ store, tz: config.billTz, log, tencentEndpoint: config.tencentEndpoint });
 const alerts = new AlertService({ store, tz: config.billTz, log, publicUrl: config.publicUrl, allowPrivate: config.alertAllowPrivate, providers: () => sync.configured() });
 sync.onBillsSynced = () => alerts.check('bills');
@@ -92,28 +98,35 @@ function listBackups() {
       .sort((a, b) => b.mtime - a.mtime);
   } catch { return []; }
 }
-function createBackup(manual = false) {
-  fs.mkdirSync(BACKUP_DIR, { recursive: true, mode: 0o700 });
-  const d = new Date(), p = n => String(n).padStart(2, '0');
-  const name = `tokentally-${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}${manual ? '-manual' : ''}.db`;
-  const file = path.join(BACKUP_DIR, name);
-  if (fs.existsSync(file)) fs.rmSync(file);
-  store.backupTo(file);
-  try { fs.chmodSync(file, 0o600); } catch { /* Windows */ }
-  // 只轮换自动备份；手动备份最多保留 10 份
-  const all = listBackups();
-  for (const [list, keep] of [[all.filter(b => !b.manual), Math.max(1, config.backupKeep)], [all.filter(b => b.manual), 10]]) for (const b of list.slice(keep)) fs.rmSync(path.join(BACKUP_DIR, b.name), { force: true });
-  return { name, size: fs.statSync(file).size };
+/** 同一时间只允许一个备份任务；使用 SQLite 增量备份 API，备份期间服务照常响应 */
+let backupBusy = null;
+async function createBackup(manual = false) {
+  if (backupBusy) throw Object.assign(new Error('已有备份任务正在进行，请稍后再试'), { busy: true });
+  backupBusy = (async () => {
+    fs.mkdirSync(BACKUP_DIR, { recursive: true, mode: 0o700 });
+    const d = new Date(), p = n => String(n).padStart(2, '0');
+    const name = `tokentally-${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}${manual ? '-manual' : ''}.db`;
+    const file = path.join(BACKUP_DIR, name);
+    const tmp = file + '.partial';
+    fs.rmSync(tmp, { force: true });
+    try { await store.backupTo(tmp); } catch (e) { fs.rmSync(tmp, { force: true }); throw e; }
+    fs.renameSync(tmp, file); // 写完再改名：列表中不会出现半成品
+    try { fs.chmodSync(file, 0o600); } catch { /* Windows */ }
+    // 只轮换自动备份；手动备份最多保留 10 份
+    const all = listBackups();
+    for (const [list, keep] of [[all.filter(b => !b.manual), Math.max(1, config.backupKeep)], [all.filter(b => b.manual), 10]]) for (const b of list.slice(keep)) fs.rmSync(path.join(BACKUP_DIR, b.name), { force: true });
+    return { name, size: fs.statSync(file).size };
+  })();
+  try { return await backupBusy; } finally { backupBusy = null; }
 }
 let lastAutoBackup = '';
 if (config.backupKeep > 0) {
   setInterval(() => {
     const today = todayIn(config.billTz);
     if (lastAutoBackup === today || hourIn(config.billTz) !== config.backupHour) return;
-    if (listBackups().some(b => !b.manual && new Date(b.mtime).toISOString().slice(0, 10) === new Date().toISOString().slice(0, 10) && Date.now() - b.mtime < 20 * 3600_000)) { lastAutoBackup = today; return; }
+    if (listBackups().some(b => !b.manual && Date.now() - b.mtime < 20 * 3600_000)) { lastAutoBackup = today; return; }
     lastAutoBackup = today;
-    try { const r = createBackup(false); log(`自动备份完成：${r.name}（${(r.size / 1048576).toFixed(1)} MB）`); }
-    catch (e) { log('自动备份失败：' + e.message); }
+    createBackup(false).then(r => log(`自动备份完成：${r.name}（${(r.size / 1048576).toFixed(1)} MB）`)).catch(e => log('自动备份失败：' + e.message));
   }, 10 * 60_000).unref();
 }
 
@@ -336,12 +349,19 @@ function getData(url) {
   return out;
 }
 
+/* 数据范围（全表统计）按数据版本缓存：状态接口每 20 秒被每个标签页轮询一次 */
+let rangeCache = { v: '', d: null };
+function dataRangeCached() {
+  const v = store.dataVersion();
+  if (rangeCache.v !== v) rangeCache = { v, d: store.dataRange() };
+  return rangeCache.d;
+}
 function statusOut() {
   const providers = Object.fromEntries(PROVIDER_LIST.map(p => [p, { name: PROVIDERS[p], configured: secretState(p) === 'ok', secretState: secretState(p) }]));
   return {
     version: VERSION, today: todayIn(config.billTz), tz: config.billTz,
-    aliyun: providers.aliyun, providers, anyConfigured: anyConfigured(), branding: store.branding(),
-    sync: sync.status(), data: store.dataRange(),
+    aliyun: providers.aliyun, providers, anyConfigured: anyConfigured(), branding: store.branding(), demo: !!store.getSetting('demo', false),
+    sync: sync.status(), data: dataRangeCached(),
   };
 }
 
@@ -414,6 +434,7 @@ async function putSettings(body, ctx) {
     store.setSetting('aliyun', next);
     for (const k of Object.keys(next)) if (next[k] !== cur[k]) changed.push(`aliyun.${k}`);
     if (id || secret) {
+      if (store.getSetting('demo', false)) { clearDemo(store); store.audit(ctx.user.username, ctx.ip, 'demo.clear', null); }
       if (id) store.setSecret('aliyun.accessKeyId', id);
       store.setSecret('aliyun.accessKeySecret', secret);
       changed.push('aliyun.accessKey');
@@ -443,6 +464,7 @@ async function putSettings(body, ctx) {
     store.setSetting('tencent', next);
     for (const k of Object.keys(next)) if (next[k] !== cur[k]) changed.push(`tencent.${k}`);
     if (id || key) {
+      if (store.getSetting('demo', false)) { clearDemo(store); store.audit(ctx.user.username, ctx.ip, 'demo.clear', null); }
       if (id) store.setSecret('tencent.secretId', id);
       store.setSecret('tencent.secretKey', key);
       changed.push('tencent.secretKey');
@@ -611,11 +633,26 @@ route('POST', '/api/me/password', async (req, res, ctx) => {
 
 route('GET', '/api/status', async (req, res) => json(req, res, 200, statusOut()));
 /* 分析数据：按“数据版本 + 日期 + 查询参数”生成 ETag，数据未变化时返回 304，避免轮询刷新时重复下载 */
+/* 同一 ETag 的响应体（JSON + gzip）缓存在内存中：多个用户 / 标签页、轮询刷新时不再重复查询与压缩（LRU，最多 8 份） */
+const dataCache = new Map();
+function cachedData(etag, url) {
+  let c = dataCache.get(etag);
+  if (c) { dataCache.delete(etag); dataCache.set(etag, c); return c; }
+  const body = Buffer.from(JSON.stringify(getData(url)));
+  c = { body, gz: body.length > 1024 ? zlib.gzipSync(body) : null };
+  dataCache.set(etag, c);
+  while (dataCache.size > 8) dataCache.delete(dataCache.keys().next().value);
+  return c;
+}
 route('GET', '/api/data', async (req, res, ctx) => {
-  const etag = 'W/"' + sha256([VERSION, store.dataVersion(), todayIn(config.billTz), ctx.url.search].join('|')).slice(0, 32) + '"';
+  const etag = 'W/"' + sha256([VERSION, store.dataVersion(), todayIn(config.billTz), sync.configured().join(','), ctx.url.search].join('|')).slice(0, 32) + '"';
   const headers = { 'Cache-Control': 'private, no-cache', ETag: etag };
   if (req.headers['if-none-match'] === etag) { res.writeHead(304, headers); return res.end(); }
-  return send(req, res, 200, JSON.stringify(getData(ctx.url)), 'application/json; charset=utf-8', headers);
+  const c = cachedData(etag, ctx.url);
+  const gzip = c.gz && /\bgzip\b/.test(req.headers['accept-encoding'] || '');
+  const out = gzip ? c.gz : c.body;
+  res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': out.length, ...(gzip ? { 'Content-Encoding': 'gzip' } : {}), Vary: 'Accept-Encoding', ...headers });
+  return res.end(req.method === 'HEAD' ? undefined : out);
 });
 route('GET', '/api/changes', async (req, res) => json(req, res, 200, { changes: store.listChanges(2000) }));
 /* 品牌信息：登录页使用，无敏感内容 */
@@ -782,7 +819,8 @@ route('POST', '/api/admin/alerts/report', async (req, res, ctx) => {
 /* ---------------- 数据备份 ---------------- */
 route('GET', '/api/admin/backups', async (req, res) => json(req, res, 200, { keep: config.backupKeep, hour: config.backupHour, list: listBackups() }), { admin: true });
 route('POST', '/api/admin/backups', async (req, res, ctx) => {
-  const r = createBackup(true);
+  let r;
+  try { r = await createBackup(true); } catch (e) { if (e.busy) throw new HttpError(409, e.message); throw e; }
   store.audit(ctx.user.username, ctx.ip, 'backup.create', r);
   return json(req, res, 200, { ...r, list: listBackups() });
 }, { admin: true });
@@ -797,7 +835,11 @@ route('POST', '/api/admin/backups/download', async (req, res, ctx) => {
   store.audit(ctx.user.username, ctx.ip, 'backup.download', { name });
   const st = fs.statSync(file);
   res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': st.size, 'Content-Disposition': `attachment; filename="${name}"`, 'Cache-Control': 'no-store' });
-  fs.createReadStream(file).pipe(res);
+  // 读流出错（如文件在下载过程中被轮换删除）时中断连接，而不是让未处理的 error 事件导致进程退出
+  const rs = fs.createReadStream(file);
+  rs.on('error', e => { log('备份下载中断：' + e.message); res.destroy(e); });
+  res.on('close', () => rs.destroy());
+  rs.pipe(res);
 }, { admin: true });
 route('GET', '/api/admin/runs', async (req, res) => json(req, res, 200, { runs: store.listRuns(200) }), { admin: true });
 route('GET', '/api/admin/calls', async (req, res) => json(req, res, 200, { calls: callLog }), { admin: true });
@@ -890,15 +932,16 @@ function metricsText() {
 async function handle(req, res) {
   const ip = clientIp(req);
   securityHeaders(req, res);
-  if (allowList && !allowList.check(ip, net.isIPv6(ip) ? 'ipv6' : 'ipv4')) return send(req, res, 403, 'Forbidden', 'text/plain; charset=utf-8');
   let url;
   try { url = new URL(req.url, 'http://localhost'); } catch { return send(req, res, 400, 'Bad Request', 'text/plain'); }
   const p = url.pathname;
+  // 健康检查不受 IP 白名单限制（容器 HEALTHCHECK 来自 127.0.0.1），且不返回任何业务信息
   if (p === '/healthz') return send(req, res, 200, 'ok', 'text/plain', { 'Cache-Control': 'no-store' });
   if (p === '/readyz') {
     try { store.q('SELECT 1').get(); return send(req, res, 200, 'ready', 'text/plain', { 'Cache-Control': 'no-store' }); }
     catch { return send(req, res, 503, 'database unavailable', 'text/plain', { 'Cache-Control': 'no-store' }); }
   }
+  if (allowList && (!net.isIP(ip) || !allowList.check(ip, net.isIPv6(ip) ? 'ipv6' : 'ipv4'))) return send(req, res, 403, 'Forbidden', 'text/plain; charset=utf-8');
   if (p === '/metrics') {
     if (!config.metricsToken) return send(req, res, 404, 'Not Found', 'text/plain; charset=utf-8');
     if (rateLimited(ip, 120, metricHits)) return send(req, res, 429, 'Too Many Requests', 'text/plain');
@@ -910,7 +953,8 @@ async function handle(req, res) {
   if (rateLimited(ip)) return json(req, res, 429, { error: '请求过于频繁' });
 
   const token = sessionToken(req);
-  const session = token ? store.getSession(token, config.sessionIdleMinutes * 60_000) : null;
+  // 前端后台轮询带 X-Background: 1，不刷新空闲计时：无人操作的页面会按 SESSION_IDLE_MINUTES 正常过期
+  const session = token ? store.getSession(token, config.sessionIdleMinutes * 60_000, req.headers['x-background'] !== '1') : null;
 
   if ((req.method === 'GET' || req.method === 'HEAD') && PUBLIC_ROUTES[p]) {
     if (p === '/login' && session) { res.writeHead(302, { Location: '/' }); return res.end(); }
@@ -954,10 +998,21 @@ server.headersTimeout = 20_000;
 server.keepAliveTimeout = 5_000;
 server.listen(config.port, config.host, () => log(`TokenTally 大模型费用分析服务 v${VERSION} 已启动：http://${config.host}:${config.port}  数据目录：${config.dataDir}  账单时区：${config.billTz}`));
 
-const shutdown = sig => {
+server.on('error', e => {
+  log(`HTTP 服务启动失败：${e.code === 'EADDRINUSE' ? `端口 ${config.port} 已被占用` : e.code === 'EACCES' ? `没有权限监听端口 ${config.port}` : e.message}`);
+  process.exit(1);
+});
+
+let exiting = false;
+const shutdown = (sig, code = 0) => {
+  if (exiting) return;
+  exiting = true;
   log(`收到 ${sig}，正在退出…`);
-  server.close(() => { try { store.db.close(); } catch { /* ignore */ } process.exit(0); });
-  setTimeout(() => process.exit(0), 5000).unref();
+  server.close(() => { try { store.db.close(); } catch { /* ignore */ } process.exit(code); });
+  setTimeout(() => process.exit(code), 5000).unref();
 };
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));
+// 未处理的异步异常只记录不退出；同步未捕获异常说明状态可能已不一致，记录后优雅退出（由容器 restart 策略拉起）
+process.on('unhandledRejection', e => log('未处理的异步异常：', e?.stack || e));
+process.on('uncaughtException', e => { log('未捕获异常：', e?.stack || e); shutdown('uncaughtException', 1); });

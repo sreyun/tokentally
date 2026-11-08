@@ -313,11 +313,16 @@ export class SyncService {
         if (failed.length) { usageOk = false; warnings.push(`${cycle} 有 ${failed.length} 个 API Key 的用量获取失败：${failed[0].e.code || failed[0].e.message}`); }
         usage = res.filter(r => r.ok).flatMap(r => r.v);
         if (usageOk) this.store.replaceUsage('tencent', from, to, usage);
-        else usage = this.store.usageRows('tencent', from, to).length ? this.store.usageRows('tencent', from, to) : usage;
+        else { const stored = this.store.usageRows('tencent', from, to); if (stored.length) usage = stored; }
       } catch (e) {
         usageOk = false;
         warnings.push(`${cycle} TokenHub 用量获取失败，费用暂无法分摊到 API Key：${e.code || e.message}`);
         usage = this.store.usageRows('tencent', from, to);
+      }
+      // 早于用量统计保留期的已出账账期：用量接口不会再有数据，不能因此每小时重复拉取，按已有用量定稿
+      if (!usageOk && final && to < addDays(today, -60)) {
+        usageOk = true;
+        warnings.push(`${cycle} 已超出 TokenHub 用量统计保留期，按本地已保存的用量分摊并定稿`);
       }
 
       // 2) 账单：识别 BusinessCode → 拉取明细（无费用权限时可按目录价估算）

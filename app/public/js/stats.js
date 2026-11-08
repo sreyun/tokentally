@@ -26,7 +26,7 @@ export function tokenStatsHtml({ a, pa, daily, us, period, scope = 'key', provid
   const nIn = a.tIn - a.tCache;
   const why = unavailable ? '当前按 Token 类型 / 计费项 / 渠道筛选，请求次数无法按这些维度拆分；清除这些筛选后显示。'
     : provider === 'tencent' ? `该周期 TokenHub 用量统计中没有该${scope === 'key' ? ' Key' : '模型'}的调用记录。`
-      : `阿里云费用中心账单只包含 Token 用量与费用，不提供调用次数，因此无法计算单次平均消耗；可在百炼控制台“模型观测”中查看${scope === 'key' ? '该 Key' : '该模型'}的调用量。`;
+      : `本系统使用的阿里云接口（百炼 OpenAPI 与费用中心账单）只返回 Token 用量与费用，不含调用次数。调用次数在百炼控制台“监控告警”中按模型 / API Key 提供，开启“监控数据投递”到云监控 Prometheus 后可通过其查询接口获取；当前可在控制台查看${scope === 'key' ? '该 Key' : '该模型'}的调用量。`;
   return `<div class="tok-grid ${dense ? 'dense' : ''}">
       <div class="tok-group"><h4>Token 消耗</h4><div class="tok-cells">
         ${cell('总 Token', compact(tokens), `${deltaPill(tokens, ptokens, { neutral: true })} <span class="muted">${esc(state.compareLabel)}</span>`, 'big')}

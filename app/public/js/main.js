@@ -85,11 +85,12 @@ app.openModel = m => Models.openModel(m);
 app.openDay = (d, keyId) => Day.openDay(d, keyId);
 app.setPeriod = p => { Object.assign(ui.period, p); savePeriod(); renderPeriod(); loadData(); };
 app.reload = () => loadData({ silent: true });
-app.refreshStatus = async () => { try { state.status = await http('GET', '/api/status'); } catch { /* ignore */ } renderSyncBtn(); renderSideFoot(); };
+app.refreshStatus = async (background = false) => { try { state.status = await http('GET', '/api/status', undefined, { background }); } catch { /* ignore */ } renderSyncBtn(); renderSideFoot(); };
 
 /* ---------------- 数据 ---------------- */
-async function loadData({ silent = false } = {}) {
-  if (state.loading) return;
+let loadSeq = 0;
+async function loadData({ silent = false, background = false } = {}) {
+  const seq = ++loadSeq;
   state.loading = true;
   $('#topbar').classList.add('loading');
   if (state.data && !silent) $('#content').classList.add('dim');
@@ -97,14 +98,14 @@ async function loadData({ silent = false } = {}) {
   const p = ui.period;
   const q = p.mode === 'month' ? `mode=month&cycle=${encodeURIComponent(p.cycle)}` : `mode=range&from=${p.from}&to=${p.to}`;
   const errs = [];
-  try {
-    applyData(await http('GET', '/api/data?' + q));
-  } catch (e) { errs.push({ level: 'err', title: '数据加载失败', why: e.message }); }
-  finally {
-    state.loading = false;
-    $('#topbar').classList.remove('loading');
-    $('#content').classList.remove('dim');
-  }
+  let d = null;
+  try { d = await http('GET', '/api/data?' + q, undefined, { background }); }
+  catch (e) { if (seq === loadSeq) errs.push({ level: 'err', title: '数据加载失败', why: e.message }); }
+  if (seq !== loadSeq) return; // 已有更新的请求（如用户连续切换账期），丢弃过期响应
+  if (d) applyData(d);
+  state.loading = false;
+  $('#topbar').classList.remove('loading');
+  $('#content').classList.remove('dim');
   // 在管理页面静默刷新时不重绘，避免清空正在编辑的表单
   if (silent && route.name === 'admin') { renderNav(); return; }
   render(errs);
@@ -278,7 +279,9 @@ function renderFilters(r) {
 function renderNotices(r, extra) {
   const list = extra.slice();
   const s = state.status;
-  if (s && !s.anyConfigured) list.push({ level: 'warn', title: '尚未配置云厂商访问密钥', why: isAdmin() ? '请在“系统管理”中配置阿里云 RAM AccessKey（百炼只读 + 费用中心只读）或腾讯云 CAM API 密钥（TokenHub 只读 + 计费只读），保存后系统会自动同步数据。' : '请联系管理员完成配置。', go: isAdmin() ? '#/admin/aliyun' : null });
+  const demoHidden = (() => { try { return sessionStorage.getItem('bc.demoHide') === '1'; } catch { return false; } })();
+  if (s?.demo && !demoHidden) list.push({ dismiss: 'demo', level: 'info', title: '演示模式 · 当前为随机生成的演示数据', why: isAdmin() ? '在“系统管理 → 阿里云接入 / 腾讯云接入”中配置真实访问密钥后，演示数据会被自动清除并开始同步真实账单。' : '演示数据仅用于体验功能，金额与 Key 均为虚构。', go: isAdmin() ? '#/admin/aliyun' : null });
+  else if (s && !s.anyConfigured && !s.demo) list.push({ level: 'warn', title: '尚未配置云厂商访问密钥', why: isAdmin() ? '请在“系统管理”中配置阿里云 RAM AccessKey（百炼只读 + 费用中心只读）或腾讯云 CAM API 密钥（TokenHub 只读 + 计费只读），保存后系统会自动同步数据。' : '请联系管理员完成配置。', go: isAdmin() ? '#/admin/aliyun' : null });
   for (const p of Object.keys(PROVIDERS)) if (s?.providers?.[p]?.secretState === 'undecryptable') list.push({ level: 'warn', title: `已保存的${PROVIDERS[p]}访问密钥无法解密`, why: '主密钥（APP_MASTER_KEY）已变化，请重新填写访问密钥。', go: isAdmin() ? `#/admin/${p}` : null });
   const d = state.data;
   if (d && !r.noData && route.name !== 'governance' && route.name !== 'key' && !state.lines.length && s?.anyConfigured) {
@@ -286,7 +289,7 @@ function renderNotices(r, extra) {
   } else if (d && r.filters && state.lines.length && activeFilterCount() && !filterLines().length) {
     list.push({ level: 'info', title: '当前筛选条件下没有数据', why: '可移除部分筛选条件，或切换统计周期。', unf: true });
   }
-  $('#notices').innerHTML = list.map(n => `<div class="notice ${n.level}">${icon(n.level === 'info' ? 'info' : 'warn')}<div><b>${esc(n.title)}</b>${n.why ? `<span class="why">${esc(n.why)}</span>` : ''}${n.go ? `<button class="link" data-go="${n.go}">前往配置 →</button>` : ''}${n.unf ? '<button class="link" data-unf="*">清除全部筛选 →</button>' : ''}</div></div>`).join('');
+  $('#notices').innerHTML = list.map(n => `<div class="notice ${n.level}">${icon(n.level === 'info' ? 'info' : 'warn')}<div><b>${esc(n.title)}</b>${n.why ? `<span class="why">${esc(n.why)}</span>` : ''}${n.go ? `<button class="link" data-go="${n.go}">前往配置 →</button>` : ''}${n.unf ? '<button class="link" data-unf="*">清除全部筛选 →</button>' : ''}</div>${n.dismiss ? `<button class="btn ghost icon sm notice-x" data-act="dismiss-${n.dismiss}" aria-label="本次不再提示" title="本次不再提示">${icon('x')}</button>` : ''}</div>`).join('');
 }
 
 /* ---------------- 同步状态 / 用户菜单 ---------------- */
@@ -385,6 +388,7 @@ document.addEventListener('click', async e => {
   if (e.target.closest('#btnMore')) { ui.moreFilters = !ui.moreFilters; render(); return; }
   const act = e.target.closest('[data-act]');
   if (act?.dataset.act === 'pwd') { closePop(); openPwd(false); }
+  if (act?.dataset.act === 'dismiss-demo') { try { sessionStorage.setItem('bc.demoHide', '1'); } catch { /* ignore */ } render(); return; }
   if (act?.dataset.act === 'logout') { closePop(); try { await http('POST', '/api/logout'); } finally { location.href = '/login'; } }
   const close = e.target.closest('[data-close]');
   if (close) close.closest('dialog').close();
@@ -504,7 +508,8 @@ $('#pwdForm').addEventListener('submit', async e => {
 /* ---------------- 启动 & 轮询 ---------------- */
 let lastSyncSeen = 0, lastBillsSeen = 0;
 async function poll() {
-  await app.refreshStatus();
+  if (document.hidden) return; // 页面在后台时不轮询，切回时立即刷新
+  await app.refreshStatus(true);
   const s = state.status?.sync;
   if (!s) return;
   const latest = Math.max(s.meta.changedAt || 0, s.bills.changedAt || 0);
@@ -513,7 +518,7 @@ async function poll() {
     const billsChanged = (s.bills.changedAt || 0) > lastBillsSeen;
     lastSyncSeen = latest; lastBillsSeen = s.bills.changedAt || 0;
     if (!first && !$('#drawer').open && !document.querySelector('#dlgPwd[open]')) {
-      await loadData({ silent: true });
+      await loadData({ silent: true, background: true });
       if (billsChanged && route.name !== 'admin') toast('账单数据已同步更新', '', 2200);
     }
   }
@@ -529,6 +534,7 @@ async function start() {
   render();
   await loadData();
   setInterval(poll, 20_000);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) poll(); });
 }
 (async function boot() {
   applyTheme(getTheme());

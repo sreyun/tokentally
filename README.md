@@ -1,108 +1,190 @@
-# TokenTally · 大模型 API Key 费用分析（阿里云百炼 + 腾讯云 TokenHub）
+<div align="center">
 
-面向企业的 **多云大模型 API Key 级费用与用量综合分析系统**。通过只读访问密钥定时同步 **阿里云百炼（Model Studio）** 与
-**腾讯云大模型服务平台 TokenHub** 的 API Key、业务空间、用量与费用中心账单，永久保存到 SQLite，围绕
-“每个 API Key / 每个部门花了多少、花在哪、是否合理、会不会超支”提供成本管理、预算告警、成本中心分摊与模型调用的深度分析。
+# TokenTally
 
-- **交付形态**：`docker compose` 一键部署，对外是一个带登录的网址；可选 Caddy 自动 HTTPS；支持品牌定制、自动备份、Prometheus 监控
-- **零第三方依赖**：Node.js 24 内置 `node:http` + `node:sqlite` + `node:crypto`，无 npm 包，供应链攻击面最小
-- **口径与云厂商一致**：按账期查询用费用中心**月度账单**，按日期查询用**按天账单**，自然日按北京时间划分；签名算法内置官方示例自检
+**多云大模型 API Key 成本管理平台 · 阿里云百炼 + 腾讯云 TokenHub**
+
+每个 API Key、每个模型、每个部门到底花了多少钱？一个页面看清，一条命令部署。
+
+[![Release](https://img.shields.io/github/v/tag/sreyun/tokentally?label=release&color=2a78d6)](https://github.com/sreyun/tokentally/tags)
+[![Stars](https://img.shields.io/github/stars/sreyun/tokentally?style=flat&color=eda100)](https://github.com/sreyun/tokentally/stargazers)
+![Node](https://img.shields.io/badge/Node.js-24-339933?logo=node.js&logoColor=white)
+![Dependencies](https://img.shields.io/badge/npm%20dependencies-0-1baf7a)
+![Docker](https://img.shields.io/badge/docker%20compose-ready-2496ED?logo=docker&logoColor=white)
+![Clouds](https://img.shields.io/badge/clouds-Aliyun%20%7C%20Tencent-eb6834)
+
+简体中文 · [English](README.en.md) · [部署与运维手册](docs/DEPLOYMENT.md) · [更新日志](CHANGELOG.md)
+
+<img src="docs/images/overview.jpg" alt="TokenTally 成本概览" width="100%">
+
+</div>
 
 ---
 
-## 功能
+## 为什么需要 TokenTally
 
-| 模块 | 回答的问题与内容 |
+公司里的大模型 API Key 越来越多：客服、营销、研发、数据分析各自申请，分布在阿里云、腾讯云多个账号和业务空间里。月底账单出来时，财务和负责人常常面对这些问题：
+
+- 🔍 **花在哪了？** 云厂商费用中心按产品 / 资源出账，看不到“某个 Key 本月花了多少、用了哪些模型”
+- 🏢 **算谁的？** 多个团队共用账号，成本无法按部门 / 项目分摊
+- 💥 **为什么突然涨了？** 某个 Key 被泄露或误用，等到月底才发现
+- ⏰ **会不会超支？** 没有按 Key 的预算与月末预测，告警全靠人盯
+- 🧹 **Key 管不过来** 无描述、权限过宽、闲置、已删除仍在扣费的 Key 无人清理
+
+**TokenTally 把这些问题变成一个自动更新的看板**：定时同步云厂商的 Key 与账单到本地 SQLite，按 Key / 模型 / 成本中心 / 云厂商多维分析，异常与超预算自动推送到钉钉、飞书、企业微信。
+
+## ✨ 亮点
+
+| | |
 |---|---|
-| **成本概览** | 本期花了多少、是否正常、会不会超预算、变化来自哪里：本期费用（应付/原价/优惠后可切换）与环比、预算使用率与**月末预测**、每百万 Token 成本、缓存命中率；费用趋势（每日堆叠 / 本期与上期**累计对比** + 月末预测 / 近 12 个账期，可按 Key、模型、业务空间、**云厂商**、**成本中心**分组）；**关键发现**；Key / 模型排行、费用构成、变动归因、治理摘要；点击每日柱下钻到当日明细 |
-| **API Key 分析** | 全部 Key（两家云厂商、含已删除仍有账单的 Key）的云厂商、描述、业务空间、**成本中心 / 负责人**、状态、费用与环比、占比、预算使用、Token、缓存命中率、单位成本、**请求数与失败率**（腾讯云）、主要模型、最近消费、权限与 IP 白名单；**批量归属设置**；Key × 日期消耗热力 |
-| **Key 详情页** | 单个 Key 的费用与排名、Token、单位成本、命中率、请求次数、预算/预测；成本中心、负责人、备注（可编辑）；每日费用、模型构成、近 12 个账期、计费维度、模型明细（含请求数 / 失败率）、计费项明细、调用渠道、权限与变更历史；腾讯云 Key 标注“按用量分摊” |
-| **模型分析** | 模型费用、所属云厂商、Token 结构、命中率、输出/输入比、单位成本、日均 Token、**请求数、失败率、单次均 Token / 费用**（腾讯云）、计费维度、每日费用、Key × 模型矩阵、模型 × 计费项 × 单价；模型详情抽屉含 **Token 消耗与调用统计**、每日 Token 结构与调用次数图、各 Key 的 Token / 请求 / 单次平均 |
-| **成本分摊** | 多维透视：行/列任选 **云厂商、成本中心、负责人**、业务空间、API Key、模型、Token 类型、计费项、计费时段、渠道、日期、**自然周、星期**、近 12 月；指标可选费用/原价/Token；数值或占比、色阶；常用预设（成本中心 × 模型、成本中心 × 近 12 月等）；单元格下钻到账单明细；导出 CSV、**打印 / 另存 PDF** |
-| **账单明细** | 逐条账单（标注云厂商与“分摊 / 估算”口径），导出 CSV 含全部字段 |
-| **Key 治理** | 已删除/已禁用仍计费、超出/预计超出预算、费用突增、有消费无描述、**未分配成本中心**、权限过宽、闲置 30 天、未限制 IP、未归属业务空间；分级并给出处置建议 |
-| **变更记录** | 两家云厂商同步时检测到的 API Key / 业务空间新增、修改、删除、恢复 |
-| **系统管理** | 阿里云接入、**腾讯云接入**、数据同步（按云厂商）、预算管理、**告警通知**（多渠道）、用户管理、**品牌与备份**、安全与审计、接口日志 |
+| 💰 **与账单一致的 Key 级费用** | 阿里云直接按实例账单归属到 Key；腾讯云账单不含 Key，按 TokenHub 用量占比**精确分摊真实账单**，合计与账单分毫不差 |
+| 📊 **多维分析** | Key / 模型 / 业务空间 / 成本中心 / 负责人 / 云厂商 / 计费项 / 日 / 周 / 星期，任意交叉透视，一键导出与打印 |
+| 🔢 **Token 与调用统计** | 每个 Key、每个模型的 Token 结构、缓存命中率、单位成本、日均与峰值；腾讯云还有请求数、成功率、单次平均 Token / 费用 |
+| 🔔 **告警与报表推送** | 钉钉 / 飞书 / 企业微信 / Webhook，最多 5 个渠道：预算、费用异常、同步故障、Key 变更，以及日报 / 周报 / 月报 |
+| 🛡️ **Key 治理** | 自动发现已删除仍计费、权限过宽、无描述、闲置、费用突增、未分配成本中心等问题并给出建议 |
+| 🔒 **安全优先** | 访问密钥 AES-256-GCM 加密、只读权限、敏感操作二次验证、CSRF / CSP / 限流 / 审计日志、Webhook 防 SSRF |
+| 📦 **零依赖、易交付** | 纯 Node.js 24 内置模块，无 npm 依赖；`docker compose` 一键部署，自动备份、Prometheus 指标、品牌定制 |
+| 🎮 **演示模式** | 没有云账号？`DEMO_DATA=true` 用虚构数据体验全部功能 |
 
-全局：账期 / 日期两种口径，筛选（云厂商、业务空间、API Key、模型、成本中心、Token 类型、计费项、渠道、关键字），费用口径切换，
-浅色 / 深色 / 跟随系统主题，页面地址可收藏分享（如 `#/key/171769`），键盘 `/` 聚焦搜索，所有表格支持排序、首列冻结、紧凑模式与 CSV 导出。
+## 📸 截图
 
-### 多云：腾讯云 TokenHub 的 Key 级费用怎么算
+| 成本概览（深色主题） | API Key 分析 |
+|---|---|
+| <img src="docs/images/overview-dark.jpg" alt="成本概览深色主题"> | <img src="docs/images/keys.jpg" alt="API Key 分析"> |
+| **Key 详情：Token 消耗与调用统计** | **模型详情** |
+| <img src="docs/images/key-detail.jpg" alt="Key 详情"> | <img src="docs/images/model-detail.jpg" alt="模型详情"> |
+| **成本分摊：成本中心 × 模型** | **Key 治理** |
+| <img src="docs/images/pivot.jpg" alt="成本分摊透视"> | <img src="docs/images/governance.jpg" alt="Key 治理"> |
 
-腾讯云计费中心的账单按 **推理服务 / 模型** 出账，**不含 API Key 维度**。系统同时拉取：
+> 截图均为演示模式下随机生成的虚构数据。
 
-1. 计费中心账单明细 `DescribeBillDetail`（真实金额，含折扣、代金券）
-2. TokenHub 用量统计 `DescribeUsageRankList`（每个 API Key × 模型 × 日 的输入 / 缓存命中 / 输出 Token 与请求数）
+## 🚀 快速开始
 
-**Key 费用 = 当日该模型同一计费项的账单金额 × 该 Key 在当日该模型对应 Token 中的占比**（输入按“输入 − 缓存命中”、缓存命中按缓存 Token、输出按输出 Token），
-最后一份取余数，**所有 Key 合计与腾讯云账单分毫不差**；当日找不到用量时回退到整月用量占比；账单资源本身就是 API Key 时直接归属。
-页面上这类费用标注“分摊”。若 CAM 子用户缺少计费只读权限，可选按 TokenHub 模型目录价 × 用量**估算**（标注“估算”，不含折扣与阶梯价，获得权限后自动替换为真实账单）。
+### 1 分钟体验演示（无需云账号）
 
-### 告警通知与报表推送
+```bash
+git clone https://github.com/sreyun/tokentally.git && cd tokentally && cp .env.example .env
+```
 
-在“系统管理 → 告警通知”中配置最多 5 个渠道（**钉钉 / 飞书 / 企业微信群机器人、通用 Webhook**），每个渠道单独订阅事件：
+```bash
+sed -i "s|^APP_MASTER_KEY=.*|APP_MASTER_KEY=$(openssl rand -base64 32)|; s|^DEMO_DATA=.*|DEMO_DATA=true|" .env
+```
+
+```bash
+docker compose up -d --build && docker compose logs app | grep 初始管理员密码
+```
+
+打开 `http://localhost:8080`，用日志中的初始密码登录即可看到两家云厂商的演示数据。配置真实访问密钥后，演示数据会自动清除。
+
+### 正式部署
+
+1. `cp .env.example .env`，填写 `APP_MASTER_KEY`（`openssl rand -base64 32` 生成，请单独保管）
+2. `docker compose up -d --build`
+3. 登录后在 **系统管理** 中配置 **阿里云 RAM AccessKey** 和 / 或 **腾讯云 CAM API 密钥**（只读），点“测试”确认接口通过
+4. 在 **数据同步** 中把回溯账期设为 12 并全量回溯；在 **API Key 分析 → 归属设置** 分配成本中心；在 **告警通知** 添加群机器人
+
+需要 HTTPS、IP 白名单、备份恢复、Prometheus 监控？见 [部署与运维手册](docs/DEPLOYMENT.md)。
+
+## 🧭 工作原理
+
+```mermaid
+flowchart LR
+  subgraph Cloud["云厂商（只读接口）"]
+    A1["阿里云百炼<br/>ListApiKeys / ListWorkspaces"]
+    A2["阿里云费用中心<br/>DescribeInstanceBill（月 / 日）"]
+    T1["腾讯云 TokenHub<br/>DescribeApiKeyList / DescribeUsageRankList"]
+    T2["腾讯云计费<br/>DescribeBillDetail"]
+  end
+  subgraph App["TokenTally（单容器）"]
+    S["定时同步<br/>元数据 5 分钟 · 账单 60 分钟"]
+    AL["腾讯云按用量分摊"]
+    DB[("SQLite<br/>账单 / Key / 用量 / 标签")]
+    W["Web 看板 + API"]
+    N["告警与报表"]
+  end
+  A1 & A2 & T1 & T2 --> S --> AL --> DB --> W
+  DB --> N --> IM["钉钉 / 飞书 / 企业微信 / Webhook"]
+```
+
+**腾讯云 Key 级费用怎么来的？** 腾讯云账单按推理服务 / 模型出账、不含 API Key。TokenTally 同时拉取账单明细与 TokenHub 的“Key × 模型 × 日”用量：
+
+> Key 费用 = 当日该模型同一计费项（输入 / 缓存命中 / 输出）的**真实账单金额** × 该 Key 在对应 Token 中的**占比**
+
+最后一份取余数，所有 Key 合计与腾讯云账单完全一致；账单资源本身是 API Key 时直接归属。缺少计费权限时可按目录价估算（页面标注“估算”）。
+
+## 🆚 与云厂商控制台对比
+
+| 能力 | 云厂商控制台 | TokenTally |
+|---|:---:|:---:|
+| 按 API Key 的费用（与账单一致） | 部分（阿里云有汇总，腾讯云无） | ✅ 两家统一 |
+| 多云 / 多账号统一视图 | ❌ | ✅ |
+| 成本中心 / 部门分摊 | ❌ | ✅ |
+| 按 Key 的预算与月末预测 | ❌ | ✅ |
+| 预算 / 异常 / 同步故障推送到 IM | 有限 | ✅ 钉钉 · 飞书 · 企业微信 |
+| 日报 / 周报 / 月报 | ❌ | ✅ |
+| Key 治理检查 | ❌ | ✅ |
+| 历史数据长期保存 | 受控制台保留期限制 | ✅ 本地 SQLite |
+| 只读、可私有化部署 | — | ✅ |
+
+## 📚 功能详解
+
+<details>
+<summary><b>成本分析</b>：概览、Key、模型、透视、账单明细</summary>
+
+- **成本概览**：本期费用（应付 / 原价 / 优惠后）与环比、预算使用率与月末预测、每百万 Token 成本、缓存命中率；费用趋势（每日 / 累计对比 / 近 12 个账期，可按 Key、模型、业务空间、云厂商、成本中心分组）；关键发现（变化驱动、超预算、集中度、异常日、缓存节省、治理风险）；点击每日柱下钻到当日明细
+- **API Key 分析**：全部 Key 的云厂商、成本中心 / 负责人、状态、费用与环比、预算使用、Token、缓存命中率、单位成本、日均 Token、请求数 / 失败率 / 单次均 Token / 单次均费用（腾讯云）、权限、IP 白名单；批量归属设置；消耗热力图
+- **Key 详情 / 模型详情**：Token 消耗与调用统计（总量与结构、输出 / 输入比、日均、峰值日、消耗天数、请求次数、成功率、单次平均）、每日 Token 结构图与调用次数图、模型 / Key 明细、计费项与单价、变更历史
+- **成本分摊**：行 / 列任选云厂商、成本中心、负责人、业务空间、Key、模型、Token 类型、计费项、时段、渠道、日期、自然周、星期、近 12 月；数值 / 占比 / 色阶；单元格下钻；导出 CSV、打印 / PDF
+- **账单明细**：逐条账单，标注“分摊 / 估算”口径，导出全部字段
+</details>
+
+<details>
+<summary><b>告警通知与报表</b></summary>
 
 | 事件 | 触发条件 | 去重 |
 |---|---|---|
-| 预算告警 | 总预算 / 单个 Key 预算达到预警阈值、超出预算、预计月末超出总预算 | 同一阈值每账期每渠道一次 |
-| 费用异常 | 昨日费用 ≥ 前 7 日日均 × 倍数（默认 2）且增量 ≥ 最小金额（默认 ¥50），整体与单个 Key | 每天一次 |
-| 同步故障 | 同一云厂商同类同步连续失败 3 次；恢复后发送恢复通知 | 每次故障一次 |
-| API Key 变更 | 新增 / 删除 / 恢复 API Key（安全治理） | 每条变更一次 |
-| 日报 / 周报 / 月报 | 每天设定时间（默认 9:00）后：昨日费用与环比、本月累计与预测、Top Key / 模型、异常；周一发上周周报；次月出账后发月报（含成本中心分摊） | 每周期一次 |
+| 预算告警 | 总预算 / Key 预算达到阈值、超出、预计月末超出 | 每阈值每账期每渠道一次 |
+| 费用异常 | 昨日费用 ≥ 前 7 日日均 × 倍数且增量 ≥ 最小金额（整体与单个 Key） | 每天一次 |
+| 同步故障 | 同一云厂商同类同步连续失败 3 次；恢复后通知 | 每次故障一次 |
+| Key 变更 | 新增 / 删除 / 恢复 API Key | 每条一次 |
+| 日报 / 周报 / 月报 | 每天设定时间后；周一发周报；次月出账后发月报（含成本中心分摊） | 每周期一次 |
 
-- 告警可 **@ 手机号 / @所有人**（钉钉支持手机号；飞书自定义机器人仅支持 @所有人；企业微信会追加一条带 @ 的文本消息）
-- 钉钉、飞书支持加签；通用 Webhook 配置密钥后附带 `X-Alert-Timestamp` 与 `X-Alert-Signature: sha256=HMAC(secret, timestamp + "." + body)`
-- 某个渠道发送失败不影响其他渠道，失败项下次检查时自动重试；报表可在页面预览并立即发送
-- Webhook 地址与密钥加密保存且不回显；仅允许 HTTPS，钉钉/飞书/企业微信只允许官方域名，连接时拒绝解析到内网/保留地址的目标（防 SSRF / DNS 重绑定）
-- 消息标题带品牌名称；设置 `PUBLIC_URL` 后附带“打开费用分析”链接
+支持 @ 手机号 / @所有人、钉钉与飞书加签、通用 Webhook HMAC 签名；渠道失败互不影响并自动重试；报表可预览与立即发送。Webhook 仅 HTTPS、官方域名白名单、连接阶段拦截内网地址。
+</details>
 
-### 成本中心与负责人
+<details>
+<summary><b>Key 治理</b></summary>
 
-在“API Key 分析 → 归属设置”中为 Key 批量设置 **成本中心、负责人、备注**（本地标签，不修改云厂商上的 Key）。之后可按成本中心筛选、
-在概览中按成本中心查看构成与趋势、在成本分摊中做“成本中心 × 模型 / 近 12 月”透视，月报自动附带按成本中心的分摊，治理页提示有消费但未分配成本中心的 Key。
+已删除 / 已禁用仍计费、超出 / 预计超出预算、费用突增、有消费无描述、未分配成本中心、权限过宽（全部模型 + IP 不限）、闲置 30 天、未限制 IP、未归属业务空间，分高 / 中 / 低三级并给出处置建议。
+</details>
 
-## 部署
+<details>
+<summary><b>安全</b></summary>
 
-需要一台能访问 `*.aliyuncs.com` / `*.tencentcloudapi.com` 的 Linux 服务器，已安装 Docker 与 Docker Compose v2。完整的部署、HTTPS、备份恢复、升级与监控说明见
-[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)。
+| 层面 | 措施 |
+|---|---|
+| 凭证 | 访问密钥、Webhook 地址与密钥 AES-256-GCM 加密存储，只写不回显；主密钥来自环境变量，与数据卷分离 |
+| 签名 | 阿里云 ACS3、腾讯云 TC3 签名启动时用官方示例自检；后端只开放只读接口白名单 |
+| 账号 | scrypt 密码哈希、强密码策略、首次登录强制改密、登录失败锁定、统一错误提示防枚举 |
+| 会话 | HttpOnly + SameSite=Strict（HTTPS 下 `__Host-` + Secure），空闲 / 最长超时；后台轮询不续期会话 |
+| 敏感操作 | 更换访问密钥、下载备份须再次输入密码，连续输错强制退出全部会话并审计 |
+| 请求 | CSRF 令牌 + Origin 校验、严格 CSP、HSTS、请求体与频率限制、可选 IP 白名单 |
+| 外发 | Webhook 防 SSRF（官方域名白名单 + 连接阶段拦截内网 / DNS 重绑定）、超时与响应大小限制 |
+| 容器 | 非 root、只读根文件系统、`cap_drop: ALL`、`no-new-privileges`、资源限制、健康检查 |
+</details>
 
-```bash
-cp .env.example .env
-```
+<details>
+<summary><b>运维与交付</b></summary>
 
-```bash
-chmod 600 .env
-```
+- 自动一致性备份（每天，保留 N 份）、管理页立即备份与验证下载
+- `/healthz`、`/readyz`、Prometheus `/metrics`（Bearer 令牌）
+- 品牌定制（产品名称 / 副标题）、管理员 / 只读两种角色、审计日志
+- 升级：`git pull && docker compose up -d --build`，数据库自动迁移
+</details>
 
-编辑 `.env`，至少填写主密钥（用于加密访问密钥，请单独妥善保管）：
+## 🔑 所需权限（只读）
 
-```bash
-openssl rand -base64 32
-```
-
-把输出填入 `APP_MASTER_KEY=`，然后启动：
-
-```bash
-docker compose up -d --build
-```
-
-查看初始管理员密码（未设置 `ADMIN_PASSWORD` 时随机生成，首次登录强制修改）：
-
-```bash
-docker compose logs app | grep 初始管理员密码
-```
-
-浏览器打开 `http://服务器IP:8080` 登录后：
-
-1. **系统管理 → 阿里云接入**：填写 RAM 用户 AccessKey，“测试已保存配置”确认 5 项接口通过
-2. **系统管理 → 腾讯云接入**：填写 CAM 子用户 SecretId / SecretKey，测试 5 项接口
-3. **数据同步**：回溯账期数调为 12 并“全量回溯”；**预算管理**设置预算；**告警通知**添加群机器人；**API Key 分析 → 归属设置**分配成本中心
-
-只使用其中一家云厂商时，只配置对应的接入即可，界面会自动隐藏云厂商维度。
-
-## 权限（只读）
-
-**阿里云 RAM**：系统策略 `AliyunBailianReadOnlyAccess` + `AliyunBSSReadOnlyAccess`，或最小权限自定义策略：
+**阿里云 RAM**：`AliyunBailianReadOnlyAccess` + `AliyunBSSReadOnlyAccess`，或最小权限：
 
 ```json
 {
@@ -114,7 +196,7 @@ docker compose logs app | grep 初始管理员密码
 }
 ```
 
-**腾讯云 CAM**：为本系统创建仅编程访问的子用户，授予 TokenHub 只读与费用中心账单只读权限，或参考以下自定义策略（以 CAM 控制台策略语法为准）：
+**腾讯云 CAM**：TokenHub 只读 + 费用中心账单只读，或参考（以 CAM 控制台策略语法为准）：
 
 ```json
 {
@@ -126,105 +208,95 @@ docker compose logs app | grep 初始管理员密码
 }
 ```
 
-## 数据来源与口径
+## ⚙️ 配置
 
-| 云厂商 | 数据 | 接口 | 同步策略 |
-|---|---|---|---|
-| 阿里云 | 业务空间、API Key、描述、权限、IP 白名单 | ModelStudio `ListWorkspaces` / `ListApiKeys`（2026-02-10） | 默认每 5 分钟，记录变更 |
-| 阿里云 | 账期 / 按日账单 | BssOpenApi `DescribeInstanceBill` · MONTHLY / DAILY · 按计费项 | 默认每 60 分钟；已出账账期同步一次后定稿；最近 3 天每次刷新 |
-| 阿里云 | 对账 | ModelStudio `GetBillingOverview` | 随账单同步 |
-| 腾讯云 | API Key、名称、备注、状态、绑定模型 / 接入点、IP 白名单 | TokenHub `DescribeApiKeyList`、`DescribeModelEndpointList`（2026-03-22） | 默认每 5 分钟，记录变更 |
-| 腾讯云 | Key × 模型 × 日 用量与请求数 | TokenHub `DescribeUsageRankList`（apikey_usage） | 随账单同步（用量统计最长约 90 天） |
-| 腾讯云 | 账单明细 | 计费 `DescribeBillSummaryByProduct` 识别产品代码 + `DescribeBillDetail`（2018-07-09） | 默认每 60 分钟，按账期整体替换并拆分到日 |
-
-- 阿里云实例ID解析：`ApiKeyID;业务空间ID;模型;计费项;[调用渠道];[免费额度用完即停]`，计费项如 `input_token_cache_peak` 解析为“输入 · 缓存命中 · 峰时”。
-- 腾讯云账单按“日 × 资源 × 模型 × 计费项 × 单价”合并（按量计费按小时出账），模型名来自推理服务 → 模型映射；计费项名称映射为输入 / 缓存命中 / 输出 / 思考。
-- **应付金额** = 原价 − 优惠 − 优惠券抵扣（税前）；腾讯云对应 `RealCost`。可切换为原价或优惠后金额。
-- 环比：历史账期对比上月全月；当月对比“上月同期”；按日期查询对比上一个等长周期。账单相对实际调用约延迟数小时，次月 3 日后出账为准。
-
-## 安全措施
-
-| 层面 | 措施 |
-|---|---|
-| 凭证 | 阿里云 AccessKey、腾讯云 SecretKey、Webhook 地址与密钥以 **AES-256-GCM** 加密后存入 SQLite（AAD 绑定字段名），只写不回显；主密钥来自环境变量 `APP_MASTER_KEY`，与数据卷分离 |
-| 签名 | 阿里云 ACS3-HMAC-SHA256、腾讯云 TC3-HMAC-SHA256 启动时用官方文档示例自检，失败拒绝启动；后端只开放只读接口白名单 |
-| 账号 | 密码 scrypt（N=32768）哈希；至少 10 位且含字母与数字；首次登录/重置后强制改密；改密后其他会话失效 |
-| 敏感操作 | 更换任一云厂商访问密钥、下载数据备份须再次输入当前登录密码；连续输错 5 次强制退出该用户全部会话并记录审计 |
-| 登录防护 | 单用户连续 5 次失败锁定 15 分钟；单 IP 15 分钟内最多 20 次失败；统一错误提示与等时校验 |
-| 会话 | 随机 256 位令牌（库中仅存哈希）；HttpOnly + SameSite=Strict（HTTPS 下 Secure + `__Host-` 前缀）；空闲 2 小时 / 最长 12 小时过期 |
-| 请求 | CSRF 令牌 + Origin 校验；严格 CSP（禁止内联脚本）、X-Frame-Options、nosniff、Referrer-Policy、HSTS、`X-Robots-Tag: noindex`；请求体大小与频率限制；可选 IP 白名单 `ALLOW_CIDRS` |
-| 外发请求 | 告警 Webhook 仅 HTTPS、官方域名白名单、连接阶段拦截内网 / 保留地址（防 SSRF 与 DNS 重绑定）、8 秒超时、响应大小限制 |
-| 监控接口 | `/metrics` 需 Bearer 令牌（≥16 位，未配置则关闭），独立限流，不含任何密钥与 Key 描述 |
-| 审计 | 登录、配置与密钥变更、二次验证失败、预算、成本中心标签、告警配置与发送、备份创建与下载、用户管理、同步触发全部写入审计日志 |
-| 容器 | 非 root（uid 1000）、只读根文件系统、`cap_drop: ALL`、`no-new-privileges`、内存/CPU/进程数限制、健康检查、日志轮转 |
-
-## 运维
-
-- **自动备份**：每天 `BACKUP_HOUR`（默认 3 点）在数据卷 `/data/backups` 生成一致性备份，保留最近 `BACKUP_KEEP`（默认 7）份；管理页可立即备份、验证密码后下载
-- **健康检查**：`GET /healthz`（存活）、`GET /readyz`（数据库可用）
-- **监控**：设置 `METRICS_TOKEN` 后 `GET /metrics`（Prometheus 文本格式）：各云厂商同步状态与最近成功时间、本月应付金额、预算使用率、Key 数量、告警渠道状态、会话数
-- **升级**：`git pull && docker compose up -d --build`，数据库自动迁移（v1.1 → v1.2：多云字段、用量表、成本中心标签；单渠道告警配置自动转换为多渠道）
-
-恢复备份、忘记管理员密码、Prometheus 抓取配置等见 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)。
-
-## 环境变量
+<details>
+<summary>环境变量</summary>
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `APP_MASTER_KEY` | — | 加密主密钥，**必填**，≥32 字符 |
 | `ADMIN_USERNAME` / `ADMIN_PASSWORD` | admin / 随机 | 仅在没有任何用户时创建 |
 | `HTTP_PORT` / `BIND_ADDR` | 8080 / 0.0.0.0 | 对外端口与绑定地址 |
-| `TRUST_PROXY` | false | 位于反向代理之后时设为 true |
-| `COOKIE_SECURE` | auto | auto / true / false |
-| `DOMAIN` | — | `https` profile 使用的域名 |
-| `ALLOW_CIDRS` | — | IP 白名单，逗号分隔 |
+| `TRUST_PROXY` / `COOKIE_SECURE` | false / auto | 反向代理与 Cookie Secure |
+| `DOMAIN` | — | `https` profile（Caddy 自动证书）使用的域名 |
+| `ALLOW_CIDRS` | — | IP 白名单（健康检查不受限） |
 | `SESSION_IDLE_MINUTES` / `SESSION_MAX_HOURS` | 120 / 12 | 会话超时 |
 | `LOGIN_MAX_FAILURES` / `LOGIN_LOCK_MINUTES` / `LOGIN_MAX_PER_IP` | 5 / 15 / 20 | 登录防暴力破解 |
 | `BILL_TZ` | Asia/Shanghai | 账单自然日时区 |
-| `ALIBABA_CLOUD_ACCESS_KEY_ID` / `_SECRET` | — | 可选，首次启动导入阿里云 AccessKey 后加密存库，建议之后从 `.env` 删除 |
-| `TENCENTCLOUD_SECRET_ID` / `_KEY` | — | 可选，首次启动导入腾讯云 API 密钥后加密存库 |
-| `PUBLIC_URL` | — | 可选，对外访问地址，用于告警消息中的跳转链接 |
-| `ALERT_ALLOW_PRIVATE` | false | 允许通用 Webhook 指向内网地址（仅在接收端位于内网时开启） |
-| `BACKUP_KEEP` / `BACKUP_HOUR` | 7 / 3 | 自动备份保留份数（0 关闭）与时间 |
-| `METRICS_TOKEN` | — | 可选，≥16 位，开启 `/metrics` |
-| `TENCENT_ENDPOINT_OVERRIDE` | — | 仅用于测试或私有 API 网关，生产环境请留空 |
+| `ALIBABA_CLOUD_ACCESS_KEY_ID` / `_SECRET` | — | 可选：首次启动导入阿里云密钥后加密存库 |
+| `TENCENTCLOUD_SECRET_ID` / `_KEY` | — | 可选：首次启动导入腾讯云密钥后加密存库 |
+| `PUBLIC_URL` | — | 告警消息中的跳转链接 |
+| `ALERT_ALLOW_PRIVATE` | false | 允许通用 Webhook 指向内网 |
+| `BACKUP_KEEP` / `BACKUP_HOUR` | 7 / 3 | 自动备份份数（0 关闭）与时间 |
+| `METRICS_TOKEN` | — | ≥16 位，开启 `/metrics` |
+| `DEMO_DATA` | false | 演示模式 |
+| `TENCENT_ENDPOINT_OVERRIDE` | — | 仅测试 / 私有网关 |
+</details>
 
-## 目录结构
+## ❓ 常见问题
+
+<details>
+<summary><b>阿里云 Key 为什么没有调用次数？</b></summary>
+
+阿里云百炼的公开 OpenAPI（ModelStudio 2026-02-10 全部 38 个接口）和费用中心账单都只返回 Token 用量与金额，不含调用次数。调用次数在百炼控制台“监控告警”中按模型 / API Key 提供，可开启“监控数据投递”到云监控 Prometheus。腾讯云 TokenHub 的用量统计接口直接提供请求数，因此腾讯云 Key / 模型会显示请求次数、成功率与单次平均。
+</details>
+
+<details>
+<summary><b>数据和阿里云 / 腾讯云控制台对不上？</b></summary>
+
+“账期”口径使用月度账单、“日期”口径使用按天账单；账单相对调用延迟数小时，当月数据持续更新，次月 3 日后出账为准。应付金额 = 原价 − 优惠 − 优惠券抵扣（税前），可在页面切换为原价或优惠后金额。
+</details>
+
+<details>
+<summary><b>需要什么权限？会修改云上的东西吗？</b></summary>
+
+只需要只读权限，后端只调用只读接口白名单中的接口；成本中心、预算等都是本地数据，不会写回云厂商。
+</details>
+
+<details>
+<summary><b>能支持更多云厂商吗？</b></summary>
+
+可以，同步层按云厂商解耦（见 `app/src/aliyun.mjs`、`app/src/tencent.mjs`）。欢迎在 Issue 中告诉我们你最需要的平台。
+</details>
+
+## 🗺️ 路线图
+
+- [x] 阿里云百炼：Key / 业务空间 / 账期与按日账单
+- [x] 腾讯云 TokenHub：Key / 用量 / 账单按用量分摊
+- [x] 成本中心、预算、告警推送、日 / 周 / 月报
+- [x] 演示模式、自动备份、Prometheus 指标、品牌定制
+- [ ] 阿里云调用次数（接入百炼监控投递的云监控 Prometheus）
+- [ ] 火山引擎方舟、百度千帆等更多平台
+- [ ] Excel 报表与定时邮件
+- [ ] SSO / LDAP 登录
+
+## 🧱 技术栈与目录
+
+纯 **Node.js 24** 内置模块（`node:http`、`node:sqlite`、`node:crypto`），前端为原生 ES 模块 + 手写 SVG 图表，**无任何 npm 依赖、无构建步骤、无外部 CDN**。
 
 ```
-├── docker-compose.yml   # app + 可选 caddy(https)
-├── Dockerfile
-├── Caddyfile
-├── .env.example
-├── docs/DEPLOYMENT.md   # 部署与运维手册
-└── app
-    ├── src
-    │   ├── server.mjs   # HTTP、鉴权、会话、CSRF、限流、路由、备份、指标
-    │   ├── sync.mjs     # 多云定时同步（元数据 / 账单 / 用量 / 分摊 / 对账）
-    │   ├── aliyun.mjs   # 阿里云 ACS3-HMAC-SHA256 客户端、账单实例ID解析
-    │   ├── tencent.mjs  # 腾讯云 TC3-HMAC-SHA256 客户端、账单解析、按用量分摊、目录价估算
-    │   ├── alerts.mjs   # 多渠道告警、费用异常、同步故障、日/周/月报（加签、SSRF 防护）
-    │   ├── db.mjs       # SQLite 结构、迁移与读写
-    │   ├── calllog.mjs  # 云 API 调用日志（内存）
-    │   ├── crypto.mjs   # scrypt、AES-256-GCM、主密钥
-    │   └── config.mjs
-    └── public           # 前端（原生 ES 模块，无外部 CDN 与构建步骤）
-        ├── index.html / login.html / app.css
-        └── js
-            ├── main.js        # 路由、导航、周期、筛选、同步状态、用户菜单、主题
-            ├── core.js        # 状态、格式化、账单解析与聚合、维度、预测与预算、对话框
-            ├── charts.js      # 柱/线/排行/发散/分段/热力等 SVG 组件
-            ├── table.js       # 表格（排序、分页、首列冻结、键盘、CSV 防公式注入）
-            ├── insights.js    # 关键发现规则
-            ├── stats.js       # 单个 Key / 模型的 Token 消耗与调用统计组件
-            └── views/         # overview · keys · key · day · models · pivot · detail · governance · changes · admin
+app/src      server（HTTP / 鉴权 / 路由）· sync（多云同步）· aliyun · tencent · alerts · db · demo · crypto · config
+app/public   index.html · login.html · app.css · js/（main · core · charts · table · stats · insights · views/）
+docs/        DEPLOYMENT.md · images/
 ```
 
-`/api/data` 按数据版本返回 ETag，数据未变化时 304，页面刷新/轮询不重复传输。
-预算按自然月的应付金额（多云合计）计；月末预测 = 已完成日合计 + 今日已入账 + 已完成日日均 × 剩余天数。
-
-不使用 Docker 时也可直接运行（Node.js ≥ 22.13）：
+不用 Docker 也能运行（Node.js ≥ 22.13）：
 
 ```bash
-cd app && APP_MASTER_KEY=$(openssl rand -base64 32) DATA_DIR=./data node --disable-warning=ExperimentalWarning src/server.mjs
+cd app && APP_MASTER_KEY=$(openssl rand -base64 32) DATA_DIR=./data DEMO_DATA=true node --disable-warning=ExperimentalWarning src/server.mjs
 ```
+
+## 🤝 参与贡献
+
+欢迎提交 Issue 与 Pull Request：新的云厂商接入、分析维度、告警渠道、文档与翻译都非常欢迎。提交前请确保不包含任何真实密钥或账单数据。
+
+---
+
+<div align="center">
+
+**如果 TokenTally 帮你省下了时间或成本，请点一个 ⭐ Star，让更多人看到它。**
+
+[![Star History Chart](https://api.star-history.com/svg?repos=sreyun/tokentally&type=Date)](https://star-history.com/#sreyun/tokentally&Date)
+
+</div>

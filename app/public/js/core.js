@@ -154,7 +154,9 @@ export function modal({ title, body, submit = '确定', cancel = '取消', wide 
     const form = d.querySelector('form'), err = d.querySelector('.dlg-err');
     const close = v => { d.close(); d.remove(); resolve(v); };
     d.addEventListener('cancel', e => { e.preventDefault(); close(null); });
-    d.addEventListener('click', e => { if (e.target.closest('[data-x]') || e.target === d) close(null); });
+    let downOnBackdrop = false;
+    d.addEventListener('mousedown', e => { downOnBackdrop = e.target === d; });
+    d.addEventListener('click', e => { if (e.target.closest('[data-x]') || (e.target === d && downOnBackdrop)) close(null); downOnBackdrop = false; });
     form.onsubmit = async e => {
       e.preventDefault();
       err.textContent = '';
@@ -173,8 +175,9 @@ export function modal({ title, body, submit = '确定', cancel = '取消', wide 
 /* =========================================================================
  * HTTP / Toast
  * ========================================================================= */
-export async function http(method, url, body) {
+export async function http(method, url, body, { background = false } = {}) {
   const headers = { Accept: 'application/json' };
+  if (background) headers['X-Background'] = '1'; // 后台轮询：不刷新会话空闲计时
   if (body !== undefined) headers['Content-Type'] = 'application/json';
   if (method !== 'GET') headers['X-CSRF-Token'] = state.csrf;
   const res = await fetch(url, { method, headers, body: body !== undefined ? JSON.stringify(body) : undefined, credentials: 'same-origin' });

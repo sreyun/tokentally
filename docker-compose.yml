@@ -6,7 +6,7 @@
 services:
   app:
     build: .
-    image: bailian-cost:1.2.1
+    image: bailian-cost:1.3.0
     container_name: bailian-cost
     restart: unless-stopped
     env_file: .env
@@ -14,6 +14,8 @@ services:
       PORT: "8080"
       DATA_DIR: /data
       TZ: Asia/Shanghai
+      # 演示模式：DEMO_DATA=true docker compose up -d 即可用虚构数据体验（配置真实访问密钥后自动清除）
+      DEMO_DATA: ${DEMO_DATA:-false}
     ports:
       - "${BIND_ADDR:-0.0.0.0}:${HTTP_PORT:-8080}:8080"
     volumes:

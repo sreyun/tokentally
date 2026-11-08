@@ -229,7 +229,7 @@ function runSummary(r) {
     const d = JSON.parse(r.detail || 'null');
     if (!d) return r.error || '';
     if (r.kind === 'meta') return `业务空间 ${d.workspaces} · API Key ${d.apiKeys} · 变更 ${d.changes}${r.error ? ' · ' + r.error : ''}`;
-    return (d.cycles || []).map(c => (c.skipped ? `${c.cycle} 跳过` : c.failed ? `${c.cycle} 失败` : c.lines != null ? `${c.cycle}：${c.lines} 行 · 分摊 ¥${Number(c.allocated || 0).toFixed(2)}${c.estimated ? ' · 估算' : ''}${c.final ? ' · 终版' : ''}` : `${c.cycle}：月 ${c.monthly} / 日 ${c.daily} 条${c.final ? ' · 终版' : ''}`)).join('；') + (r.error ? ' · ' + r.error : '');
+    return (d.cycles || []).map(c => (c.demo ? `${c.cycle} 演示数据` : c.skipped ? `${c.cycle} 跳过` : c.failed ? `${c.cycle} 失败` : c.lines != null ? `${c.cycle}：${c.lines} 行 · 分摊 ¥${Number(c.allocated || 0).toFixed(2)}${c.estimated ? ' · 估算' : ''}${c.final ? ' · 终版' : ''}` : `${c.cycle}：月 ${c.monthly} / 日 ${c.daily} 条${c.final ? ' · 终版' : ''}`)).join('；') + (r.error ? ' · ' + r.error : '');
   } catch { return r.error || ''; }
 }
 
@@ -613,7 +613,7 @@ async function security(el) {
     'aliyun.ak.update': '更新阿里云 AccessKey', 'aliyun.ak.update.fail': '更新 AccessKey 验证失败', 'aliyun.ak.bootstrap': '导入阿里云 AccessKey', 'aliyun.test': '测试阿里云连接',
     'tencent.key.update': '更新腾讯云密钥', 'tencent.key.update.fail': '更新腾讯云密钥验证失败', 'tencent.key.bootstrap': '导入腾讯云密钥', 'tencent.test': '测试腾讯云连接',
     'sync.trigger': '触发同步', 'budgets.update': '修改预算', 'keytags.update': '修改成本中心 / 负责人', 'alert.update': '修改告警设置', 'alert.test': '发送测试消息', 'alert.test.fail': '测试消息失败',
-    'alert.sent': '告警 / 报表已发送', 'alert.report.send': '手动发送报表', 'backup.create': '创建备份', 'backup.download': '下载备份', 'backup.download.fail': '下载备份验证失败',
+    'alert.sent': '告警 / 报表已发送', 'alert.report.send': '手动发送报表', 'backup.create': '创建备份', 'backup.download': '下载备份', 'backup.download.fail': '下载备份验证失败', 'demo.clear': '清除演示数据',
   };
   const t = table('audit', $('#aTbl', el), {
     sort: 'id', pageSize: 50, stickyFirst: false, caption: '审计日志',

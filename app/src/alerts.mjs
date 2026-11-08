@@ -510,10 +510,11 @@ export class AlertService {
     const generic = { event: 'alert', title: fullTitle, level, items: lines.filter(l => l && !l.startsWith('#')).map(strip), text: [fullTitle, ...lines.map(l => (l.startsWith('#') ? l.replace(/^#+\s*/, '') : l ? '- ' + strip(l) : '')), footer].join('\n'), link: link || null, mentions, sentAt: new Date().toISOString() };
     const req = signRequest(type, webhook, secret, payload, generic);
     checkResponse(type, await postJson(req.url, req.body, req.headers, this.allowPrivate));
-    // 企业微信 markdown 不支持按手机号 @，追加一条 text 消息提醒
+    // 企业微信 markdown 不支持按手机号 @，追加一条 text 消息提醒；主消息已送达，提醒失败只记录日志，避免重试时重复发送主消息
     if (type === 'wecom' && mentions && (mentions.all || mentions.mobiles.length)) {
       const t = { msgtype: 'text', text: { content: `${fullTitle}，请及时关注。`, mentioned_mobile_list: [...mentions.mobiles, ...(mentions.all ? ['@all'] : [])] } };
-      checkResponse(type, await postJson(webhook, t, {}, this.allowPrivate));
+      try { checkResponse(type, await postJson(webhook, t, {}, this.allowPrivate)); }
+      catch (e) { this.log?.(`企业微信 @ 提醒发送失败（主消息已发送）：${e.message}`); }
     }
   }
   async test(ch, creds) {

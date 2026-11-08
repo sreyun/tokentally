@@ -139,8 +139,22 @@ export class TencentClient {
 
   /** 时间窗内有用量的 API Key（含已删除 Key 的原名称），ShowAll 返回全量、不含曲线 */
   async usageKeys(start, end) {
-    const r = await this.call('tokenhub', 'DescribeUsageRankList', { Dimension: 'apikey', MetricType: 'tokens', StartTime: start, EndTime: end, ShowAll: true });
-    return r.TopList || [];
+    try {
+      const r = await this.call('tokenhub', 'DescribeUsageRankList', { Dimension: 'apikey', MetricType: 'tokens', StartTime: start, EndTime: end, ShowAll: true });
+      return r.TopList || [];
+    } catch (e) {
+      if (!/TooManyObjects/i.test(e.code || '')) throw e;
+      // Key 数量过多时 ShowAll 不可用：改为分页（每页固定 10 个）
+      const out = [];
+      for (let offset = 0, i = 0; i < 1000; i++) {
+        const r = await this.call('tokenhub', 'DescribeUsageRankList', { Dimension: 'apikey', MetricType: 'tokens', StartTime: start, EndTime: end, Period: 86400, Offset: offset });
+        const list = r.TopList || [];
+        out.push(...list.map(x => ({ Rank: x.Rank, Key: x.Key, Name: x.Name, Stats: x.Stats })));
+        offset += list.length;
+        if (!list.length || offset >= (r.Total ?? 0)) break;
+      }
+      return out;
+    }
   }
   /** 某个 API Key 在时间窗内按模型 × 日的用量（每页固定 10 个对象） */
   async usageOfKey(keyId, start, end) {

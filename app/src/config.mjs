@@ -35,6 +35,8 @@ export const config = {
   tencentEndpoint: /^https?:\/\/[^\s/?#]+$/i.test((env.TENCENT_ENDPOINT_OVERRIDE || '').trim()) ? env.TENCENT_ENDPOINT_OVERRIDE.trim() : '',
   /** 可选：Prometheus 指标 /metrics 的访问令牌（Bearer），留空则关闭该接口 */
   metricsToken: (env.METRICS_TOKEN || '').trim().length >= 16 ? env.METRICS_TOKEN.trim() : '',
+  /** 演示模式：数据库为空且未配置任何云厂商时生成虚构演示数据；配置真实访问密钥后自动清除 */
+  demo: bool(env.DEMO_DATA),
   /** 自动备份：每天保留最近 N 份（0 关闭），备份时间（时，账单时区） */
   backupKeep: int(env.BACKUP_KEEP, 7, 0, 90),
   backupHour: int(env.BACKUP_HOUR, 3, 0, 23),
