@@ -36,6 +36,8 @@ TokenTally syncs keys and bills (read-only) into a local SQLite database, analys
 
 - **Bill-accurate per-key cost** — Alibaba Cloud instance bills map to keys directly. Tencent Cloud bills carry no key dimension, so TokenTally allocates the *real* bill amount by each key's token share per day / model / billing item; key totals match the bill exactly.
 - **Multi-dimensional analysis** — key, model, workspace, cost center, owner, cloud, billing item, day, ISO week, weekday; free-form pivot with drill-down, CSV export and print / PDF.
+- **Linked filters & drill-down** — pick a workspace and the key and model filters only list what belongs to it; conflicting filters are cleared automatically. A workspace → key → model drill tree, plus clickable legends, bar segments, heatmap cells, matrix cells and bill-detail cells. Filters and the period live in the URL, so views can be shared and the browser Back button undoes a drill-down step; alert and report links open the matching page and period.
+- **Business analysis** — cost by workspace (or cost center / owner / cloud) with a detail page per workspace listing all of its keys, models, key × model matrix and trends.
 - **Token & call statistics** — token structure, cache hit rate, unit cost, daily average and peak for every key and model, plus requests, success rate and average tokens / cost per request (Tencent TokenHub usage; Alibaba Cloud via the CloudMonitor Prometheus instance that Bailian monitoring exports to).
 - **Alerts & reports** — up to 5 channels; budget, spend anomaly, sync failure, key changes, plus daily / weekly / monthly reports with @mentions and signed webhooks.
 - **Key governance** — automatic findings with severity and advice.
@@ -97,6 +99,7 @@ flowchart LR
 - [x] Alibaba Cloud Model Studio, Tencent Cloud TokenHub
 - [x] Cost centers, budgets, alerts, reports, demo mode, backups, metrics
 - [x] Alibaba Cloud call counts via CloudMonitor Prometheus
+- [x] Business analysis, linked filters and multi-level drill-down
 - [ ] More platforms (Volcengine Ark, Baidu Qianfan, …)
 - [ ] Excel reports & scheduled email, SSO / LDAP
 

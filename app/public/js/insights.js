@@ -93,7 +93,7 @@ export function computeInsights() {
       const mean = sum(vals, v => v[1]) / vals.length;
       const sd = Math.sqrt(sum(vals, v => (v[1] - mean) ** 2) / vals.length);
       const peaks = vals.filter(v => v[1] > mean + 2 * sd && v[1] > mean * 1.5).sort((a, c) => c[1] - a[1]);
-      if (peaks.length && mean > 0) out.push({ level: 'warn', icon: 'warn', rank: 2, title: `发现 ${peaks.length} 个费用异常日`, html: peaks.slice(0, 2).map(v => `${b(v[0].slice(5))} 费用 ${b(money(v[1]))}，为日均的 ${b((v[1] / mean).toFixed(1) + ' 倍')}`).join('；') + '。' });
+      if (peaks.length && mean > 0) out.push({ level: 'warn', icon: 'warn', rank: 2, title: `发现 ${peaks.length} 个费用异常日`, html: peaks.slice(0, 2).map(v => `${b(v[0].slice(5))} 费用 ${b(money(v[1]))}，为日均的 ${b((v[1] / mean).toFixed(1) + ' 倍')}`).join('；') + '。', day: peaks[0][0], dayLabel: `查看 ${peaks[0][0].slice(5)} 明细` });
     }
   }
 
@@ -122,7 +122,7 @@ export function computeInsights() {
   // 9. 新增模型
   const prevModels = new Set(prevLines.map(l => l.model));
   const newModels = sortedAggs(aggregate(lines, l => l.model)).filter(a => a.cost > 0 && !prevModels.has(a.key));
-  if (newModels.length && prevLines.length) out.push({ level: 'info', icon: 'model', rank: 8, title: `本期新增使用 ${newModels.length} 个模型`, html: newModels.slice(0, 4).map(a => `${b(a.key)} ${esc(money(a.cost))}`).join('、') + (newModels.length > 4 ? ' 等' : '') + '。', go: '#/models', goLabel: '模型分析' });
+  if (newModels.length && prevLines.length) out.push({ level: 'info', icon: 'model', rank: 8, title: `本期新增使用 ${newModels.length} 个模型`, html: newModels.slice(0, 4).map(a => `${b(a.key)} ${esc(money(a.cost))}`).join('、') + (newModels.length > 4 ? ' 等' : '') + '。', ...(newModels.length === 1 ? { model: newModels[0].key, modelLabel: '查看该模型' } : { go: '#/models', goLabel: '模型分析' }) });
 
   // 10. 腾讯云费用口径：目录价估算 / 未匹配到用量
   const est = sum(lines.filter(l => l.alloc === 2), metricVal);

@@ -1,6 +1,6 @@
 /* 成本分摊 / 多维透视：任选行、列维度与指标，交叉汇总并导出 */
 import { $, esc, state, ui, app, LS, money, compact, intFmt, pct, sum, uniq, metricVal, METRICS, NONE_KEY, keyShort, wsName, channelLabel, ioInfo,
-  filterLines, icon, help, opt, periodTag, toast, PROVIDERS, multiCloud, hasTags, ccName, WEEK, weekday, addDays } from '../core.js';
+  filterLines, icon, help, opt, periodTag, toast, PROVIDERS, multiCloud, hasTags, ccName, WEEK, weekday, addDays, NO_WS, NO_CC, NO_OWNER, groupHash } from '../core.js';
 import { table } from '../table.js';
 
 const TT = { in: '输入（非缓存）', hit: '缓存命中', create: '缓存创建', out: '输出', emb: '向量', other: '其他 / 订阅' };
@@ -11,7 +11,7 @@ const isoWeek = d => {
   const w1 = addDays(jan4, -((weekday(jan4) + 6) % 7));
   return `${y}-W${String(Math.round((Date.parse(from) - Date.parse(w1)) / 6048e5) + 1).padStart(2, '0')}|${from}`;
 };
-const ownerOf = l => (l.apiKeyId && state.apiKeys.get(l.apiKeyId)?.owner) || '';
+const ownerOf = l => l.owner || '';
 const DIM = {
   provider: { label: '云厂商', of: l => l.provider, name: x => PROVIDERS[x] || x, when: multiCloud },
   cc: { label: '成本中心', of: l => l.cc, name: ccName, when: hasTags },
@@ -79,7 +79,7 @@ export function render(v) {
 
   v.innerHTML = `
     <section class="panel">
-      <div class="panel-h"><h3>多维透视</h3>${help('任选行维度与列维度交叉汇总，用于按业务空间/项目分摊成本、对比 Key 的模型使用结构等。日期维度使用按日账单，“近 12 月”使用账期账单，其余使用当前周期账单。全局筛选条件同样生效。')}
+      <div class="panel-h"><h3>多维透视</h3>${help('任选行维度与列维度交叉汇总，用于按业务空间/项目分摊成本、对比 Key 的模型使用结构等。日期维度使用按日账单，“近 12 月”使用账期账单，其余使用当前周期账单。全局筛选条件同样生效。点击单元格按行、列两个维度定位账单明细；点击行进入对应的 Key / 模型 / 业务空间 / 成本中心详情（日期行查看当日明细）。')}
         <div class="actions"><button class="btn sm" id="print" title="打印或另存为 PDF（隐藏导航与筛选栏）">${icon('print')}打印 / PDF</button><button class="btn sm" id="csv">${icon('download')}导出</button></div></div>
       <div class="row" style="margin-bottom:12px;gap:10px 16px">
         <label class="field" style="flex-direction:row;align-items:center;gap:6px"><span>行</span><select class="inp" data-pv="rows">${Object.entries(DIM).filter(([k]) => k !== 'none' && avail(k)).map(([k, d]) => opt(k, d.label, pv.rows)).join('')}</select></label>
@@ -105,19 +105,33 @@ export function render(v) {
   };
   /** 单元格下钻：把行、列维度转换为全局筛选/统计周期后进入账单明细 */
   const toFilter = (dim, val) => ({
-    ws: { ws: val || '__nows' }, key: { key: val }, model: { model: val }, item: val ? { item: val } : {}, channel: { channel: val },
-    provider: { provider: val }, cc: { cc: val || '__nocc__' },
+    ws: { ws: val || NO_WS }, key: { key: val }, model: { model: val }, item: val ? { item: val } : {}, channel: { channel: val },
+    provider: { provider: val }, cc: { cc: val || NO_CC }, owner: { owner: val || NO_OWNER },
     dir: { dir: ['in', 'hit', 'create'].includes(val) ? 'in' : val },
   }[dim] || {});
   const drill = (r, c) => {
     const patch = { ...toFilter(pv.rows, r), ...toFilter(pv.cols, c) };
     for (const [dim, val] of [[pv.rows, r], [pv.cols, c]]) {
-      if (dim === 'date') app.setPeriod({ mode: 'range', preset: 'custom', from: val, to: val });
-      if (dim === 'month') app.setPeriod({ mode: 'month', cycle: val });
+      if (dim === 'date') app.setPeriod({ mode: 'range', preset: 'custom', from: val, to: val }, { url: false });
+      if (dim === 'month') app.setPeriod({ mode: 'month', cycle: val }, { url: false });
+      if (dim === 'week') { const f = val.split('|')[1], t = addDays(f, 6); app.setPeriod({ mode: 'range', preset: 'custom', from: f, to: t > state.today ? state.today : t }, { url: false }); }
     }
-    const nf = [pv.rows, pv.cols].filter(d => ['time', 'owner', 'week', 'weekday'].includes(d)).map(d => DIM[d].label);
+    const nf = [pv.rows, pv.cols].filter(d => ['time', 'weekday'].includes(d)).map(d => DIM[d].label);
     if (nf.length) toast(`${nf.join('、')}不是筛选维度，已按其余维度定位账单`, '', 2600);
     app.setFilter(patch, '#/detail');
+  };
+  /** 行下钻：实体维度进入详情页，日期行打开当日明细，账期行切换账期 */
+  const rowDrill = r => {
+    const d = pv.rows, id = r.id;
+    if (d === 'key') { if (id !== NONE_KEY) app.go(`#/key/${encodeURIComponent(id)}`); else app.setFilter({ key: NONE_KEY }, '#/detail'); }
+    else if (d === 'model') app.openModel(id);
+    else if (d === 'ws') app.go(groupHash('ws', id || NO_WS));
+    else if (d === 'cc') app.go(groupHash('cc', id || NO_CC));
+    else if (d === 'owner') app.go(groupHash('owner', id || NO_OWNER));
+    else if (d === 'provider') app.go(groupHash('provider', id));
+    else if (d === 'date') app.openDay(id);
+    else if (d === 'month') app.setPeriod({ mode: 'month', cycle: id });
+    else if (d === 'item' || d === 'channel' || d === 'dir') app.setFilter(toFilter(d, id));
   };
   const colName = c => (c === OTHER ? `其他 ${extra.length} 项` : cd.name(c));
   const columns = [{ key: 'name', label: rd.label, sortVal: ['date', 'month', 'week', 'weekday'].includes(pv.rows) ? (r => r.id) : undefined, fmt: (x, r) => `<b style="font-weight:600">${esc(x)}</b>${r.sub ? `<span class="sub mono">${esc(r.sub)}</span>` : ''}` }];
@@ -131,7 +145,7 @@ export function render(v) {
   });
   const t = table('pivot:' + pv.rows + ':' + pv.cols, $('#tbl', v), {
     sort: ['date', 'month', 'week', 'weekday'].includes(pv.rows) ? 'name' : 'total', dir: ['date', 'month', 'week', 'weekday'].includes(pv.rows) ? 'asc' : 'desc', pageSize: 0, caption: '多维透视', maxHeight: '64vh',
-    onRowClick: ['key', 'model', 'ws', 'provider', 'cc'].includes(pv.rows) ? r => (pv.rows === 'key' ? (r.id !== NONE_KEY && app.go(`#/key/${r.id}`)) : pv.rows === 'model' ? app.openModel(r.id) : pv.rows === 'provider' ? app.setFilter({ provider: r.id }, '#/keys') : pv.rows === 'cc' ? app.setFilter({ cc: r.id || '__nocc__' }, '#/keys') : app.setFilter({ ws: r.id || '__nows' }, '#/keys')) : null,
+    onRowClick: ['key', 'model', 'ws', 'provider', 'cc', 'owner', 'date', 'month', 'item', 'channel', 'dir'].includes(pv.rows) ? rowDrill : null,
     columns,
     footer: rs => columns.map(c => (c.key === 'name' ? '合计' : c.key === 'total' ? esc(ms.fmt(grand)) : c.key === 'share' ? '100%' : esc(ms.fmt(sum(rs, r => r[c.key] || 0))))),
   }).setRows(rows);

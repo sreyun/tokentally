@@ -1,8 +1,9 @@
-/* API Key 分析：全部 Key 的费用、用量、效率、预算与属性 */
+/* Key 分析：全部 API Key 的费用、用量、效率、预算与属性 */
 import {
   $, esc, state, ui, app, money, moneyShort, compact, intFmt, pct, sum, uniq, metricVal, METRICS, NONE_KEY, DIMS, keyObj, keyDesc, keyShort, wsName,
   filterLines, aggregate, sortedAggs, newAgg, totalTokens, topModels, unitsText, deltaPill, tipRows, icon, help, segCtl, fmtTime, budgetOf, budgetLevel,
-  forecastOf, isCurrentMonth, periodTag, copyBtn, PROVIDERS, provTag, multiCloud, isAdmin, modal, http, toast, NO_CC, perCall, daysBetween, usageFiltered, usageAgg, REQ_SRC,
+  forecastOf, isCurrentMonth, periodTag, copyBtn, PROVIDERS, provTag, multiCloud, isAdmin, modal, http, toast, NO_CC, NO_WS, NO_OWNER, perCall, daysBetween, usageFiltered, usageAgg, REQ_SRC,
+  dimLink, groupHash, hasTags,
 } from '../core.js';
 import { table, dataBar } from '../table.js';
 import { heatmap, dayCols } from '../charts.js';
@@ -56,10 +57,12 @@ export function keyRows() {
   ids = ids.filter(id => {
     const k = keyObj(id);
     if (f.key && id !== f.key) return false;
-    if (f.ws && !byKey.has(id)) { const wk = k ? k.wsKey : ''; if (f.ws === '__nows' ? wk : wk !== f.ws) return false; }
+    if (f.ws && !byKey.has(id)) { const wk = k ? k.wsKey : ''; if (f.ws === NO_WS ? wk : wk !== f.ws) return false; }
     if (f.provider && (k?.provider || 'aliyun') !== f.provider && !byKey.has(id)) return false;
     if (f.provider && id === NONE_KEY && !byKey.has(id)) return false;
     if (f.cc && !byKey.has(id) && (f.cc === NO_CC ? !!k?.costCenter : k?.costCenter !== f.cc)) return false;
+    if (f.owner && !byKey.has(id) && (f.owner === NO_OWNER ? !!k?.owner : k?.owner !== f.owner)) return false;
+    if ((f.cc || f.owner) && id === NONE_KEY && !byKey.has(id)) return false;
     if (q && !byKey.has(id) && !`${id} ${keyDesc(id)} ${k ? wsName(k.wsKey) : ''} ${k?.costCenter || ''} ${k?.owner || ''}`.toLowerCase().includes(q)) return false;
     if (narrowing && !byKey.has(id)) return false;
     if (ui.onlySpent && !(byKey.get(id)?.cost > 0)) return false;
@@ -92,7 +95,7 @@ export function keyRows() {
       permTip: (k.accessibleModels || []).join('、'), ip: id === NONE_KEY ? '—' : ipOpen ? '不限' : `${k.accessIps.length} 条`, ipTip: (k.accessIps || []).join(', '),
       cost: a.cost, pretax: a.pretax, prevCost: p?.cost || 0, chg: a.cost - (p?.cost || 0), share: total ? a.cost / total : 0, gross: a.gross,
       tIn: a.tIn, tCache: a.tCache, tOut: a.tOut, tEmb: a.tEmb, tokens, hit: a.tIn ? a.tCache / a.tIn : null, perM: tokens ? a.cost / tokens * 1e6 : null,
-      models: a.models.size, topModels: topModels(a, 2).join('、'), activeDays: uniq((dByKey.get(id) || []).filter(l => metricVal(l) > 0).map(l => l.date)).length,
+      models: a.models.size, topModels: topModels(a, 2).join('、'), topModelList: topModels(a, 2), activeDays: uniq((dByKey.get(id) || []).filter(l => metricVal(l) > 0).map(l => l.date)).length,
       lastDay: act?.lastDay || '', c7: act?.c7 || 0, c30: act?.c30 || 0, budget, fc: fc?.value ?? null, gmtCreate: k.gmtCreate ?? null, createdBy: k.createdBy || '', units: unitsText(a),
     };
   }) };
@@ -121,7 +124,7 @@ export function render(v) {
       <div id="tbl"></div>
     </section>
     <div class="bi" style="margin-top:14px">
-      <section class="panel c12"><div class="panel-h"><h3>每日消耗热力</h3><span class="sub">按 Key × 日期，颜色越深费用越高（平方根刻度）· 点击 Key 名称查看详情</span>
+      <section class="panel c12"><div class="panel-h"><h3>每日消耗热力</h3><span class="sub">按 Key × 日期，颜色越深费用越高（平方根刻度）· 点击 Key 名称查看详情，点击格子查看该 Key 当日明细</span>
         <div class="actions"><span class="scale">低 ${[1, 2, 3, 4, 5, 6, 7].map(i => `<i style="background:var(--q${i})"></i>`).join('')} 高</span></div></div><div id="heat"></div></section>
     </div>`;
   const max = Math.max(0, ...rows.map(r => r.cost));
@@ -129,10 +132,10 @@ export function render(v) {
   const hasUsage = rows.some(r => r.requests != null);
   const cols = [
     { key: 'desc', label: 'API Key', csvLabel: '描述', fmt: (x, r) => `<span class="sw" style="background:${DIMS.key.color(r.id)}"></span><b style="font-weight:600">${esc(x)}</b>${provTag(r.provider)}${!r.hasDesc && r.id !== NONE_KEY ? '<span class="tag warn">无描述</span>' : ''}${r.alloc ? '<span class="tag" title="腾讯云账单不含 API Key，费用按 TokenHub 用量占比分摊">分摊</span>' : ''}<span class="sub mono">${esc(r.apiKeyId || '—')}${copyBtn(r.apiKeyId, '复制 Key ID')}${r.masked ? ' · ' + esc(r.masked) : ''}</span>` },
-    { key: 'wsName', label: '业务空间', fmt: (x, r) => `${esc(x)}${r.wsId ? `<span class="sub mono">${esc(r.wsId)}</span>` : ''}` },
+    { key: 'wsName', label: '业务空间', title: '点击业务空间名称查看该空间的全部 Key、模型与趋势', fmt: (x, r) => (r.id === NONE_KEY ? '—' : dimLink('ws', r.wsId || NO_WS, x)) + (r.wsId ? `<span class="sub mono">${esc(r.wsId)}</span>` : '') },
   ];
   if (tagged || isAdmin()) cols.push(
-    { key: 'costCenter', label: '成本中心', fmt: (x, r) => (x ? esc(x) : r.id === NONE_KEY ? '—' : '<span class="muted">未分配</span>') + (r.owner ? `<span class="sub">负责人 ${esc(r.owner)}</span>` : ''), csv: r => r.costCenter },
+    { key: 'costCenter', label: '成本中心', fmt: (x, r) => (x ? dimLink('cc', x, x) : r.id === NONE_KEY ? '—' : '<span class="muted">未分配</span>') + (r.owner ? `<span class="sub">负责人 ${dimLink('owner', r.owner, r.owner)}</span>` : ''), csv: r => r.costCenter },
   );
   cols.push(
     { key: 'status', label: '状态', fmt: (x, r) => `<span class="state ${r.st}">${esc(x)}</span>${r.deletedAt ? `<span class="sub">${fmtTime(r.deletedAt, false)}</span>` : ''}` },
@@ -153,7 +156,7 @@ export function render(v) {
       { key: 'costPer', label: '单次均费用', title: '单次平均费用 = 本期费用 ÷ 请求数', align: 'r', fmt: x => (x == null ? '<span class="muted">—</span>' : money(x, x < 0.01 ? 4 : 3)), sortVal: r => r.costPer ?? -1, csv: r => (r.costPer == null ? '' : r.costPer.toFixed(6)) },
       { key: 'failRate', label: '失败率', title: '失败请求 ÷ 请求数', align: 'r', fmt: x => (x == null ? '<span class="muted">—</span>' : `<span class="${x >= 0.05 ? 'bad-text' : x >= 0.01 ? 'warn-text' : ''}">${(x * 100).toFixed(2)}%</span>`), sortVal: r => r.failRate ?? -1, csv: r => (r.failRate == null ? '' : (r.failRate * 100).toFixed(2) + '%') },
     ] : []),
-    { key: 'topModels', label: '主要模型' },
+    { key: 'topModels', label: '主要模型', title: '点击模型查看该 Key 在该模型上的消耗', fmt: (x, r) => r.topModelList.map(m => dimLink('model', m, m, { global: true, key: r.id })).join('、') || '<span class="muted">—</span>' },
     { key: 'activeDays', label: '消费天数', align: 'r' },
     { key: 'lastDay', label: '最近消费', fmt: x => (x ? esc(x) : '<span class="muted">—</span>') },
     { key: 'c7', label: '近 7 天', title: '近 7 天应付金额（与所选周期无关）', align: 'r', fmt: x => money(x) },
@@ -163,7 +166,7 @@ export function render(v) {
   );
   const t = table('keys', $('#tbl', v), {
     sort: 'cost', pageSize: 100, caption: 'API Key 明细', rowClass: r => (r.deletedAt ? 'deleted' : ''),
-    onRowClick: r => (r.id === NONE_KEY ? app.setFilter({ key: NONE_KEY }, '#/detail') : app.go(`#/key/${r.id}`)),
+    onRowClick: r => (r.id === NONE_KEY ? app.setFilter({ key: NONE_KEY }, '#/detail') : app.go(`#/key/${encodeURIComponent(r.id)}`)),
     columns: cols,
     csvExtra: [{ label: '云厂商', val: r => PROVIDERS[r.provider] || '' }, { label: 'API Key ID', val: r => r.apiKeyId }, { label: 'API Key（脱敏）', val: r => r.masked }, { label: '负责人', val: r => r.owner }, { label: '备注', val: r => r.note || r.remark }, { label: '费用口径', val: r => (r.alloc ? '按用量分摊' : '账单直接归属') }, { label: '业务空间ID', val: r => r.wsId }, { label: '原价', val: r => r.gross.toFixed(6) }, { label: '上期费用', val: r => r.prevCost.toFixed(6) }, { label: '缓存命中 Token', val: r => Math.round(r.tCache) }, { label: '向量 Token', val: r => Math.round(r.tEmb) }, { label: '其他用量', val: r => r.units }, { label: '近30天', val: r => r.c30.toFixed(2) }, { label: '月度预算', val: r => r.budget ?? '' }, { label: '可访问模型', val: r => r.permTip }, { label: '创建人', val: r => r.createdBy }],
     footer: rs => cols.map(c => (c.key === 'desc' ? `合计 ${rs.length} 个` : c.key === 'cost' ? money(sum(rs, r => r.cost)) : c.key === 'chg' ? deltaPill(sum(rs, r => r.cost), sum(rs, r => r.prevCost)) : c.key === 'tIn' ? intFmt(sum(rs, r => r.tIn)) : c.key === 'tOut' ? intFmt(sum(rs, r => r.tOut)) : c.key === 'c7' ? money(sum(rs, r => r.c7)) : '')),
@@ -181,7 +184,8 @@ export function render(v) {
   heatmap($('#heat', v), {
     rows: ranked.slice(0, 30).map(a => ({ id: a.key, label: keyShort(a.key).slice(0, 16), color: DIMS.key.color(a.key), full: keyShort(a.key) })),
     cols: dayCols(days), cell: (r, c) => cell.get(r + '|' + c) || 0, total: r => ranked.find(a => a.key === r)?.cost || 0, fmt: money,
-    rowTip: r => r.full, onRow: id => (id !== NONE_KEY ? app.go(`#/key/${id}`) : null),
+    rowTip: r => r.full, onRow: id => (id !== NONE_KEY ? app.go(`#/key/${encodeURIComponent(id)}`) : null),
+    onCell: (id, day) => app.openDay(day, { global: true, key: id }), cellHint: '点击查看该 Key 当日明细',
   });
 }
 

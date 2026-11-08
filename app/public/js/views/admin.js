@@ -1,5 +1,5 @@
 /* 系统管理：云厂商接入（阿里云 / 腾讯云）、数据同步、预算、告警通知、用户、品牌与备份、安全审计、接口日志 */
-import { $, esc, state, ui, app, http, toast, money, fmtTime, ago, p2, addMonths, opt, icon, help, keyShort, wsName, NONE_KEY, sum, PROVIDERS, provTag, modal } from '../core.js';
+import { $, esc, state, ui, app, http, toast, money, fmtTime, ago, p2, addMonths, opt, icon, help, keyShort, wsName, NONE_KEY, NO_WS, NO_CC, sum, PROVIDERS, provTag, modal } from '../core.js';
 import { table } from '../table.js';
 
 export const ADMIN_TABS = { aliyun: '阿里云接入', tencent: '腾讯云接入', sync: '数据同步', budgets: '预算管理', alerts: '告警通知', users: '用户管理', system: '品牌与备份', security: '安全与审计', calls: '接口日志' };
@@ -412,7 +412,13 @@ async function budgets(el) {
   const lastMonth = new Map();
   state.history.filter(l => l.date === lastCycle).forEach(l => lastMonth.set(l.apiKeyId || NONE_KEY, (lastMonth.get(l.apiKeyId || NONE_KEY) || 0) + l.pretax));
   const keys = [...state.apiKeys.values()].filter(k => k.source !== 'deleted' || b.keys?.[k.apiKeyId] != null);
-  const rows = keys.map(k => ({ id: k.apiKeyId, provider: k.provider, desc: keyShort(k.apiKeyId), ws: k.costCenter || wsName(k.wsKey), last: lastMonth.get(k.apiKeyId) || 0, c30: state.keyActivity.get(k.apiKeyId)?.c30 || 0, budget: b.keys?.[k.apiKeyId] ?? '' }));
+  const rows = keys.map(k => ({ id: k.apiKeyId, provider: k.provider || 'aliyun', desc: keyShort(k.apiKeyId), wsKey: k.wsKey || NO_WS, ws: wsName(k.wsKey), cc: k.costCenter || '', owner: k.owner || '', last: lastMonth.get(k.apiKeyId) || 0, c30: state.keyActivity.get(k.apiKeyId)?.c30 || 0, budget: b.keys?.[k.apiKeyId] ?? '' }));
+  // 联动筛选：业务空间 / 成本中心 / 云厂商 / 关键字，选项随其余条件收窄；批量操作只作用于筛选出的 Key
+  const bf = { ws: '', cc: '', provider: '', q: '' };
+  const tagged = rows.some(r => r.cc || r.owner), multi = new Set(rows.map(r => r.provider)).size > 1;
+  const match = (r, skip) => (skip === 'ws' || !bf.ws || r.wsKey === bf.ws) && (skip === 'cc' || !bf.cc || (bf.cc === NO_CC ? !r.cc : r.cc === bf.cc))
+    && (skip === 'provider' || !bf.provider || r.provider === bf.provider) && (!bf.q || `${r.id} ${r.desc} ${r.ws} ${r.cc} ${r.owner}`.toLowerCase().includes(bf.q.toLowerCase()));
+  const visible = () => rows.filter(r => match(r));
   const totalLast = sum([...lastMonth.values()], x => x);
   const subs = al.channels.filter(c => c.enabled && c.events.budget);
   el.innerHTML = `<div class="bi">
@@ -426,26 +432,62 @@ async function budgets(el) {
       <div class="notice ${subs.length ? 'info' : 'warn'}" style="margin:14px 0 0">${icon('bell')}<div><b>${subs.length ? `预算告警将推送到 ${subs.length} 个渠道` : '尚未配置预算告警推送'}</b><span class="why">${subs.length ? esc(subs.map(c => c.name).join('、')) : '可推送到钉钉、飞书、企业微信群机器人或通用 Webhook。'}</span><button class="link" data-go="#/admin/alerts">前往告警通知 →</button></div></div>
     </section>
     <section class="panel c8"><div class="panel-h"><h3>API Key 月度预算</h3><span class="sub">留空表示不设预算</span>
-      <div class="actions"><button class="btn sm" id="fill" title="为未设置预算的 Key 按上月费用 × 1.2 填入建议值（取整到元）">按上月 ×1.2 填充空白</button><button class="btn sm" id="clear">清空</button><button class="btn sm primary" id="saveB">保存</button></div></div>
+      <div class="actions"><button class="btn sm" id="fill" title="为当前列表中未设置预算的 Key 按上月费用 × 1.2 填入建议值（取整到元）">按上月 ×1.2 填充空白</button><button class="btn sm" id="clear" title="清空当前列表中 Key 的预算输入">清空</button><button class="btn sm primary" id="saveB">保存</button></div></div>
+      <div class="row bud-tools" id="bTools"></div>
       <div id="bTbl"></div><div class="panel-foot" id="bDirty"></div></section></div>`;
-  table('budgets', $('#bTbl', el), {
-    sort: 'last', pageSize: 0, maxHeight: '60vh', caption: 'API Key 预算',
+  const bt = table('budgets', $('#bTbl', el), {
+    sort: 'last', pageSize: 0, maxHeight: '60vh', caption: 'API Key 预算', empty: '没有符合条件的 API Key',
     columns: [
       { key: 'desc', label: 'API Key', fmt: (x, r) => `<b style="font-weight:600">${esc(x)}</b>${provTag(r.provider)}<span class="sub mono">${esc(r.id)}</span>` },
-      { key: 'ws', label: '成本中心 / 业务空间' },
+      { key: 'ws', label: '业务空间' },
+      ...(tagged ? [{ key: 'cc', label: '成本中心', fmt: (x, r) => (x ? esc(x) : '<span class="muted">未分配</span>') + (r.owner ? `<span class="sub">负责人 ${esc(r.owner)}</span>` : '') }] : []),
       { key: 'last', label: `上月（${lastCycle}）`, align: 'r', fmt: x => money(x) },
       { key: 'c30', label: '近 30 天', align: 'r', fmt: x => money(x) },
       { key: 'budget', label: '月度预算（元）', sortable: false, fmt: (x, r) => `<input class="inp sm" type="number" min="0" step="0.01" data-bk="${esc(r.id)}" value="${esc(x)}" placeholder="不设置" style="width:130px" aria-label="${esc(r.desc)} 月度预算">` },
     ],
-  }).setRows(rows);
+  });
+  const tools = () => {
+    const opts = (skip, valOf, labelOf, cur) => {
+      const m = new Map();
+      rows.filter(r => match(r, skip)).forEach(r => { const v = valOf(r); m.set(v, (m.get(v) || 0) + 1); });
+      if (cur && !m.has(cur)) m.set(cur, 0);
+      return [...m.entries()].map(([v, n]) => [v, `${labelOf(v)} · ${n} 个`]).sort((a, c) => a[1].localeCompare(c[1], 'zh-CN')).map(([v, l]) => opt(v, l, cur)).join('');
+    };
+    const vis = visible();
+    $('#bTools', el).innerHTML = `
+      <select class="inp sm ${bf.ws ? 'active' : ''}" data-bf="ws" aria-label="按业务空间筛选">${opt('', '全部业务空间', bf.ws)}${opts('ws', r => r.wsKey, v => (v === NO_WS ? '（未归属业务空间）' : wsName(v)), bf.ws)}</select>
+      ${tagged ? `<select class="inp sm ${bf.cc ? 'active' : ''}" data-bf="cc" aria-label="按成本中心筛选">${opt('', '全部成本中心', bf.cc)}${opts('cc', r => r.cc || NO_CC, v => (v === NO_CC ? '（未分配成本中心）' : v), bf.cc)}</select>` : ''}
+      ${multi ? `<select class="inp sm ${bf.provider ? 'active' : ''}" data-bf="provider" aria-label="按云厂商筛选">${opt('', '全部云厂商', bf.provider)}${opts('provider', r => r.provider, v => PROVIDERS[v] || v, bf.provider)}</select>` : ''}
+      <input class="inp sm" type="search" data-bf="q" value="${esc(bf.q)}" placeholder="搜索 Key / 描述" aria-label="搜索 API Key" style="width:160px">
+      <span class="sp"></span>
+      <span class="muted" style="font-size:12px">显示 ${vis.length} / ${rows.length} 个</span>
+      <input class="inp sm" type="number" min="0" step="0.01" id="bBulk" placeholder="统一预算（元）" aria-label="为当前列表的 Key 统一设置预算" style="width:130px">
+      <button class="btn sm" id="bBulkApply" ${vis.length ? '' : 'disabled'} title="把输入的预算填入当前列表中的全部 Key（保存后生效）">应用到这 ${vis.length} 个 Key</button>`;
+    bt.setRows(vis);
+  };
+  tools();
+  $('#bTools', el).addEventListener('change', e => { const s = e.target.closest('select[data-bf]'); if (!s) return; bf[s.dataset.bf] = s.value; tools(); el.querySelector(`[data-bf="${s.dataset.bf}"]`)?.focus(); });
+  let bq;
+  $('#bTools', el).addEventListener('input', e => { const i = e.target.closest('input[data-bf="q"]'); if (!i) return; clearTimeout(bq); bq = setTimeout(() => { bf.q = i.value.trim(); const pos = i.selectionStart; tools(); const n = el.querySelector('[data-bf="q"]'); n?.focus(); n?.setSelectionRange(pos, pos); }, 250); });
+  $('#bTools', el).addEventListener('click', e => {
+    if (!e.target.closest('#bBulkApply')) return;
+    const val = $('#bBulk', el).value.trim();
+    if (val !== '' && !(Number(val) >= 0)) { toast('请输入有效的预算金额', 'err'); return; }
+    const vis = visible();
+    if (!vis.length) return;
+    if (val === '' && !confirm(`清空当前列表中 ${vis.length} 个 Key 的预算输入？保存后生效。`)) return;
+    vis.forEach(r => { r.budget = val === '' ? '' : Number(val); });
+    syncInputs(); markDirty();
+    toast(val === '' ? `已清空 ${vis.length} 个 Key 的预算输入，确认后请保存` : `已为 ${vis.length} 个 Key 填入预算 ${money(Number(val))}，确认后请保存`);
+  });
   // 输入值实时写回行数据：排序重绘表格时不会丢失尚未保存的输入
   const markDirty = () => { app.dirty = true; $('#bDirty', el).innerHTML = '<span class="warn-text">有未保存的修改</span> · 按 Enter 或点击“保存”生效'; };
   const syncInputs = () => el.querySelectorAll('[data-bk]').forEach(i => { const r = rows.find(x => x.id === i.dataset.bk); if (r) i.value = r.budget; });
   $('#bTbl', el).addEventListener('input', e => { const i = e.target.closest('[data-bk]'); if (!i) return; const r = rows.find(x => x.id === i.dataset.bk); if (r) r.budget = i.value; markDirty(); });
   $('#bForm', el).addEventListener('input', markDirty);
   el.addEventListener('keydown', e => { if (e.key === 'Enter' && e.target.matches('[data-bk]')) { e.preventDefault(); $('#bForm', el).requestSubmit(); } });
-  $('#fill', el).onclick = () => { let n = 0; rows.forEach(r => { if (r.budget === '' && r.last > 0) { r.budget = Math.ceil(r.last * 1.2); n++; } }); syncInputs(); if (n) { markDirty(); toast(`已为 ${n} 个 Key 填入建议预算，确认后请保存`); } else toast('没有可填充的空白项（上月无费用或已设置）'); };
-  $('#clear', el).onclick = () => { if (!rows.some(r => r.budget !== '')) return; if (!confirm('清空所有 API Key 的预算输入？保存后生效。')) return; rows.forEach(r => { r.budget = ''; }); syncInputs(); markDirty(); };
+  $('#fill', el).onclick = () => { let n = 0; visible().forEach(r => { if (r.budget === '' && r.last > 0) { r.budget = Math.ceil(r.last * 1.2); n++; } }); syncInputs(); if (n) { markDirty(); toast(`已为 ${n} 个 Key 填入建议预算，确认后请保存`); } else toast('没有可填充的空白项（上月无费用或已设置）'); };
+  $('#clear', el).onclick = () => { const vis = visible(); if (!vis.some(r => r.budget !== '')) return; if (!confirm(`清空${vis.length < rows.length ? `当前列表中 ${vis.length} 个` : '所有'} API Key 的预算输入？保存后生效。`)) return; vis.forEach(r => { r.budget = ''; }); syncInputs(); markDirty(); };
   $('#saveB', el).onclick = () => $('#bForm', el).requestSubmit();
   $('#bForm', el).onsubmit = async e => {
     e.preventDefault();

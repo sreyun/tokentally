@@ -676,3 +676,52 @@ dialog.modal .dlg-b { max-height: calc(100vh - 140px); }
 
 .notice > div { flex: 1; min-width: 0; }
 .notice .notice-x { margin: -4px -6px -4px 4px; flex: none; }
+
+/* 联动与下钻：行内链接、可点击图例 / 格子、筛选范围摘要、层级钻取 */
+.lnk { border: 0; background: none; padding: 0; margin: 0; font: inherit; color: inherit; cursor: pointer; text-align: left; text-decoration: underline dotted; text-decoration-color: var(--border-strong); text-underline-offset: 3px; border-radius: 3px; }
+.lnk:hover { color: var(--accent-text); text-decoration: underline; text-decoration-color: currentColor; }
+.lnk:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.dt .sub .lnk { color: var(--muted); }
+.dt .sub .lnk:hover { color: var(--accent-text); }
+.tag-line b .lnk, .entity-t .sub .lnk { color: inherit; }
+.cell-btn { border: 0; background: none; padding: 0; margin: 0; font: inherit; color: inherit; cursor: pointer; width: 100%; text-align: inherit; border-radius: 4px; }
+.cell-btn:hover, .cell-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.legend span.clk { cursor: pointer; border-radius: 4px; padding: 1px 4px; margin: -1px -4px; }
+.legend span.clk:hover, .legend span.clk:focus-visible { background: var(--surface-2); color: var(--ink); outline: none; }
+.legend span.clk:hover em { text-decoration: underline; }
+.lgl .li.clickable:hover span, .lgl .li.clickable:focus-visible span { color: var(--accent-text); }
+.lgl .li.clickable:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.heat td.clk { cursor: pointer; }
+.heat td.clk:hover { outline: 2px solid var(--accent); outline-offset: -1px; }
+.heat th.clickable:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.chips .scope-sum { margin-left: auto; font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+.chips .scope-sum b { color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
+.kpi.kpi-go { cursor: pointer; transition: border-color .15s, box-shadow .15s; }
+.kpi.kpi-go:hover { border-color: var(--accent-wash-2); box-shadow: var(--shadow-2), 0 0 0 1px var(--accent-wash-2); }
+.kpi.kpi-go:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.kpi-arrow { margin-left: auto; color: var(--faint); display: inline-flex; opacity: 0; transition: opacity .15s; }
+.kpi-arrow .ico { width: 14px; height: 14px; }
+.kpi.kpi-go:hover .kpi-arrow, .kpi.kpi-go:focus-visible .kpi-arrow { opacity: 1; }
+@media (hover: none) { .kpi-arrow { opacity: .6; } }
+.page-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-bottom: 12px; font-size: 12px; }
+.page-tools .lbl { color: var(--muted); }
+.dt.tree td { white-space: nowrap; }
+.dt.tree .tree-name { padding-left: calc(8px + var(--lv, 0) * 22px); max-width: 520px; overflow: hidden; text-overflow: ellipsis; }
+.dt.tree .tg { width: 22px; height: 22px; border: 0; background: none; color: var(--muted); cursor: pointer; display: inline-grid; place-items: center; border-radius: 5px; vertical-align: middle; margin-right: 2px; }
+.dt.tree .tg:hover { background: var(--surface-3); color: var(--ink); }
+.dt.tree .tg:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.dt.tree .tg .ico { width: 14px; height: 14px; transition: transform .15s; }
+.dt.tree .tg[aria-expanded="true"] .ico { transform: rotate(90deg); }
+.dt.tree .tg-sp { display: inline-block; width: 24px; }
+.dt.tree .tree-label { vertical-align: middle; }
+.dt.tree .tree-sub { font-size: 11.5px; margin-left: 8px; vertical-align: middle; }
+.dt.tree tr.tr-lv0 td { font-weight: 600; }
+.dt.tree tr.tr-lv0 td .pill { font-weight: 500; }
+.dt.tree tr.tr-lv1 td { background: color-mix(in srgb, var(--surface-2) 45%, var(--surface)); }
+.dt.tree tr.tr-lv2 td { background: var(--surface-2); font-size: 12.5px; }
+.dt.tree tr.tr-more td { font-size: 12px; white-space: normal; }
+.share-bar { display: inline-block; width: 44px; height: 4px; border-radius: 2px; background: var(--surface-3); margin-right: 8px; vertical-align: middle; overflow: hidden; }
+.share-bar i { display: block; height: 100%; background: var(--accent); border-radius: 2px; }
+@media print { .lnk, .cell-btn { text-decoration: none; } .kpi-arrow, .dt.tree .tg { display: none; } }
+.bud-tools { margin-bottom: 10px; }
+.bud-tools select.inp { max-width: 200px; }

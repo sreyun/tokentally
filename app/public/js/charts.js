@@ -14,7 +14,15 @@ export function axisMoney(v, top) {
   if (top >= 1e4) return curSym() + compact(v);
   return curSym() + v.toLocaleString('zh-CN', { maximumFractionDigits: top < 1 ? 3 : top < 10 ? 2 : 0 });
 }
-export const legendHtml = items => items.map(it => `<span title="${esc(it.label)}"><i class="${it.line ? 'line' : ''}" style="background:${it.color}"></i><em>${esc(it.label)}</em></span>`).join('');
+/**
+ * 图例；hint 不为空时图例项可点击（id 为 '__other' 或空的项除外），点击 / Enter 由 bindLegend 统一处理
+ */
+export const legendHtml = (items, hint = '') => items.map(it => {
+  const clk = hint && it.id != null && it.id !== '__other';
+  return `<span ${clk ? `class="clk" role="button" tabindex="0" data-lid="${esc(it.id)}" title="${esc(`${it.label} · ${hint}`)}"` : `title="${esc(it.label)}"`}><i class="${it.line ? 'line' : ''}" style="background:${it.color}"></i><em>${esc(it.label)}</em></span>`;
+}).join('');
+/** 绑定可点击图例 */
+export const bindLegend = (el, fn) => bindActivate(el, '[data-lid]', t => fn(t.dataset.lid));
 const uid = () => 'g' + Math.random().toString(36).slice(2, 8);
 const width = el => Math.max(300, Math.floor(el.clientWidth || el.parentElement?.clientWidth || 800));
 
@@ -31,8 +39,11 @@ export function sparkline(values, color = 'var(--s1)') {
     <polyline points="${pts.join(' ')}" fill="none" stroke="${color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/></svg>`;
 }
 
-/** 堆叠柱状图 */
-export function columnChart(el, { xs, series, cell, avg = null, height = 260, xLabel = x => x, tipTitle = x => x, aria = '', empty = '暂无数据', weekend = true, onX, clickHint = '', fmt = null }) {
+/**
+ * 堆叠柱状图
+ * onX(x)：点击柱（或键盘 Enter）；onSeg(x, seriesId)：点击柱中的某一段（按点击位置判定，'__other' 段回退为 onX）
+ */
+export function columnChart(el, { xs, series, cell, avg = null, height = 260, xLabel = x => x, tipTitle = x => x, aria = '', empty = '暂无数据', weekend = true, onX, onSeg, clickHint = '', segHint = '', fmt = null }) {
   const vf = fmt || money, af = fmt ? (v => (v ? compact(v) : '0')) : axisMoney;
   if (!xs.length) { el.innerHTML = `<div class="nodata">${esc(empty)}</div>`; return; }
   const W = width(el), H = height;
@@ -42,6 +53,7 @@ export function columnChart(el, { xs, series, cell, avg = null, height = 260, xL
   const step = niceStep(maxT), top = Math.max(step, Math.ceil(maxT / step) * step);
   const band = pw / xs.length, cw = Math.max(2, Math.min(24, band * 0.62)), base = m.t + ph, id = uid();
   let defs = '', body = '';
+  const segPos = new Map(); // x → [{ id, top, bottom }]，用于按点击位置判定柱段
   if (weekend) xs.forEach((x, i) => { if (x.length === 10 && isWeekend(x)) body += `<rect class="weekend" x="${m.l + band * i}" y="${m.t}" width="${band}" height="${ph}"/>`; });
   for (let v = 0; v <= top + step / 2; v += step) {
     const y = base - v / top * ph;
@@ -55,11 +67,14 @@ export function columnChart(el, { xs, series, cell, avg = null, height = 260, xL
     let y0 = base;
     const segs = series.map(sr => ({ sr, v: Math.max(0, cell(x, sr.id)) })).filter(z => z.v > 0);
     body += `<g clip-path="url(#${id}c${i})">`;
+    const pos = [];
     segs.forEach((z, j) => {
       const h = z.v / top * ph, y = y0 - h, gap = j < segs.length - 1 ? 2 : 0;
       if (h - gap > 0.3) body += `<rect x="${bx}" y="${y + gap}" width="${cw}" height="${h - gap}" fill="${z.sr.color}"/>`;
+      pos.push({ id: z.sr.id, top: y, bottom: y0 });
       y0 = y;
     });
+    segPos.set(x, pos);
     body += '</g>';
   });
   if (avg > 0) {
@@ -70,13 +85,27 @@ export function columnChart(el, { xs, series, cell, avg = null, height = 260, xL
   xs.forEach((x, i) => {
     if (i % every === 0) body += `<text x="${m.l + band * i + band / 2}" y="${H - 7}" text-anchor="middle">${esc(xLabel(x))}</text>`;
     const rows = series.map(sr => [sr.label, cell(x, sr.id), sr.color]).filter(r => r[1] > 0).sort((a, b) => b[1] - a[1]);
+    const hint = [onX && clickHint ? clickHint : '', onSeg && segHint ? segHint : ''].filter(Boolean).join('；');
     const tip = tipRows(`${tipTitle(x)} · 合计 ${vf(totals[i])}`, rows.slice(0, 10).map(r => [r[0], vf(r[1]), r[2]]).concat(rows.length > 10 ? [[`其余 ${rows.length - 10} 项`, vf(sum(rows.slice(10), r => r[1])), '']] : []))
-      + (onX && clickHint && totals[i] > 0 ? `<div class="tip-hint">${esc(clickHint)}</div>` : '');
-    body += `<rect class="hit" ${onX && totals[i] > 0 ? 'style="cursor:pointer" tabindex="0" role="button"' : ''} aria-label="${esc(`${tipTitle(x)} ${vf(totals[i])}`)}" data-x="${esc(x)}" x="${m.l + band * i}" y="${m.t}" width="${band}" height="${ph}" data-tip="${esc(tip)}"/>`;
+      + (hint && totals[i] > 0 ? `<div class="tip-hint">${esc(hint)}</div>` : '');
+    const live = (onX || onSeg) && totals[i] > 0;
+    body += `<rect class="hit" ${live ? 'style="cursor:pointer" tabindex="0" role="button"' : ''} aria-label="${esc(`${tipTitle(x)} ${vf(totals[i])}`)}" data-x="${esc(x)}" x="${m.l + band * i}" y="${m.t}" width="${band}" height="${ph}" data-tip="${esc(tip)}"/>`;
   });
   el.innerHTML = `<svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" role="img" aria-label="${esc(aria)}"><defs>${defs}</defs>${body}</svg>`;
   const pick = e => { const r = e.target.closest('[data-x]'); return r && totals[xs.indexOf(r.dataset.x)] > 0 ? r.dataset.x : null; };
-  el.onclick = onX ? e => { const x = pick(e); if (x) onX(x); } : null;
+  /** 点击位置（SVG 坐标）落在哪一段：SVG 可能被 CSS 缩放，按实际尺寸换算 */
+  const segAt = (x, e) => {
+    const svg = el.querySelector('svg'), rc = svg?.getBoundingClientRect();
+    if (!rc || !rc.height) return null;
+    const sy = (e.clientY - rc.top) * (H / rc.height);
+    const hit = (segPos.get(x) || []).find(p => sy >= p.top - 1 && sy <= p.bottom + 1);
+    return hit && hit.id !== '__other' ? hit.id : null;
+  };
+  el.onclick = onX || onSeg ? e => {
+    const x = pick(e); if (!x) return;
+    const sid = onSeg ? segAt(x, e) : null;
+    if (sid != null) onSeg(x, sid); else if (onX) onX(x);
+  } : null;
   el.onkeydown = onX ? e => { if (e.key === 'Enter' || e.key === ' ') { const x = pick(e); if (x) { e.preventDefault(); onX(x); } } } : null;
 }
 
@@ -179,7 +208,7 @@ export function segbar(parts, { thin = false } = {}) {
     return `<div style="flex:${p.value} 1 0;background:${p.color}" class="${darkText(p.color) ? 'dk' : ''}" data-tip="${esc(tipRows(p.label, [['金额', money(p.value)], ['占比', share.toFixed(1) + '%']]))}">${!thin && share >= 10 ? `<span>${share.toFixed(0)}%</span>` : ''}</div>`;
   }).join('')}</div>`;
 }
-export const legendList = (parts, total, clickable = false) => `<div class="lgl">${parts.filter(p => p.value > 0).map((p, i) => `<div class="li ${clickable && p.id != null && p.id !== '__other' ? 'clickable' : ''}" data-pid="${esc(p.id ?? '')}" ${clickable ? 'tabindex="0"' : ''}><i style="background:${p.color}"></i><span title="${esc(p.label)}">${esc(p.label)}</span><b>${esc(money(p.value))}</b><em>${pct(p.value, total)}</em></div>`).join('')}</div>`;
+export const legendList = (parts, total, clickable = false, hint = '') => `<div class="lgl">${parts.filter(p => p.value > 0).map(p => { const clk = clickable && p.id != null && p.id !== '__other'; return `<div class="li ${clk ? 'clickable' : ''}" data-pid="${esc(p.id ?? '')}" ${clk ? `tabindex="0" role="button"${hint ? ` title="${esc(`${p.label} · ${hint}`)}"` : ''}` : ''}><i style="background:${p.color}"></i><span title="${esc(p.label)}">${esc(p.label)}</span><b>${esc(money(p.value))}</b><em>${pct(p.value, total)}</em></div>`; }).join('')}</div>`;
 export function topParts(aggMap, dim, n = 7) {
   const arr = sortedAggs(aggMap).filter(a => a.cost > 0);
   const head = arr.slice(0, n), rest = arr.slice(n);
@@ -188,19 +217,27 @@ export function topParts(aggMap, dim, n = 7) {
   return parts;
 }
 
-/** 热力表：rows × cols */
-export function heatmap(el, { rows, cols, cell, total, fmt = money, onRow, rowTip = r => r.label }) {
+/** 热力表：rows × cols；onRow(rowId) 点击行名，onCell(rowId, colId) 点击有值的格子 */
+export function heatmap(el, { rows, cols, cell, total, fmt = money, onRow, onCell, cellHint = '', rowTip = r => r.label }) {
   if (!rows.length || !cols.length) { el.innerHTML = '<div class="nodata">暂无数据</div>'; return; }
   let max = 0;
   for (const r of rows) for (const c of cols) max = Math.max(max, cell(r.id, c.id));
   const step = v => (v > 0 && max ? Math.min(7, Math.max(1, Math.ceil(Math.sqrt(v / max) * 7))) : 0);
   el.innerHTML = `<div class="heat-wrap"><table class="heat"><thead><tr><th></th>${cols.map(c => `<th class="${c.we ? 'we' : ''}" title="${esc(c.title || c.label)}">${esc(c.label)}</th>`).join('')}<th style="text-align:right">合计</th></tr></thead><tbody>
-    ${rows.map(r => `<tr><th class="${onRow ? 'clickable' : ''}" data-row="${esc(r.id)}" title="${esc(rowTip(r))}"><i class="sw" style="background:${r.color}"></i>${esc(r.label)}</th>${cols.map(c => {
-      const v = cell(r.id, c.id);
-      return `<td class="h${step(v)}" data-tip="${esc(tipRows(`${r.label} · ${c.title || c.label}`, [['费用', fmt(v)]]))}"></td>`;
+    ${rows.map(r => `<tr><th class="${onRow ? 'clickable' : ''}" data-row="${esc(r.id)}" ${onRow ? 'tabindex="0" role="button"' : ''} title="${esc(rowTip(r))}"><i class="sw" style="background:${r.color}"></i>${esc(r.label)}</th>${cols.map(c => {
+      const v = cell(r.id, c.id), clk = onCell && v > 0;
+      return `<td class="h${step(v)}${clk ? ' clk' : ''}" ${clk ? `data-r="${esc(r.id)}" data-c="${esc(c.id)}"` : ''} data-tip="${esc(tipRows(`${r.label} · ${c.title || c.label}`, [['费用', fmt(v)]]) + (clk && cellHint ? `<div class="tip-hint">${esc(cellHint)}</div>` : ''))}"></td>`;
     }).join('')}<td class="tot">${esc(fmt(total(r.id)))}</td></tr>`).join('')}
   </tbody></table></div>`;
-  el.onclick = onRow ? e => { const th = e.target.closest('th[data-row]'); if (th) onRow(th.dataset.row); } : null;
+  const act = e => {
+    const td = onCell && e.target.closest('td[data-c]');
+    if (td) { onCell(td.dataset.r, td.dataset.c); return true; }
+    const th = onRow && e.target.closest('th[data-row]');
+    if (th) { onRow(th.dataset.row); return true; }
+    return false;
+  };
+  el.onclick = onRow || onCell ? e => { act(e); } : null;
+  el.onkeydown = onRow ? e => { if ((e.key === 'Enter' || e.key === ' ') && e.target.closest('th[data-row]')) { e.preventDefault(); act(e); } } : null;
 }
 export function dayCols(days) {
   return days.map(d => ({ id: d, label: d.slice(8), title: `${d}（周${WEEK[weekday(d)]}）`, we: isWeekend(d) }));

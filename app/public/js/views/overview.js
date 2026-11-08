@@ -3,9 +3,9 @@ import {
   $, esc, state, ui, app, money, moneyShort, compact, intFmt, pct, sum, uniq, metricVal, METRICS, NONE_KEY, DIMS, keyShort, wsName,
   filterLines, aggregate, aggAll, sortedAggs, totalTokens, topModels, deltaPill, tipRows, icon, help, segCtl, forecastOf, budgetOf,
   budgetBar, activeFilterCount, channelLabel, addDays, daysBetween, WEEK, weekday, isCurrentMonth, lastDayOf as lastDayOfCycle,
-  multiCloud, hasTags, PROVIDERS, usageFiltered, usageAgg, callsOn,
+  multiCloud, hasTags, PROVIDERS, usageFiltered, usageAgg, callsOn, NO_WS, NO_CC, NO_OWNER, groupHash, dimVal, dimName,
 } from '../core.js';
-import { sparkline, columnChart, lineChart, rankList, divergingList, segbar, legendList, topParts, legendHtml, bindActivate } from '../charts.js';
+import { sparkline, columnChart, lineChart, rankList, divergingList, segbar, legendList, topParts, legendHtml, bindActivate, bindLegend } from '../charts.js';
 import { computeInsights, cacheSavings } from '../insights.js';
 import { computeFindings, SEVERITY } from './governance.js';
 
@@ -63,16 +63,16 @@ export function render(v) {
     </section>
     ${fc ? kpi('forecast', '预计本月费用', moneyShort(fc.value), deltaPill(fc.value, prevFullCost), '较上月全月', `按 ${fc.fullDays} 个完整日的日均推算`)
       : kpi('calendar', '日均费用', money(avgDay), '', '', `${calDays} 天 · 峰值 ${peakText(days, dayCost)}`)}
-    ${kpi('key', '活跃 API Key', `${active}<small>/ ${state.apiKeys.size}</small>`, deltaPill(active, pActive, { neutral: true }), state.compareLabel, top1 ? `最高：${keyShort(top1.key)} 占 ${pct(top1.cost, cur.cost)}` : '—')}
-    ${kpi('token', 'Token 总量', noTok ? '—' : compact(tokens), noTok ? '' : deltaPill(tokens, pTokens, { neutral: true }), noTok ? '' : state.compareLabel, noTok ? '当前数据无用量' : ua && ua.requests ? `请求 ${compact(ua.requests)} 次 · 单次 ${intFmt(ua.tokens / ua.requests)} Token` : `输入 ${compact(cur.tIn)} · 输出 ${compact(cur.tOut)}`, intFmt(tokens))}
+    ${kpi('key', '活跃 API Key', `${active}<small>/ ${state.apiKeys.size}</small>`, deltaPill(active, pActive, { neutral: true }), state.compareLabel, top1 ? `最高：${keyShort(top1.key)} 占 ${pct(top1.cost, cur.cost)}` : '—', '', '#/keys', '查看 Key 分析')}
+    ${kpi('token', 'Token 总量', noTok ? '—' : compact(tokens), noTok ? '' : deltaPill(tokens, pTokens, { neutral: true }), noTok ? '' : state.compareLabel, noTok ? '当前数据无用量' : ua && ua.requests ? `请求 ${compact(ua.requests)} 次 · 单次 ${intFmt(ua.tokens / ua.requests)} Token` : `输入 ${compact(cur.tIn)} · 输出 ${compact(cur.tOut)}`, intFmt(tokens), '#/models', '查看模型 Token 结构')}
     ${kpi('unit', '每百万 Token 成本', perM == null ? '—' : money(perM), perM == null ? '' : deltaPill(perM, pPerM), perM == null ? '' : state.compareLabel, '费用 ÷ 总 Token × 10⁶')}
     ${kpi('cache', '缓存命中率', hit == null ? '—' : (hit * 100).toFixed(1) + '%', hit == null ? '' : deltaPill(hit, pHit, { pp: true, goodWhenUp: true }), hit == null ? '' : state.compareLabel, saved > 0.01 ? `估算节省 ${moneyShort(saved)}` : hit == null ? '—' : `命中 ${compact(cur.tCache)} Token`)}
-    ${kpi('model', '使用模型', String(byModel.size), '', '', byModel.size ? `主力：${sortedAggs(byModel)[0].key}` : '—')}
+    ${kpi('model', '使用模型', String(byModel.size), '', '', byModel.size ? `主力：${sortedAggs(byModel)[0].key}` : '—', '', '#/models', '查看模型分析')}
   </div>
 
   <div class="bi">
     <section class="panel c8">
-      <div class="panel-h"><h3>费用趋势</h3>${help('每日：按日账单堆叠；累计：本期与上期按天累计对比（当月含月末预测）；月度：近 12 个账期的账期账单（取决于同步回溯月数）。')}
+      <div class="panel-h"><h3>费用趋势</h3>${help('每日：按日账单堆叠；累计：本期与上期按天累计对比（当月含月末预测）；月度：近 12 个账期的账期账单（取决于同步回溯月数）。点击图例按该项筛选全部页面；点击柱查看当日明细，点击柱中的某一段只看该项。')}
         <div class="actions">${ui.trendMode !== 'cum' ? segCtl('trendBy', trendOpts) : ''}${segCtl('trendMode', { daily: '每日', cum: '累计', monthly: '月度' })}</div></div>
       <div class="legend" id="trLegend"></div><div class="chart" id="trChart"></div>
     </section>
@@ -91,11 +91,11 @@ export function render(v) {
     </section>
 
     <section class="panel c4">
-      <div class="panel-h"><h3>费用构成</h3><div class="actions">${segCtl('compBy', compOpts)}</div></div>
+      <div class="panel-h"><h3>费用构成</h3>${help('点击图例项按该项筛选全部页面（可用浏览器“后退”撤销）。')}<div class="actions">${segCtl('compBy', compOpts)}</div></div>
       <div id="comp"></div>
     </section>
     <section class="panel c4">
-      <div class="panel-h"><h3>变动归因</h3>${help(`本期与上期（${state.compareRange || ''}）相比，各维度费用增减额，按绝对值排序。`)}<div class="actions">${segCtl('varBy', varOpts)}</div></div>
+      <div class="panel-h"><h3>变动归因</h3>${help(`本期与上期（${state.compareRange || ''}）相比，各维度费用增减额，按绝对值排序。点击进入对应的 Key / 模型 / 业务空间详情。`)}<div class="actions">${segCtl('varBy', varOpts)}</div></div>
       <div id="variance"></div>
     </section>
     <section class="panel c4">
@@ -108,13 +108,13 @@ export function render(v) {
 
   // 关键发现
   const ins = computeInsights();
-  $('#insights').innerHTML = ins.length ? ins.map(x => `<li class="ins ${x.level}"><span class="ins-ico">${icon(x.icon)}</span><div><div class="ins-t">${esc(x.title)}</div><div class="ins-d">${x.html}</div>${x.go ? `<button class="link" data-go="${esc(x.go)}">${esc(x.goLabel || '查看')} →</button>` : ''}</div></li>`).join('') : '<li class="nodata">暂无需要关注的发现</li>';
+  $('#insights').innerHTML = ins.length ? ins.map(x => `<li class="ins ${x.level}"><span class="ins-ico">${icon(x.icon)}</span><div><div class="ins-t">${esc(x.title)}</div><div class="ins-d">${x.html}</div>${x.go ? `<button class="link" data-go="${esc(x.go)}">${esc(x.goLabel || '查看')} →</button>` : ''}${x.day ? `<button class="link" data-day="${esc(x.day)}">${esc(x.dayLabel || '查看当日明细')} →</button>` : ''}${x.model ? `<button class="link" data-model="${esc(x.model)}">${esc(x.modelLabel || '查看模型')} →</button>` : ''}</div></li>`).join('') : '<li class="nodata">暂无需要关注的发现</li>';
 
   rankList($('#rkKeys'), sortedAggs(byKey).map(a => ({
     id: a.key, label: keyShort(a.key), sub: a.key === NONE_KEY ? '' : [multiCloud() ? PROVIDERS[state.apiKeys.get(a.key)?.provider || 'aliyun'] : '', state.apiKeys.get(a.key)?.costCenter || wsName(state.apiKeys.get(a.key)?.wsKey || [...a.wss][0] || '')].filter(Boolean).join(' · '),
     value: a.cost, prev: pByKey.get(a.key)?.cost ?? 0, color: DIMS.key.color(a.key),
     tip: tipRows(DIMS.key.short(a.key), [['费用', money(a.cost)], ['占比', pct(a.cost, cur.cost)], ['上期', money(pByKey.get(a.key)?.cost || 0)], ['Token', compact(totalTokens(a))], ['主要模型', topModels(a, 2).join('、')]]),
-  })), { total: cur.cost, showDelta: true, onClick: it => (it.id === NONE_KEY ? app.setFilter({ key: NONE_KEY }, '#/detail') : app.go(`#/key/${it.id}`)) });
+  })), { total: cur.cost, showDelta: true, onClick: it => (it.id === NONE_KEY ? app.setFilter({ key: NONE_KEY }, '#/detail') : app.go(`#/key/${encodeURIComponent(it.id)}`)) });
   rankList($('#rkModels'), sortedAggs(byModel).map(a => ({
     id: a.key, label: a.key, sub: `${a.keys.size} 个 Key`, value: a.cost, prev: pByModel.get(a.key)?.cost ?? 0, color: DIMS.model.color(a.key),
     tip: tipRows(a.key, [['费用', money(a.cost)], ['占比', pct(a.cost, cur.cost)], ['上期', money(pByModel.get(a.key)?.cost || 0)], ['Token', compact(totalTokens(a))], ['每百万 Token', totalTokens(a) ? money(a.cost / totalTokens(a) * 1e6) : '-']]),
@@ -133,16 +133,16 @@ export function render(v) {
     parts = Object.keys(meta).filter(k => m.has(k)).map(k => ({ id: null, label: meta[k][0], value: m.get(k).cost, color: meta[k][1] }));
   }
   const comp = $('#comp');
-  comp.innerHTML = segbar(parts) + legendList(parts, sum(parts, x => x.value), ui.compBy !== 'dir');
-  if (ui.compBy !== 'dir') bindActivate(comp, '.li.clickable', li => app.setFilter(ui.compBy === 'ws' ? { ws: li.dataset.pid || '__nows' } : ui.compBy === 'provider' ? { provider: li.dataset.pid } : ui.compBy === 'cc' ? { cc: li.dataset.pid || '__nocc__' } : { channel: li.dataset.pid }));
+  comp.innerHTML = segbar(parts) + legendList(parts, sum(parts, x => x.value), ui.compBy !== 'dir', '点击按此筛选');
+  if (ui.compBy !== 'dir') bindActivate(comp, '.li.clickable', li => app.setFilter(ui.compBy === 'ws' ? { ws: li.dataset.pid || NO_WS } : ui.compBy === 'provider' ? { provider: li.dataset.pid } : ui.compBy === 'cc' ? { cc: li.dataset.pid || NO_CC } : { channel: li.dataset.pid }));
 
-  // 归因
-  const dim = DIMS[ui.varBy];
-  const vc = aggregate(lines, dim.of), vp = aggregate(prevLines, dim.of);
+  // 归因：Key → Key 详情；模型 → 模型详情（沿用筛选）；业务空间 / 成本中心 / 云厂商 → 分组详情
+  const dim = DIMS[ui.varBy], vOf = dimVal[ui.varBy] || dim.of;
+  const vc = aggregate(lines, vOf), vp = aggregate(prevLines, vOf);
   divergingList($('#variance'), uniq([...vc.keys(), ...vp.keys()]).map(id => {
     const c = vc.get(id)?.cost || 0, pv = vp.get(id)?.cost || 0;
-    return { id, label: dim.short(id), cur: c, prev: pv, delta: c - pv };
-  }), { limit: 6, onClick: it => (ui.varBy === 'key' ? (it.id !== NONE_KEY && app.go(`#/key/${it.id}`)) : ui.varBy === 'model' ? app.openModel(it.id) : ui.varBy === 'provider' ? app.setFilter({ provider: it.id }) : ui.varBy === 'cc' ? app.setFilter({ cc: it.id || '__nocc__' }) : app.setFilter({ ws: it.id || '__nows' })) });
+    return { id, label: dimName(ui.varBy, id), cur: c, prev: pv, delta: c - pv };
+  }), { limit: 6, onClick: it => (ui.varBy === 'key' ? (it.id !== NONE_KEY && app.go(`#/key/${encodeURIComponent(it.id)}`)) : ui.varBy === 'model' ? app.openModel(it.id) : app.go(groupHash(ui.varBy, it.id))) });
 
   // 治理摘要
   const f = computeFindings();
@@ -152,8 +152,9 @@ export function render(v) {
     ${rules.length ? `<ul class="gov-list">${rules.slice(0, 6).map(r => `<li><span class="pill ${SEVERITY[r.severity].cls}">${SEVERITY[r.severity].label}</span><span>${esc(r.name)}</span><b>${r.n}</b></li>`).join('')}</ul>` : '<div class="nodata">未发现治理问题</div>'}`;
 }
 
-function kpi(ic, label, value, delta, cmp, meta, title) {
-  return `<section class="kpi"><div class="kpi-h"><span class="kpi-ico">${icon(ic)}</span><span>${esc(label)}</span></div>
+/** KPI 卡片；go 不为空时整张卡片可点击跳转（沿用当前筛选） */
+function kpi(ic, label, value, delta, cmp, meta, title, go = '', goTip = '') {
+  return `<section class="kpi ${go ? 'kpi-go' : ''}" ${go ? `data-go="${esc(go)}" role="link" tabindex="0" title="${esc(goTip)}"` : ''}><div class="kpi-h"><span class="kpi-ico">${icon(ic)}</span><span>${esc(label)}</span>${go ? `<span class="kpi-arrow" aria-hidden="true">${icon('chevR')}</span>` : ''}</div>
     <div class="value" ${title ? `title="${esc(title)}"` : ''}>${value}</div>
     <div class="trend">${delta || ''}${delta && cmp ? `<span class="cmp">${esc(cmp)}</span>` : ''}</div>
     <div class="meta" title="${esc(meta)}">${esc(meta)}</div></section>`;
@@ -196,10 +197,12 @@ function drawTrend(daily, days, avgDay, fc) {
     lineChart(el, { xs, lines, height: 340, xLabel: i => (p.mode === 'month' ? `${i + 1}日` : addDays(p.from, i).slice(5)), tipTitle: i => (p.mode === 'month' ? `第 ${i + 1} 天（${addDays(p.from, i).slice(5)}）` : `第 ${i + 1} 天`), aria: '累计费用对比' });
     return;
   }
-  const dim = DIMS[ui.trendBy];
+  const dim = DIMS[ui.trendBy], by = ui.trendBy;
   const src = ui.trendMode === 'monthly' ? filterLines(state.history) : daily;
   const xs = ui.trendMode === 'monthly' ? uniq(src.map(l => l.date)).sort() : days;
   const ranked = [...aggregate(src, dim.of).values()].filter(a => a.cost > 0).sort((a, b) => b.cost - a.cost).map(a => a.key);
+  /** 系列 ID → 全局筛选取值（空的业务空间 / 成本中心 / 负责人转换为“未归属”哨兵值） */
+  const fval = id => (by === 'ws' ? id || NO_WS : by === 'cc' ? id || NO_CC : by === 'owner' ? id || NO_OWNER : id);
   // 已分配颜色的实体保持原色（跨视图一致）；月度视图中空闲的色位依次分给历史费用较高的实体，最多 8 色
   const colorOf = new Map(ranked.filter(id => dim.color(id) !== 'var(--other)').map(id => [id, dim.color(id)]));
   if (ui.trendMode === 'monthly') {
@@ -212,13 +215,18 @@ function drawTrend(daily, days, avgDay, fc) {
   if (others.length) series.push({ id: '__other', label: others.length === 1 ? dim.short(others[0]) : `其他 ${others.length} 项`, color: 'var(--other)' });
   const cell = new Map();
   for (const l of src) { const id = dim.of(l); const k = l.date + '|' + (colored.includes(id) ? id : '__other'); cell.set(k, (cell.get(k) || 0) + metricVal(l)); }
-  lg.innerHTML = series.length > 1 ? legendHtml(series) : '';
+  // 图例可点击：按该项筛选全部页面（单一系列时无图例）
+  lg.innerHTML = series.length > 1 ? legendHtml(series.map(s => ({ ...s, id: s.id === '__other' ? null : s.id })), '点击按此筛选') : '';
+  bindLegend(lg, id => app.setFilter({ [by]: fval(id) }));
   const monthly = ui.trendMode === 'monthly';
   columnChart(el, {
     xs, series, cell: (x, id) => cell.get(x + "|" + id) || 0, height: 340, avg: monthly ? null : avgDay,
     xLabel: x => (monthly ? x.slice(2) : x.slice(5)), tipTitle: x => (monthly ? `${x} 账期` : `${x}（周${WEEK[weekday(x)]}）`), weekend: !monthly,
     aria: monthly ? '月度费用趋势' : '每日费用趋势', empty: monthly ? '暂无历史账期数据（可在系统管理中调大回溯月数）' : '暂无按日账单数据',
     onX: monthly ? x => app.setPeriod({ mode: 'month', cycle: x }) : x => app.openDay(x),
+    // 每日：点击柱段 → 当日明细（限定该项）；月度：点击柱段 → 切换到该账期并按该项筛选
+    onSeg: monthly ? (x, id) => { app.setPeriod({ mode: 'month', cycle: x }, { url: false }); app.setFilter({ [by]: fval(id) }); } : (x, id) => app.openDay(x, { global: true, [by]: dimVal[by] ? fval(id) : id }),
     clickHint: monthly ? '点击切换到该账期' : '点击查看当日明细',
+    segHint: monthly ? '点击柱段切换账期并按该项筛选' : '点击柱段只看该项',
   });
 }

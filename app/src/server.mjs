@@ -18,7 +18,7 @@ import { seedDemo, clearDemo } from './demo.mjs';
 import { PromClient, validateCalls, discover, fetchCalls, buildUsageRows, buildQuery, DEFAULT_CALLS, MAPPING_FIELDS, PROM_AUTH } from './prom.mjs';
 import { loadMasterKey, hashPassword, verifyPassword, burnPasswordCheck, checkPasswordPolicy, randomPassword, maskId, sha256 } from './crypto.mjs';
 
-const VERSION = '1.4.0';
+const VERSION = '1.5.0';
 const log = (...a) => console.log(new Date().toISOString(), ...a);
 
 {

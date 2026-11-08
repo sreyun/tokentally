@@ -1,5 +1,5 @@
 /* Key 治理：基于规则的风险与合规检查 */
-import { $, esc, state, ui, app, money, sum, addDays, keyShort, keyDesc, wsName, budgetOf, forecastOf, isCurrentMonth, NONE_KEY, icon, help, fmtTime, PROVIDERS, provTag, hasTags } from '../core.js';
+import { $, esc, state, ui, app, money, sum, addDays, keyShort, keyDesc, wsName, budgetOf, forecastOf, isCurrentMonth, NONE_KEY, icon, help, fmtTime, PROVIDERS, provTag, hasTags, dimLink, NO_WS } from '../core.js';
 import { table } from '../table.js';
 
 export const SEVERITY = { high: { label: '高', cls: 'bad', order: 0 }, medium: { label: '中', cls: 'warn', order: 1 }, low: { label: '低', cls: 'neutral', order: 2 } };
@@ -10,7 +10,7 @@ const RULES = {
   forecast_over: { name: '预计超出预算', severity: 'medium', advice: '按当前日均推算月末将超预算，建议提前评估或调整。' },
   spike: { name: '费用突增', severity: 'medium', advice: '近 7 天日均显著高于此前，排查是否存在异常或滥用调用。' },
   no_desc: { name: '有消费但无描述', severity: 'medium', advice: '在云厂商控制台为该 Key 补充描述（项目/负责人），或在本系统设置成本中心与负责人。' },
-  no_cc: { name: '有消费但未分配成本中心', severity: 'low', advice: '在“API Key 分析 → 归属设置”中为该 Key 指定成本中心与负责人，便于按部门/项目分摊。' },
+  no_cc: { name: '有消费但未分配成本中心', severity: 'low', advice: '在“Key 分析 → 归属设置”中为该 Key 指定成本中心与负责人，便于按部门/项目分摊。' },
   broad: { name: '权限过宽（全部模型 + IP 不限）', severity: 'medium', advice: '按最小权限原则限制可访问模型，并配置 IP 白名单。' },
   idle: { name: '闲置 30 天以上', severity: 'medium', advice: '长期未使用的 Key 建议禁用或删除，降低泄露风险。' },
   open_ip: { name: '未限制访问 IP', severity: 'low', advice: '为调用来源固定的 Key 配置 IP 白名单。' },
@@ -90,14 +90,14 @@ export function render(v) {
   v.querySelectorAll('[data-rule]').forEach(b => b.onclick = () => { ui.govRule = b.dataset.rule; render(v); });
   const t = table('gov', $('#tbl', v), {
     sort: 'sev', dir: 'asc', pageSize: 100, caption: '治理问题清单', empty: '未发现治理问题',
-    onRowClick: r => (r.keyId !== NONE_KEY ? app.go(`#/key/${r.keyId}`) : null),
+    onRowClick: r => (r.keyId !== NONE_KEY ? app.go(`#/key/${encodeURIComponent(r.keyId)}`) : null),
     columns: [
       { key: 'key', label: 'API Key', fmt: (x, r) => `<b style="font-weight:600">${esc(keyShort(r.keyId))}</b>${provTag(state.apiKeys.get(r.keyId)?.provider)}<span class="sub mono">${esc(r.keyId)}</span>`, sortVal: r => keyShort(r.keyId), csv: r => `${keyDesc(r.keyId)} (${r.keyId})` },
       { key: 'sev', label: '等级', fmt: (x, r) => `<span class="pill ${SEVERITY[r.severity].cls}">${SEVERITY[r.severity].label}</span>`, sortVal: r => SEVERITY[r.severity].order, csv: r => SEVERITY[r.severity].label },
       { key: 'ruleName', label: '问题' },
       { key: 'detail', label: '说明', cls: 'wrap-cell' },
       { key: 'advice', label: '建议', cls: 'wrap-cell' },
-      { key: 'ws', label: '业务空间', fmt: (x, r) => esc(wsName(state.apiKeys.get(r.keyId)?.wsKey || '')), sortVal: r => wsName(state.apiKeys.get(r.keyId)?.wsKey || ''), csv: r => wsName(state.apiKeys.get(r.keyId)?.wsKey || '') },
+      { key: 'ws', label: '业务空间', fmt: (x, r) => (w => dimLink('ws', w || NO_WS, wsName(w)))(state.apiKeys.get(r.keyId)?.wsKey || ''), sortVal: r => wsName(state.apiKeys.get(r.keyId)?.wsKey || ''), csv: r => wsName(state.apiKeys.get(r.keyId)?.wsKey || '') },
       { key: 'cost', label: '本期费用', align: 'r', fmt: x => money(x) },
     ],
   }).setRows(list);

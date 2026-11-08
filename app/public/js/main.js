@@ -2,14 +2,15 @@
  * 应用外壳：路由、导航、周期、筛选、同步状态、用户菜单、主题、提示、轮询
  * ========================================================================= */
 import {
-  $, $$, esc, LS, state, ui, app, http, toast, icon, opt, applyData, addDays, addMonths, lastDayOf, ago, fmtTime, uniq,
+  $, $$, esc, LS, state, ui, app, http, toast, icon, opt, applyData, addDays, addMonths, lastDayOf, ago, fmtTime, uniq, sum, money, pct, metricVal,
   keyShort, wsName, channelLabel, ioInfo, NONE_KEY, isAdmin, activeFilterCount, METRICS, filterLines,
-  PROVIDERS, multiCloud, NO_CC, ccName, brandName,
+  PROVIDERS, multiCloud, NO_CC, NO_WS, NO_OWNER, ccName, ownerName, brandName, hasTags, emptyFilters, isSet, facetValues, dimName, DIM_LABEL,
 } from './core.js';
 import * as Overview from './views/overview.js';
 import * as Keys from './views/keys.js';
 import * as Key from './views/key.js';
 import * as Models from './views/models.js';
+import * as Groups from './views/groups.js';
 import * as Pivot from './views/pivot.js';
 import * as Detail from './views/detail.js';
 import * as Gov from './views/governance.js';
@@ -19,27 +20,79 @@ import * as Day from './views/day.js';
 
 const ROUTES = {
   overview: { label: '成本概览', icon: 'overview', sub: '本期费用、预算与预测、趋势、关键发现与排行', view: Overview, filters: true },
-  keys: { label: 'API Key 分析', icon: 'key', sub: '每个 API Key 的费用、用量、效率、预算与属性', view: Keys, filters: true },
-  key: { label: 'API Key 详情', nav: 'keys', sub: '单个 Key 的费用、趋势、模型构成、计费项与变更', view: Key },
+  keys: { label: 'Key 分析', icon: 'key', sub: '每个 API Key 的费用、用量、效率、预算与属性', view: Keys, filters: true },
+  key: { label: 'API Key 详情', nav: 'keys', sub: '单个 Key 的费用、趋势、模型构成、计费项与变更', view: Key, arg: true },
   models: { label: '模型分析', icon: 'model', sub: '模型费用、Token 结构、单位成本与计费维度', view: Models, filters: true },
+  workspaces: { label: '业务分析', icon: 'ws', sub: '按业务空间 / 成本中心 / 负责人 / 云厂商汇总费用，逐级下钻到 API Key 与模型', view: Groups, filters: true },
+  group: { label: '业务空间详情', nav: 'workspaces', sub: '单个业务空间（或成本中心 / 负责人 / 云厂商）的费用、关联 API Key、模型与趋势', view: { render: (v, arg) => Groups.renderDetail(v, arg) }, arg: true },
   pivot: { label: '成本分摊', icon: 'layers', sub: '多维透视：任选维度交叉汇总，用于成本分摊与结构分析', view: Pivot, filters: true },
   detail: { label: '账单明细', icon: 'list', sub: '逐条账单，与云厂商费用中心账单对应（腾讯云 Key 级费用按用量分摊）', view: Detail, filters: true },
   governance: { label: 'Key 治理', icon: 'shield', sub: '描述、归属、闲置、权限、费用异常与预算检查', view: Gov },
   changes: { label: '变更记录', icon: 'history', sub: '与云厂商同步时检测到的 API Key / 业务空间变化', view: Changes, noData: true, noPeriod: true },
-  admin: { label: '系统管理', icon: 'settings', sub: '云厂商接入、数据同步、预算与告警、用户、品牌与备份、安全审计', view: Admin, admin: true, noData: true, noPeriod: true },
+  admin: { label: '系统管理', icon: 'settings', sub: '云厂商接入、数据同步、预算与告警、用户、品牌与备份、安全审计', view: Admin, admin: true, noData: true, noPeriod: true, arg: true },
 };
-const NAV = [{ sec: '成本分析' }, 'overview', 'keys', 'models', 'pivot', 'detail', { sec: '治理' }, 'governance', 'changes', { sec: '系统', admin: true }, 'admin'];
+const NAV = [{ sec: '成本分析' }, 'overview', 'keys', 'models', 'workspaces', 'pivot', 'detail', { sec: '治理' }, 'governance', 'changes', { sec: '系统', admin: true }, 'admin'];
 let route = { name: 'overview', arg: '' };
 
-/* ---------------- 路由 ---------------- */
-function parseHash() {
-  const [name, ...rest] = (location.hash.replace(/^#\/?/, '') || 'overview').split('/');
-  const r = ROUTES[name] ? { name, arg: decodeURIComponent(rest.join('/')) } : { name: 'overview', arg: '' };
+/* ---------------- 路由 ----------------
+ * 地址格式：#/<页面>[/<参数>]?<统计周期>&<全局筛选>，例如 #/keys?cycle=2026-10&ws=llm-xxx&model=qwen-max
+ *  - 统计周期与筛选写入地址：链接可直接分享；每次下钻（点击图表 / 图例 / 单元格）生成一条浏览记录，浏览器“后退”即撤销下钻
+ *  - 地址不带查询串时（旧书签、手工输入）沿用当前周期与筛选，并改写为完整地址
+ */
+const FQ_KEYS = ['provider', 'ws', 'cc', 'owner', 'key', 'model', 'dir', 'item', 'channel', 'q'];
+const RANGE_PRESETS = ['today', 'yesterday', '7', '30', '90', 'mtd', 'lastmonth'];
+function splitHash(h = location.hash) {
+  const s = (h || '').replace(/^#\/?/, ''), i = s.indexOf('?');
+  return { path: i < 0 ? s : s.slice(0, i), query: i < 0 ? null : s.slice(i + 1) };
+}
+function parseHash(h = location.hash) {
+  const [name, ...rest] = (splitHash(h).path || 'overview').split('/');
+  let arg = rest.join('/');
+  try { arg = decodeURIComponent(arg); } catch { /* 保留原样 */ }
+  const r = ROUTES[name] ? { name, arg: ROUTES[name].arg ? arg : '' } : { name: 'overview', arg: '' };
   if (ROUTES[r.name].admin && state.me && !isAdmin()) return { name: 'overview', arg: '' };
   return r;
 }
+const argPath = (name, arg) => {
+  if (name !== 'group') return encodeURIComponent(arg);
+  const i = arg.indexOf('/');
+  return i < 0 ? encodeURIComponent(arg) : `${encodeURIComponent(arg.slice(0, i))}/${encodeURIComponent(arg.slice(i + 1))}`;
+};
+function stateQuery(name) {
+  const r = ROUTES[name];
+  if (!r || r.noPeriod) return '';
+  const sp = new URLSearchParams(), p = ui.period;
+  if (p.mode === 'month') { if (p.cycle) sp.set('cycle', p.cycle); }
+  else if (RANGE_PRESETS.includes(p.preset)) sp.set('preset', p.preset);
+  else if (p.from && p.to) { sp.set('from', p.from); sp.set('to', p.to); }
+  if (r.filters) for (const k of FQ_KEYS) if (isSet(k, ui.f[k])) sp.set(k, ui.f[k]);
+  return sp.toString();
+}
+const buildHash = (name, arg) => { const q = stateQuery(name); return `#/${name}${arg ? '/' + argPath(name, arg) : ''}${q ? '?' + q : ''}`; };
+const withState = hash => { if (String(hash).includes('?')) return hash; const r = parseHash(hash); return buildHash(r.name, r.arg); };
+const periodKey = p => (p.mode === 'month' ? 'm' + p.cycle : `r${p.from}~${p.to}`);
+/** 读取地址中的周期与筛选；返回是否需要重新加载数据（周期变化） */
+function applyQuery() {
+  const { query } = splitHash();
+  if (query == null) return false;
+  const sp = new URLSearchParams(query), r = ROUTES[route.name];
+  if (r.filters) for (const k of FQ_KEYS) { const v = sp.get(k); ui.f[k] = v == null ? (k === 'channel' ? '__all' : '') : v.slice(0, 300); }
+  if (r.noPeriod || !state.today) return false;
+  const p = ui.period, before = periodKey(p), snap = JSON.stringify(p), D = /^\d{4}-\d{2}-\d{2}$/;
+  const c = sp.get('cycle'), pr = sp.get('preset'), fr = sp.get('from'), to = sp.get('to');
+  if (c && /^\d{4}-(0[1-9]|1[0-2])$/.test(c) && c <= state.today.slice(0, 7)) { p.mode = 'month'; p.cycle = c; }
+  else if (pr && RANGE_PRESETS.includes(pr)) { p.mode = 'range'; applyPreset(pr); }
+  else if (fr && to && D.test(fr) && D.test(to) && fr <= to && fr <= state.today) { p.mode = 'range'; p.preset = 'custom'; p.from = fr; p.to = to > state.today ? state.today : to; }
+  if (JSON.stringify(p) !== snap) savePeriod();
+  return periodKey(p) !== before;
+}
+/** 地址规范化：补全 / 修正周期与筛选参数（不新增浏览记录） */
+function canonicalize() {
+  const full = buildHash(route.name, route.arg);
+  if (full !== location.hash) { history.replaceState(history.state, '', full); navStack[navStack.length - 1] = full; lastHash = full; }
+}
 /*
- * 导航：应用内跳转（app.go）滚动到顶部；浏览器前进/后退恢复离开时的滚动位置；
+ * 导航：应用内跳转（app.go）滚动到顶部；同一页面内的筛选 / 下钻保持滚动位置；浏览器前进/后退恢复离开时的滚动位置；
  * 维护应用内历史栈，详情页“返回”优先回到上一个页面。
  */
 const scrollMem = new Map();
@@ -50,15 +103,24 @@ const leaveOk = () => !app.dirty || confirm('当前页面有未保存的修改�
 app.go = hash => {
   if (!leaveOk()) return;
   app.dirty = false;
-  if (location.hash === hash) { render(); return; }
+  const full = withState(hash);
+  if (location.hash === full) { render(); return; }
   pushNav = true;
-  location.hash = hash;
+  location.hash = full;
 };
 app.back = fallback => {
   if (!leaveOk()) return;
   app.dirty = false;
   if (navStack.length > 1) history.back(); else app.go(fallback);
 };
+/** 把当前筛选 / 周期写入地址：默认新增一条浏览记录（可后退撤销），replace 时改写当前记录 */
+function commitUrl(replace = false) {
+  const full = buildHash(route.name, route.arg);
+  if (location.hash === full) { render(); return; }
+  if (replace) { history.replaceState(history.state, '', full); navStack[navStack.length - 1] = full; lastHash = full; render(); return; }
+  pushNav = true;
+  location.hash = full;
+}
 window.addEventListener('hashchange', () => {
   scrollMem.set(lastHash, window.scrollY);
   const now = location.hash || '#/overview';
@@ -66,24 +128,47 @@ window.addEventListener('hashchange', () => {
   else if (navStack[navStack.length - 2] === now) navStack.pop();
   else navStack.push(now);
   app.dirty = false;
+  const prev = route;
   route = parseHash();
+  const reload = applyQuery();
+  canonicalize();
   closePop();
   if ($('#drawer').open) $('#drawer').close();
   render();
-  const y = pushNav ? 0 : (scrollMem.get(now) || 0);
+  if (reload) loadData();
+  const same = prev.name === route.name && prev.arg === route.arg;
+  const y = pushNav ? (same ? window.scrollY : 0) : (scrollMem.get(location.hash) ?? (same ? window.scrollY : 0));
   requestAnimationFrame(() => window.scrollTo({ top: y }));
-  pushNav = false; lastHash = now;
+  pushNav = false; lastHash = location.hash;
 });
 window.addEventListener('beforeunload', e => { if (app.dirty) { e.preventDefault(); e.returnValue = ''; } });
 app.render = () => render();
+app.hasFilters = () => !!ROUTES[route.name]?.filters;
+/**
+ * 设置全局筛选（下钻）：hash 为空时留在当前页面（不支持筛选的页面跳转到成本概览）；reset 先清空其余筛选。
+ * 每次下钻都会新增一条浏览记录，浏览器“后退”可撤销。
+ */
 app.setFilter = (patch, hash, reset = false) => {
-  if (reset) Object.assign(ui.f, { provider: '', ws: '', key: '', model: '', cc: '', channel: '__all', dir: '', item: '', q: '' });
+  if (reset) Object.assign(ui.f, emptyFilters());
   Object.assign(ui.f, patch);
-  if (hash) app.go(hash); else render();
+  if (hash) app.go(hash);
+  else if (!ROUTES[route.name].filters) app.go('#/overview');
+  else commitUrl();
 };
-app.openModel = m => Models.openModel(m);
-app.openDay = (d, keyId) => Day.openDay(d, keyId);
-app.setPeriod = p => { Object.assign(ui.period, p); savePeriod(); renderPeriod(); loadData(); };
+app.openModel = (m, scope) => Models.openModel(m, scope);
+app.openDay = (d, scope) => Day.openDay(d, scope);
+/** 切换统计周期：url='push'（下钻，可后退）| 'replace'（顶栏切换）| false（随后由 app.go 写入地址） */
+app.setPeriod = (p, { url = 'push' } = {}) => {
+  Object.assign(ui.period, p); savePeriod(); renderPeriod();
+  if (url) commitPeriodUrl(url === 'replace');
+  loadData();
+};
+function commitPeriodUrl(replace) {
+  const full = buildHash(route.name, route.arg);
+  if (full === location.hash) return;
+  if (replace) { history.replaceState(history.state, '', full); navStack[navStack.length - 1] = full; lastHash = full; }
+  else { pushNav = true; location.hash = full; }
+}
 app.reload = () => loadData({ silent: true });
 app.refreshStatus = async (background = false) => { try { state.status = await http('GET', '/api/status', undefined, { background }); } catch { /* ignore */ } renderSyncBtn(); renderSideFoot(); };
 
@@ -113,6 +198,7 @@ async function loadData({ silent = false, background = false } = {}) {
 }
 
 /* ---------------- 渲染 ---------------- */
+let refocus = null;
 function render(extraNotices = []) {
   route = parseHash();
   const r = ROUTES[route.name];
@@ -121,12 +207,13 @@ function render(extraNotices = []) {
   $('#btnRefresh').hidden = !!r.noPeriod;
   $('#note').hidden = !!r.noData;
   renderFilters(r);
+  if (refocus) { const el = $(`[data-f="${refocus}"]`); refocus = null; el?.focus({ preventScroll: true }); }
   renderNotices(r, extraNotices);
   const v = $('#view');
   if (!r.noData && !state.data) { renderSkeleton(); return; }
   try {
-    if (route.name === 'key') r.view.render(v, route.arg);
-    else if (route.name === 'admin') r.view.render(v, route.arg || 'aliyun');
+    if (route.name === 'admin') r.view.render(v, route.arg || 'aliyun');
+    else if (r.arg) r.view.render(v, route.arg);
     else r.view.render(v);
   } catch (e) {
     console.error(e);
@@ -151,6 +238,7 @@ function renderNav() {
 function renderTitle(r) {
   let title = r.label;
   if (route.name === 'key') title = route.arg === NONE_KEY ? '非 API Key 调用' : (state.data ? keyShort(route.arg) : 'API Key 详情');
+  if (route.name === 'group') { const g = Groups.parseGroupArg(route.arg); title = g ? `${DIM_LABEL[g.dim]} · ${state.data ? dimName(g.dim, g.id) : g.id}` : '详情'; }
   if (route.name === 'admin') title = `系统管理 · ${Admin.ADMIN_TABS[route.arg] || '阿里云接入'}`;
   $('#pageTitle').textContent = title;
   $('#pageSub').textContent = r.sub;
@@ -201,18 +289,20 @@ function applyPreset(preset) {
   else if (preset === 'mtd') { p.from = t.slice(0, 7) + '-01'; p.to = t; }
   else if (preset === 'lastmonth') { const c = addMonths(t.slice(0, 7), -1); p.from = c + '-01'; p.to = lastDayOf(c); }
 }
+/** 顶栏切换周期：改写当前地址（不新增浏览记录）并重新加载 */
+function periodApplied() { savePeriod(); renderPeriod(); commitPeriodUrl(true); loadData(); }
 $('#modeSeg').addEventListener('click', e => {
   const b = e.target.closest('[data-mode]'); if (!b || ui.period.mode === b.dataset.mode) return;
   ui.period.mode = b.dataset.mode;
   if (ui.period.mode === 'range' && (ui.period.preset !== 'custom' || !ui.period.from)) applyPreset(ui.period.preset === 'custom' ? '30' : ui.period.preset || '30');
-  savePeriod(); renderPeriod(); loadData();
+  periodApplied();
 });
-$('#cycleSel').addEventListener('change', e => { ui.period.cycle = e.target.value; savePeriod(); loadData(); });
-$('#btnPrev').onclick = () => app.setPeriod({ cycle: addMonths(ui.period.cycle, -1) });
-$('#btnNext').onclick = () => { const n = addMonths(ui.period.cycle, 1); if (n <= state.today.slice(0, 7)) app.setPeriod({ cycle: n }); };
+$('#cycleSel').addEventListener('change', e => { ui.period.cycle = e.target.value; periodApplied(); });
+$('#btnPrev').onclick = () => app.setPeriod({ cycle: addMonths(ui.period.cycle, -1) }, { url: 'replace' });
+$('#btnNext').onclick = () => { const n = addMonths(ui.period.cycle, 1); if (n <= state.today.slice(0, 7)) app.setPeriod({ cycle: n }, { url: 'replace' }); };
 $('#preset').addEventListener('change', e => {
   if (e.target.value === 'custom') { ui.period.preset = 'custom'; savePeriod(); renderPeriod(); $('#from').focus(); return; }
-  applyPreset(e.target.value); savePeriod(); renderPeriod(); loadData();
+  applyPreset(e.target.value); periodApplied();
 });
 ['from', 'to'].forEach(id => {
   $('#' + id).addEventListener('change', e => { ui.period[id] = e.target.value; ui.period.preset = 'custom'; savePeriod(); renderPeriod(); });
@@ -221,59 +311,133 @@ $('#preset').addEventListener('change', e => {
 $('#btnApply').onclick = () => {
   const p = ui.period;
   if (!p.from || !p.to || p.from > p.to) return toast('请选择有效的日期范围', 'err');
-  loadData();
+  periodApplied();
 };
 $('#btnRefresh').onclick = () => loadData();
 
 /* ---------------- 筛选 ---------------- */
-const FILTER_LABEL = { provider: '云厂商', ws: '业务空间', key: 'API Key', model: '模型', cc: '成本中心', dir: 'Token 类型', item: '计费项', channel: '渠道', q: '关键字' };
+const FILTER_LABEL = { provider: '云厂商', ws: '业务空间', cc: '成本中心', owner: '负责人', key: 'API Key', model: '模型', dir: 'Token 类型', item: '计费项', channel: '渠道', q: '关键字' };
 const DIR_LABEL = { in: '输入（含缓存）', out: '输出', emb: '向量', other: '其他' };
 function filterValueLabel(k, v) {
-  if (k === 'ws') return v === '__nows' ? '（未归属）' : wsName(v);
+  if (k === 'ws') return v === NO_WS ? '（未归属）' : wsName(v);
   if (k === 'provider') return PROVIDERS[v] || v;
   if (k === 'cc') return v === NO_CC ? '（未分配）' : ccName(v);
+  if (k === 'owner') return v === NO_OWNER ? '（未指定）' : ownerName(v);
   if (k === 'key') return keyShort(v);
   if (k === 'dir') return DIR_LABEL[v] || v;
   if (k === 'item') return ioInfo(v).label;
   if (k === 'channel') return channelLabel(v);
   return v;
 }
+const byName = (a, b) => a[1].localeCompare(b[1], 'zh-CN');
+/**
+ * 级联筛选栏：每个下拉框只列出在其余筛选条件下有关联的取值（例如选择业务空间后，API Key 只列出该空间内的 Key，
+ * 模型只列出这些 Key 使用过的模型）；当前选中值即使不在范围内也保留显示，避免“看不到自己选了什么”。
+ */
 function renderFilters(r) {
   const bar = $('#filterbar'), more = $('#moreFilters'), chips = $('#chips');
   if (!r.filters || !state.data) { bar.hidden = more.hidden = chips.hidden = true; return; }
-  const f = ui.f, L = state.lines;
-  const wsOpts = [...state.workspaces.entries()].map(([k, w]) => [k, (w.workspaceName || w.workspaceId) + (w.deletedAt ? '（已删除）' : '')]).sort((a, b) => a[1].localeCompare(b[1], 'zh-CN'));
-  if (L.some(l => !l.wsKey)) wsOpts.push(['__nows', '（未归属业务空间）']);
-  const keyIds = [...state.apiKeys.keys()].sort((a, b) => keyShort(a).localeCompare(keyShort(b), 'zh-CN'));
-  if (L.some(l => !l.apiKeyId)) keyIds.push(NONE_KEY);
-  const models = uniq(L.map(l => l.model)).sort();
-  const ccs = uniq([...state.apiKeys.values()].map(k => k.costCenter).filter(Boolean)).sort((a, b) => a.localeCompare(b, 'zh-CN'));
+  const f = ui.f;
+  const fv = d => { const s = new Set(facetValues(d)); if (isSet(d, f[d])) s.add(f[d]); return s; };
+  /**
+   * 上级维度（云厂商 / 业务空间 / 成本中心 / 负责人 / 模型）：匹配的取值在前，不匹配当前筛选的取值放在“其他”分组，
+   * 仍可直接切换（选择后自动清除冲突的筛选）；API Key 只列出匹配的取值。
+   */
+  const others = (d, match, toOpt, sort = (a, b) => String(a).localeCompare(String(b), 'zh-CN')) => {
+    const rest = [...facetValues(d, emptyFilters())].filter(v => !match.has(v)).sort(sort);
+    return rest.length ? `<optgroup label="其他（不匹配当前筛选，选择后清除冲突条件）">${rest.map(toOpt).join('')}</optgroup>` : '';
+  };
   const cls = v => (v ? 'inp active' : 'inp');
-  const moreCount = ['dir', 'item'].filter(k => f[k]).length + (f.channel !== '__all' ? 1 : 0);
+  const sel = (d, label, allLabel, body, extra = '') => `<select class="${cls(isSet(d, f[d]))}" data-f="${d}" aria-label="${label}" title="${label}${extra}">${opt(d === 'channel' ? '__all' : '', allLabel, f[d])}${body}</select>`;
+  // Key 元数据按维度分组计数（业务空间 / 成本中心 下拉显示关联 Key 数）
+  const keySet = fv('key');
+  const keyCount = dim => { const m = new Map(); for (const id of keySet) { const k = state.apiKeys.get(id); if (!k) continue; const v = dim === 'ws' ? k.wsKey || NO_WS : dim === 'cc' ? k.costCenter || NO_CC : dim === 'owner' ? k.owner || NO_OWNER : k.provider || 'aliyun'; m.set(v, (m.get(v) || 0) + 1); } return m; };
+  const withCount = (m, v, name) => (m.get(v) ? `${name} · ${m.get(v)} 个 Key` : name);
+  // 业务空间
+  const wsCnt = keyCount('ws');
+  const wsLabel = v => (v === NO_WS ? '（未归属业务空间）' : (wsName(v) + (state.workspaces.get(v)?.deletedAt ? '（已删除）' : '')));
+  const wsSet = fv('ws');
+  const wsOpts = [...wsSet].map(v => [v, wsLabel(v)]).sort((a, b) => (a[0] === NO_WS) - (b[0] === NO_WS) || byName(a, b));
+  const wsOther = others('ws', wsSet, v => opt(v, wsLabel(v), f.ws), (a, b) => (a === NO_WS) - (b === NO_WS) || wsLabel(a).localeCompare(wsLabel(b), 'zh-CN'));
+  // API Key：未选业务空间时按业务空间分组（optgroup），选中后只列出该空间的 Key
+  const keyIds = [...keySet].filter(id => id !== NONE_KEY).sort((a, b) => keyShort(a).localeCompare(keyShort(b), 'zh-CN'));
+  const keyOpt = id => opt(id, `${keyShort(id)} · ${id}`, f.key);
+  let keyBody;
+  const groups = new Map();
+  for (const id of keyIds) { const w = state.apiKeys.get(id)?.wsKey || NO_WS; if (!groups.has(w)) groups.set(w, []); groups.get(w).push(id); }
+  if (!f.ws && groups.size > 1) {
+    keyBody = [...groups.entries()].map(([w, ids]) => [w, w === NO_WS ? '（未归属业务空间）' : wsName(w), ids]).sort((a, b) => (a[0] === NO_WS) - (b[0] === NO_WS) || a[1].localeCompare(b[1], 'zh-CN'))
+      .map(([w, name, ids]) => `<optgroup label="${esc(`${name}${multiCloud() ? ' · ' + (PROVIDERS[state.workspaces.get(w)?.provider] || '') : ''}（${ids.length}）`)}">${ids.map(keyOpt).join('')}</optgroup>`).join('');
+  } else keyBody = keyIds.map(keyOpt).join('');
+  if (keySet.has(NONE_KEY)) keyBody += opt(NONE_KEY, '无 API Key（控制台/订阅）', f.key);
+  // 模型：多云时按云厂商分组
+  const modelSet = fv('model');
+  const models = [...modelSet].sort();
+  let modelBody = models.map(m => opt(m, m, f.model)).join('');
+  if (multiCloud() && !f.provider) {
+    const pm = new Map();
+    for (const l of state.lines) if (modelSet.has(l.model)) { if (!pm.has(l.provider)) pm.set(l.provider, new Set()); pm.get(l.provider).add(l.model); }
+    if (pm.size > 1) modelBody = state.providers.filter(p => pm.has(p)).map(p => `<optgroup label="${esc(PROVIDERS[p])}">${[...pm.get(p)].sort().map(m => opt(m, m, f.model)).join('')}</optgroup>`).join('');
+  }
+  modelBody += others('model', modelSet, m => opt(m, m, f.model));
+  const ccSet = fv('cc'), ccVals = [...ccSet], ccCnt = keyCount('cc');
+  const showCc = hasTags() || f.cc;
+  const ccLabel = v => (v === NO_CC ? '（未分配成本中心）' : v);
+  const ccBody = ccVals.filter(v => v !== NO_CC).map(v => [v, v]).sort(byName).map(([v, n]) => opt(v, withCount(ccCnt, v, n), f.cc)).join('') + (ccVals.includes(NO_CC) ? opt(NO_CC, withCount(ccCnt, NO_CC, '（未分配成本中心）'), f.cc) : '')
+    + others('cc', ccSet, v => opt(v, ccLabel(v), f.cc), (a, b) => (a === NO_CC) - (b === NO_CC) || a.localeCompare(b, 'zh-CN'));
+  const provVals = fv('provider');
+  const moreCount = ['owner', 'dir', 'item'].filter(k => f[k]).length + (f.channel !== '__all' ? 1 : 0);
   bar.hidden = false;
   bar.innerHTML = `<div class="fgroup">
-    ${multiCloud() || f.provider ? `<select class="${cls(f.provider)}" data-f="provider" aria-label="云厂商" title="云厂商">${opt('', '全部云厂商', f.provider)}${state.providers.map(p => opt(p, PROVIDERS[p], f.provider)).join('')}</select>` : ''}
-    <select class="${cls(f.ws)}" data-f="ws" aria-label="业务空间" title="业务空间">${opt('', '全部业务空间', f.ws)}${wsOpts.map(([k, n]) => opt(k, n, f.ws)).join('')}</select>
-    <select class="${cls(f.key)}" data-f="key" aria-label="API Key" title="API Key">${opt('', '全部 API Key', f.key)}${keyIds.map(id => opt(id, id === NONE_KEY ? '无 API Key（控制台/订阅）' : `${keyShort(id)} · ${id}`, f.key)).join('')}</select>
-    <select class="${cls(f.model)}" data-f="model" aria-label="模型" title="模型">${opt('', '全部模型', f.model)}${models.map(m => opt(m, m, f.model)).join('')}</select>
-    ${ccs.length || f.cc ? `<select class="${cls(f.cc)}" data-f="cc" aria-label="成本中心" title="成本中心">${opt('', '全部成本中心', f.cc)}${ccs.map(c => opt(c, c, f.cc)).join('')}${opt(NO_CC, '（未分配成本中心）', f.cc)}</select>` : ''}
+    ${multiCloud() || f.provider ? sel('provider', '云厂商', '全部云厂商', state.providers.filter(p => provVals.has(p) || p === f.provider).map(p => opt(p, PROVIDERS[p], f.provider)).join('') + others('provider', provVals, p => opt(p, PROVIDERS[p] || p, f.provider))) : ''}
+    ${sel('ws', '业务空间', `全部业务空间（${wsOpts.length}）`, wsOpts.map(([k, n]) => opt(k, withCount(wsCnt, k, n), f.ws)).join('') + wsOther, '：选择后 API Key、模型等下拉框只列出该空间关联的取值')}
+    ${sel('key', 'API Key', `全部 API Key（${keyIds.length + (keySet.has(NONE_KEY) ? 1 : 0)}）`, keyBody, f.ws ? `（${filterValueLabel('ws', f.ws)}）` : '：按业务空间分组')}
+    ${sel('model', '模型', `全部模型（${models.length}）`, modelBody)}
+    ${showCc ? sel('cc', '成本中心', '全部成本中心', ccBody) : ''}
     <button class="btn" id="btnMore" aria-expanded="${ui.moreFilters}" aria-controls="moreFilters">${icon('filter')}更多筛选${moreCount ? `<span class="count">${moreCount}</span>` : ''}</button>
     <div class="search">${icon('search')}<input class="inp" type="search" data-f="q" value="${esc(f.q)}" placeholder="搜索 Key、模型、成本中心…（/）" title="搜索 Key、描述、模型、业务空间、成本中心、负责人（快捷键 /）" aria-label="关键字搜索（快捷键 /）"></div>
     </div>
     <div class="metric"><span class="lbl">费用口径</span><div class="seg sm" role="group" aria-label="费用口径">${Object.entries(METRICS).map(([k, l]) => `<button type="button" data-metric="${k}" aria-pressed="${f.metric === k}" title="${k === 'pretax' ? '扣除优惠与优惠券后的税前金额' : k === 'gross' ? '官网目录价金额' : '扣除优惠后的金额'}">${l.replace('金额', '')}</button>`).join('')}</div></div>`;
   more.hidden = !ui.moreFilters;
   if (ui.moreFilters) {
-    const channels = uniq(L.map(l => l.channel)).sort();
-    const items = uniq(L.map(l => l.io).filter(Boolean)).sort();
+    const dirs = fv('dir'), items = [...fv('item')].filter(Boolean).sort(), channels = [...fv('channel')].sort();
+    const ownSet = fv('owner'), owners = [...ownSet], ownCnt = keyCount('owner');
+    const ownLabel = v => (v === NO_OWNER ? '（未指定负责人）' : v);
     more.innerHTML = `
-      <select class="${cls(f.dir)}" data-f="dir" aria-label="Token 类型">${opt('', '全部 Token 类型', f.dir)}${Object.entries(DIR_LABEL).map(([k, l]) => opt(k, l, f.dir)).join('')}</select>
-      <select class="${cls(f.item)}" data-f="item" aria-label="计费项">${opt('', '全部计费项', f.item)}${items.map(i => opt(i, `${ioInfo(i).label}（${i}）`, f.item)).join('')}</select>
-      <select class="${cls(f.channel !== '__all')}" data-f="channel" aria-label="调用渠道">${opt('__all', '全部调用渠道', f.channel)}${channels.map(c => opt(c, channelLabel(c), f.channel)).join('')}</select>`;
+      ${hasTags() || f.owner ? sel('owner', '负责人', '全部负责人', owners.filter(v => v !== NO_OWNER).map(v => [v, v]).sort(byName).map(([v, n]) => opt(v, withCount(ownCnt, v, n), f.owner)).join('') + (owners.includes(NO_OWNER) ? opt(NO_OWNER, withCount(ownCnt, NO_OWNER, '（未指定负责人）'), f.owner) : '')
+        + others('owner', ownSet, v => opt(v, ownLabel(v), f.owner), (a, b) => (a === NO_OWNER) - (b === NO_OWNER) || a.localeCompare(b, 'zh-CN'))) : ''}
+      ${sel('dir', 'Token 类型', '全部 Token 类型', Object.entries(DIR_LABEL).filter(([k]) => dirs.has(k)).map(([k, l]) => opt(k, l, f.dir)).join(''))}
+      ${sel('item', '计费项', `全部计费项（${items.length}）`, items.map(i => opt(i, `${ioInfo(i).label}（${i}）`, f.item)).join(''))}
+      ${sel('channel', '调用渠道', '全部调用渠道', channels.map(c => opt(c, channelLabel(c), f.channel)).join(''))}`;
   }
-  const act = Object.keys(FILTER_LABEL).filter(k => (k === 'channel' ? f.channel !== '__all' : f[k]));
+  const act = Object.keys(FILTER_LABEL).filter(k => isSet(k, f[k]));
   chips.hidden = !act.length;
   chips.innerHTML = act.map(k => `<span class="fchip">${FILTER_LABEL[k]}：<b>${esc(filterValueLabel(k, f[k]))}</b><button type="button" data-unf="${k}" aria-label="移除筛选 ${FILTER_LABEL[k]}">${icon('x')}</button></span>`).join('')
-    + (act.length > 1 ? '<button class="link" data-unf="*" style="font-size:12px;margin-left:4px">清除全部</button>' : '');
+    + (act.length > 1 ? '<button class="link" data-unf="*" style="font-size:12px;margin-left:4px">清除全部</button>' : '')
+    + (act.length ? scopeSummary() : '');
+}
+/** 当前筛选范围摘要：关联的业务空间 / Key / 模型数量与费用占比 */
+function scopeSummary() {
+  const L = filterLines();
+  if (!state.lines.length) return '';
+  const cost = sum(L, metricVal), all = sum(state.lines, metricVal);
+  const n = fn => new Set(L.filter(l => metricVal(l) || l.tokens).map(fn)).size;
+  const wsN = n(l => l.wsKey), keyN = n(l => l.apiKeyId || NONE_KEY), mN = n(l => l.model);
+  return `<span class="scope-sum" title="当前筛选范围内有费用或用量的业务空间、API Key、模型数量，以及费用占全部的比例">范围：<b>${wsN}</b> 个业务空间 · <b>${keyN}</b> 个 Key · <b>${mN}</b> 个模型 · <b>${esc(money(cost))}</b>${all > 0 ? `（占全部 ${pct(cost, all)}）` : ''}</span>`;
+}
+/**
+ * 联动校验：改变某个筛选后，清除与之不再匹配的其他筛选（例如切换业务空间后，原先选中的其他空间的 Key 会被清除），
+ * 返回被清除的 [维度, 原值] 列表。
+ */
+function resolveConflicts(changed) {
+  const out = [];
+  if (!state.lines.length && !state.apiKeys.size) return out;
+  for (const d of ['item', 'dir', 'channel', 'model', 'key', 'owner', 'cc', 'ws', 'provider']) {
+    if (d === changed || !isSet(d, ui.f[d])) continue;
+    if (!state.lines.length && ['item', 'dir', 'channel', 'model'].includes(d)) continue; // 本期无账单时无法判断，保留
+    if (!facetValues(d).has(ui.f[d])) { out.push([d, ui.f[d]]); ui.f[d] = d === 'channel' ? '__all' : ''; }
+  }
+  return out;
 }
 
 /* ---------------- 提示 ---------------- */
@@ -379,7 +543,14 @@ document.addEventListener('click', async e => {
   const back = e.target.closest('[data-back]');
   if (back) { e.preventDefault(); app.back(back.dataset.back); return; }
   const go = e.target.closest('[data-go]');
-  if (go) { e.preventDefault(); closePop(); app.go(go.dataset.go); return; }
+  if (go) { e.preventDefault(); closePop(); if ($('#drawer').open && go.closest('#drawer')) $('#drawer').close(); app.go(go.dataset.go); return; }
+  // 行内下钻链接：模型详情抽屉 / 当日明细抽屉 / 追加筛选（data-scope 为 JSON 范围）
+  const dm = e.target.closest('[data-model]');
+  if (dm) { e.preventDefault(); app.openModel(dm.dataset.model, parseScope(dm.dataset.scope)); return; }
+  const dd = e.target.closest('[data-day]');
+  if (dd) { e.preventDefault(); app.openDay(dd.dataset.day, parseScope(dd.dataset.scope)); return; }
+  const fp = e.target.closest('[data-fpatch]');
+  if (fp) { e.preventDefault(); let patch = null; try { patch = JSON.parse(fp.dataset.fpatch); } catch { /* ignore */ } if (patch && typeof patch === 'object') { if ($('#drawer').open && fp.closest('#drawer')) $('#drawer').close(); app.setFilter(patch, fp.dataset.fgo || null, fp.dataset.freset === '1'); } return; }
   const seg = e.target.closest('[data-seg]');
   if (seg) { ui[seg.dataset.seg] = seg.dataset.v; if (seg.dataset.seg === 'density') LS.set('bc.density', seg.dataset.v); render(); return; }
   const met = e.target.closest('[data-metric]');
@@ -394,9 +565,16 @@ document.addEventListener('click', async e => {
   const close = e.target.closest('[data-close]');
   if (close) close.closest('dialog').close();
 });
+const parseScope = s => { if (!s) return null; try { const o = JSON.parse(s); return o && typeof o === 'object' ? o : null; } catch { return null; } };
 document.addEventListener('change', e => {
   const t = e.target.closest('[data-f]');
-  if (t && t.dataset.f !== 'q') { ui.f[t.dataset.f] = t.value; render(); }
+  if (!t || t.dataset.f === 'q') return;
+  const d = t.dataset.f;
+  ui.f[d] = t.value;
+  const cleared = isSet(d, t.value) ? resolveConflicts(d) : [];
+  if (cleared.length) toast(`已联动清除不再匹配的筛选：${cleared.map(([k, v]) => `${FILTER_LABEL[k]}「${filterValueLabel(k, v)}」`).join('、')}`, '', 3600);
+  refocus = d; // 重绘后焦点回到刚操作的下拉框，便于继续用键盘调整
+  commitUrl();
 });
 let qTimer;
 document.addEventListener('input', e => {
@@ -405,7 +583,7 @@ document.addEventListener('input', e => {
   qTimer = setTimeout(() => {
     ui.f.q = t.value;
     const pos = t.selectionStart;
-    render();
+    commitUrl(true);
     const n = $('[data-f="q"]'); if (n) { n.focus(); n.setSelectionRange(pos, pos); }
   }, 300);
 });
@@ -414,7 +592,7 @@ document.addEventListener('keydown', e => {
   const typing = /INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName || '') || document.activeElement?.isContentEditable;
   if (typing || document.querySelector('dialog[open]') || e.ctrlKey || e.metaKey || e.altKey) return;
   if (e.key === '/') { const q = $('[data-f="q"]'); if (q) { e.preventDefault(); q.focus(); } }
-  if (route.name === 'key' && (e.key === '[' || e.key === ']')) { const b = $(`[data-nav="${e.key === '[' ? 'prev' : 'next'}"]`); if (b) { e.preventDefault(); b.click(); } }
+  if ((route.name === 'key' || route.name === 'group') && (e.key === '[' || e.key === ']')) { const b = $(`[data-nav="${e.key === '[' ? 'prev' : 'next'}"]`); if (b) { e.preventDefault(); b.click(); } }
 });
 async function copyText(t) {
   try { await navigator.clipboard.writeText(t); }
@@ -532,6 +710,8 @@ async function start() {
   if (!ui.period.cycle || ui.period.cycle > state.today.slice(0, 7)) ui.period.cycle = state.today.slice(0, 7);
   if (ui.period.mode === 'range' && ui.period.preset !== 'custom') applyPreset(ui.period.preset);
   route = parseHash();
+  applyQuery(); // 分享链接 / 书签中的周期与筛选优先
+  canonicalize();
   render();
   await loadData();
   setInterval(poll, 20_000);

@@ -119,7 +119,7 @@ export const state = {
 export const ui = {
   tab: 'overview',
   period: { mode: 'month', cycle: '', preset: '30', from: '', to: '', ...LS.get('bc.period', {}) },
-  f: { provider: '', ws: '', key: '', model: '', cc: '', channel: '__all', dir: '', item: '', q: '', metric: LS.get('bc.metric', 'pretax') },
+  f: { provider: '', ws: '', key: '', model: '', cc: '', owner: '', channel: '__all', dir: '', item: '', q: '', metric: LS.get('bc.metric', 'pretax') },
   moreFilters: false, onlySpent: false,
   trendMode: 'daily', trendBy: 'key', compBy: 'ws', varBy: 'key', hmMetric: 'cost', adminTab: 'aliyun',
   density: LS.get('bc.density', 'normal'),
@@ -138,6 +138,12 @@ export const brandName = () => state.status?.branding?.name || '大模型费用�
 /** 是否有任一 Key 设置了成本中心 / 负责人 */
 export const hasTags = () => [...state.apiKeys.values()].some(k => k.costCenter || k.owner);
 export const NO_CC = '__nocc__';
+export const NO_WS = '__nows';
+export const NO_OWNER = '__noowner__';
+/** 全局筛选维度（不含关键字与费用口径） */
+export const FILTER_DIMS = ['provider', 'ws', 'cc', 'owner', 'key', 'model', 'dir', 'item', 'channel'];
+export const emptyFilters = () => ({ provider: '', ws: '', key: '', model: '', cc: '', owner: '', channel: '__all', dir: '', item: '', q: '' });
+export const isSet = (k, v) => (k === 'channel' ? v !== '__all' && v != null : !!v);
 
 /* =========================================================================
  * 对话框：动态创建 <dialog>，支持表单提交（返回 Promise）
@@ -303,17 +309,21 @@ export const normModel = s => String(s || '').toLowerCase().replace(/[^a-z0-9.]/
  * 按当前全局筛选过滤用量行（云厂商、Key、模型、成本中心、业务空间）。
  * Token 类型 / 计费项 / 渠道筛选无法作用于请求数，此时返回 null（页面显示“—”而不是错误的数字）。
  */
-export function usageFiltered(rows = state.usageRows) {
-  const f = ui.f;
+export function usageFiltered(rows = state.usageRows, f = ui.f) {
   if (f.dir || f.item || f.channel !== '__all') return null;
   const nm = f.model ? normModel(f.model) : '';
   return rows.filter(u => {
     if (f.provider && u.provider !== f.provider) return false;
-    if (f.key && u.apiKeyId !== f.key) return false;
+    if (f.key && (u.apiKeyId || NONE_KEY) !== f.key) return false;
     if (nm && normModel(u.model) !== nm) return false;
     const k = state.apiKeys.get(u.apiKeyId);
     if (f.cc && (f.cc === NO_CC ? !!k?.costCenter : k?.costCenter !== f.cc)) return false;
-    if (f.ws && (f.ws === '__nows' ? !!k?.wsKey : (k?.wsKey || '') !== f.ws)) return false;
+    if (f.owner && (f.owner === NO_OWNER ? !!k?.owner : k?.owner !== f.owner)) return false;
+    if (f.ws && (f.ws === NO_WS ? !!k?.wsKey : (k?.wsKey || '') !== f.ws)) return false;
+    if (f.q) {
+      const q = f.q.trim().toLowerCase();
+      if (q && !`${u.apiKeyId} ${keyDesc(u.apiKeyId)} ${u.model} ${wsName(k?.wsKey || '')} ${k?.costCenter || ''} ${k?.owner || ''} ${PROVIDERS[u.provider] || ''}`.toLowerCase().includes(q)) return false;
+    }
     return true;
   });
 }
@@ -368,7 +378,7 @@ function finalize() {
     for (const l of state.lines) { const k = f(l); t.set(k, (t.get(k) || 0) + l.pretax + l.gross * 1e-6); }
     return new Map([...t.entries()].filter(e => e[1] > 0).sort((a, b) => b[1] - a[1]).slice(0, 7).map((e, i) => [e[0], i]));
   };
-  for (const l of all) l.cc = (l.apiKeyId && state.apiKeys.get(l.apiKeyId)?.costCenter) || '';
+  for (const l of all) { const k = l.apiKeyId && state.apiKeys.get(l.apiKeyId); l.cc = (k && k.costCenter) || ''; l.owner = (k && k.owner) || ''; }
   state.colors = { key: rank(l => l.apiKeyId || NONE_KEY), model: rank(l => l.model), ws: rank(l => l.wsKey) };
   state.currency = state.lines.find(l => l.currency)?.currency || 'CNY';
   const used = new Set([...(state.data?.providers || []), ...[...state.apiKeys.values()].map(k => k.provider || 'aliyun'), ...state.lines.map(l => l.provider)]);
@@ -394,14 +404,108 @@ export function wsName(wsKey) {
 const colorFrom = (map, id) => { const i = map.get(id); return i == null ? 'var(--other)' : `var(--s${i + 1})`; };
 export const keyColor = id => colorFrom(state.colors.key, id || NONE_KEY);
 const PROV_COLOR = { aliyun: 'var(--s2)', tencent: 'var(--s1)' };
-export const ccName = cc => (cc ? cc : '（未分配成本中心）');
+export const ccName = cc => (cc && cc !== NO_CC ? cc : '（未分配成本中心）');
+export const ownerName = o => (o && o !== NO_OWNER ? o : '（未指定负责人）');
+const hashColor = id => (id ? `var(--s${(Math.abs([...id].reduce((h, c) => (h * 31 + c.charCodeAt(0)) | 0, 7)) % 7) + 1})` : 'var(--other)');
 export const DIMS = {
   key: { label: 'API Key', of: l => l.apiKeyId || NONE_KEY, short: keyShort, color: keyColor },
   model: { label: '模型', of: l => l.model, short: id => id, color: id => colorFrom(state.colors.model, id) },
-  ws: { label: '业务空间', of: l => l.wsKey, short: id => wsName(id), color: id => colorFrom(state.colors.ws, id) },
+  ws: { label: '业务空间', of: l => l.wsKey, short: id => wsName(id === NO_WS ? '' : id), color: id => colorFrom(state.colors.ws, id === NO_WS ? '' : id) },
   provider: { label: '云厂商', of: l => l.provider, short: id => PROVIDERS[id] || id, color: id => PROV_COLOR[id] || 'var(--other)' },
-  cc: { label: '成本中心', of: l => l.cc, short: ccName, color: id => (id ? `var(--s${(Math.abs([...id].reduce((h, c) => h * 31 + c.charCodeAt(0), 7)) % 7) + 1})` : 'var(--other)') },
+  cc: { label: '成本中心', of: l => l.cc, short: ccName, color: id => hashColor(id === NO_CC ? '' : id) },
+  owner: { label: '负责人', of: l => l.owner, short: ownerName, color: id => hashColor(id === NO_OWNER ? '' : id) },
 };
+
+/* =========================================================================
+ * 维度联动：维度值（含“未归属”哨兵值）、全局筛选 ↔ 维度、实体范围（scope）
+ *  - 维度值 dimVal：ws / cc / owner 的空值统一为 NO_WS / NO_CC / NO_OWNER，与全局筛选取值一致
+ *  - scope：{ provider?, ws?, cc?, owner?, key?, model?, global? }；global=true 表示在全局筛选基础上再限定，
+ *    否则只按 scope 自身限定（实体详情页：业务空间 / Key 详情不受全局筛选影响）
+ * ========================================================================= */
+export const SCOPE_DIMS = ['provider', 'ws', 'cc', 'owner', 'key', 'model'];
+export const dimVal = {
+  provider: l => l.provider, ws: l => l.wsKey || NO_WS, cc: l => l.cc || NO_CC, owner: l => l.owner || NO_OWNER,
+  key: l => l.apiKeyId || NONE_KEY, model: l => l.model, dir: l => l.ioi.dir, item: l => l.io, channel: l => l.channel,
+};
+/** Key 元数据在某维度上的取值（无消费的 Key 也能关联到业务空间 / 成本中心 / 负责人） */
+export const keyDimVal = {
+  provider: k => k.provider || 'aliyun', ws: k => k.wsKey || NO_WS, cc: k => k.costCenter || NO_CC, owner: k => k.owner || NO_OWNER, key: k => k.apiKeyId,
+};
+export const dimName = (dim, v) => (dim === 'ws' ? (v === NO_WS ? '（未归属业务空间）' : wsName(v)) : dim === 'cc' ? ccName(v) : dim === 'owner' ? ownerName(v)
+  : dim === 'provider' ? PROVIDERS[v] || v : dim === 'key' ? keyShort(v) : v);
+export const DIM_LABEL = { provider: '云厂商', ws: '业务空间', cc: '成本中心', owner: '负责人', key: 'API Key', model: '模型' };
+const scopeObj = s => (typeof s === 'string' ? { key: s } : s || null);
+const lineIn = (l, s) => SCOPE_DIMS.every(d => s[d] == null || dimVal[d](l) === s[d]);
+/** 按范围取账单行；scope 为空时等同全局筛选 */
+export function scopeLines(arr, scope) {
+  const s = scopeObj(scope);
+  if (!s) return filterLines(arr);
+  return (s.global ? filterLines(arr) : arr).filter(l => lineIn(l, s));
+}
+/** 按范围取用量行（请求次数）；全局筛选中有 Token 类型 / 计费项 / 渠道时返回 null */
+export function scopeUsage(scope) {
+  const s = scopeObj(scope);
+  if (!s) return usageFiltered();
+  const base = s.global ? usageFiltered() : state.usageRows;
+  if (!base) return null;
+  const nm = s.model != null ? normModel(s.model) : null;
+  return base.filter(u => {
+    const k = state.apiKeys.get(u.apiKeyId) || {};
+    if (s.provider != null && u.provider !== s.provider) return false;
+    if (s.key != null && (u.apiKeyId || NONE_KEY) !== s.key) return false;
+    if (s.ws != null && (k.wsKey || NO_WS) !== s.ws) return false;
+    if (s.cc != null && (k.costCenter || NO_CC) !== s.cc) return false;
+    if (s.owner != null && (k.owner || NO_OWNER) !== s.owner) return false;
+    if (nm != null && normModel(u.model) !== nm) return false;
+    return true;
+  });
+}
+export const scopeLabel = scope => { const s = scopeObj(scope); return s ? SCOPE_DIMS.filter(d => s[d] != null).map(d => dimName(d, s[d])).join(' · ') : ''; };
+/** 范围 → 全局筛选补丁（用于“按此筛选 / 账单明细”） */
+export const scopeFilter = scope => { const s = scopeObj(scope) || {}; return Object.fromEntries(SCOPE_DIMS.filter(d => s[d] != null).map(d => [d, s[d]])); };
+/** 业务空间 / 成本中心 / 负责人 / 云厂商 详情页地址 */
+export const groupHash = (dim, id) => `#/group/${dim}/${encodeURIComponent(id)}`;
+/** 维度值的“详情”跳转地址：Key → Key 详情；业务空间 / 成本中心 / 负责人 / 云厂商 → 分组详情；模型无页面（抽屉） */
+export const entityHash = (dim, v) => (dim === 'key' ? (v && v !== NONE_KEY ? `#/key/${encodeURIComponent(v)}` : null) : ['ws', 'cc', 'owner', 'provider'].includes(dim) ? groupHash(dim, v) : null);
+/** 维度值的行内链接按钮（表格单元格内使用；表格行点击会忽略按钮） */
+export function dimLink(dim, v, text = dimName(dim, v), scope = null) {
+  if (dim === 'model') return `<button type="button" class="lnk" data-model="${esc(v)}"${scope ? ` data-scope="${esc(JSON.stringify(scope))}"` : ''} title="查看模型详情：${esc(v)}">${esc(text)}</button>`;
+  const h = entityHash(dim, v);
+  return h ? `<button type="button" class="lnk" data-go="${esc(h)}" title="${esc(`查看${DIM_LABEL[dim] || ''}详情：${dimName(dim, v)}`)}">${esc(text)}</button>` : esc(text);
+}
+
+/**
+ * 级联筛选：某维度在“其余筛选条件”下的可选值集合。
+ * 来源 = 符合其余条件的账单行 + 符合其余条件的 Key 元数据（无消费的 Key / 业务空间也可被关联出来）。
+ * 其余条件中含模型 / Token 类型 / 计费项 / 渠道 / 关键字时，只能由账单行决定。
+ */
+const facetMemo = new WeakMap();
+export function facetValues(dim, f = ui.f) {
+  const g = { ...f, [dim]: dim === 'channel' ? '__all' : '' };
+  const sig = dim + '|' + JSON.stringify(g);
+  let memo = facetMemo.get(state.lines);
+  if (!memo) facetMemo.set(state.lines, memo = new Map());
+  if (memo.has(sig)) return memo.get(sig);
+  const set = new Set();
+  for (const l of filterWith(state.lines, g)) set.add(dimVal[dim](l));
+  const lineOnly = ['model', 'dir', 'item', 'channel', 'q'].some(k => isSet(k, g[k]));
+  if (keyDimVal[dim] && !lineOnly) {
+    for (const k of state.apiKeys.values()) if (keyMatch(k, g)) set.add(keyDimVal[dim](k));
+    if (dim === 'ws' && !g.key && !g.cc && !g.owner) for (const w of state.workspaces.values()) if (!g.provider || (w.provider || 'aliyun') === g.provider) set.add(w.workspaceId);
+  }
+  if (memo.size > 200) memo.clear();
+  memo.set(sig, set);
+  return set;
+}
+/** Key 元数据是否满足筛选中的元数据条件（云厂商 / 业务空间 / 成本中心 / 负责人 / Key） */
+export function keyMatch(k, f = ui.f) {
+  if (f.provider && (k.provider || 'aliyun') !== f.provider) return false;
+  if (f.ws && (k.wsKey || NO_WS) !== f.ws) return false;
+  if (f.cc && (k.costCenter || NO_CC) !== f.cc) return false;
+  if (f.owner && (k.owner || NO_OWNER) !== f.owner) return false;
+  if (f.key && k.apiKeyId !== f.key) return false;
+  return true;
+}
 
 /* =========================================================================
  * 过滤与聚合
@@ -413,30 +517,31 @@ export function filterLines(arr = state.lines) {
   const sig = JSON.stringify(ui.f);
   const hit = filterMemo.get(arr);
   if (hit && hit.sig === sig) return hit.out;
-  const out = filterLinesRaw(arr);
+  const out = filterWith(arr, ui.f);
   filterMemo.set(arr, { sig, out });
   return out;
 }
-function filterLinesRaw(arr) {
-  const f = ui.f, q = f.q.trim().toLowerCase();
+/** 按任意筛选条件过滤（不缓存；级联筛选计算可选值时使用） */
+export function filterWith(arr, f) {
+  const q = (f.q || '').trim().toLowerCase();
   return arr.filter(l => {
     if (f.provider && l.provider !== f.provider) return false;
     if (f.cc && (f.cc === NO_CC ? !!l.cc : l.cc !== f.cc)) return false;
-    if (f.ws && (f.ws === '__nows' ? !!l.wsKey : l.wsKey !== f.ws)) return false;
+    if (f.owner && (f.owner === NO_OWNER ? !!l.owner : l.owner !== f.owner)) return false;
+    if (f.ws && (f.ws === NO_WS ? !!l.wsKey : l.wsKey !== f.ws)) return false;
     if (f.key && (l.apiKeyId || NONE_KEY) !== f.key) return false;
     if (f.model && l.model !== f.model) return false;
-    if (f.channel !== '__all' && l.channel !== f.channel) return false;
+    if (f.channel != null && f.channel !== '__all' && l.channel !== f.channel) return false;
     if (f.dir && l.ioi.dir !== f.dir) return false;
     if (f.item && l.io !== f.item) return false;
     if (q) {
-      const k = l.apiKeyId ? state.apiKeys.get(l.apiKeyId) : null;
-      const hay = `${l.apiKeyId} ${keyDesc(l.apiKeyId)} ${l.model} ${wsName(l.wsKey)} ${l.workspaceId} ${l.instanceId || ''} ${l.io} ${l.ioi.label} ${l.channel} ${l.cc} ${k?.owner || ''} ${PROVIDERS[l.provider] || ''}`.toLowerCase();
+      const hay = `${l.apiKeyId} ${keyDesc(l.apiKeyId)} ${l.model} ${wsName(l.wsKey)} ${l.workspaceId} ${l.instanceId || ''} ${l.io} ${l.ioi.label} ${l.channel} ${l.cc} ${l.owner || ''} ${PROVIDERS[l.provider] || ''}`.toLowerCase();
       if (!hay.includes(q)) return false;
     }
     return true;
   });
 }
-export const activeFilterCount = () => ['provider', 'ws', 'key', 'model', 'cc', 'dir', 'item', 'q'].filter(k => ui.f[k]).length + (ui.f.channel !== '__all' ? 1 : 0);
+export const activeFilterCount = () => ['provider', 'ws', 'key', 'model', 'cc', 'owner', 'dir', 'item', 'q'].filter(k => ui.f[k]).length + (ui.f.channel !== '__all' ? 1 : 0);
 
 export function newAgg(key) {
   return { key, cost: 0, gross: 0, pretax: 0, after: 0, tIn: 0, tCache: 0, tOut: 0, tEmb: 0, tOther: 0, units: {}, models: new Map(), keys: new Set(), wss: new Set(), days: new Map(), items: new Set(), lines: 0 };

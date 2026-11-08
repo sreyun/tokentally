@@ -3,8 +3,9 @@ import {
   $, esc, state, ui, app, http, money, moneyShort, compact, intFmt, pct, sum, uniq, metricVal, METRICS, NONE_KEY, DIMS, keyObj, keyShort, keyDesc, wsName,
   aggregate, aggAll, sortedAggs, totalTokens, deltaPill, tipRows, icon, help, segCtl, fmtTime, budgetOf, budgetLevel, forecastOf, channelLabel,
   WEEK, weekday, ioInfo, num, periodTag, daysBetween, copyBtn, PROVIDERS, provTag, isAdmin, usageAgg, normModel, REQ_SRC,
+  dimLink, NO_WS, groupHash,
 } from '../core.js';
-import { columnChart, rankList, segbar, legendList, legendHtml } from '../charts.js';
+import { columnChart, rankList, segbar, legendList, legendHtml, bindLegend, bindActivate } from '../charts.js';
 import { table, dataBar } from '../table.js';
 import { billDimsHtml } from './models.js';
 import { editTags } from './keys.js';
@@ -53,8 +54,8 @@ export function render(v, id) {
       <span class="entity-ico">${icon('key')}</span>
       <div class="entity-t"><h2>${esc(keyShort(id))} ${provTag(k?.provider, !!k)} ${statusPill}${k && !k.description && id !== NONE_KEY ? '<span class="pill warn">无描述</span>' : ''}</h2>
         <div class="sub">${id === NONE_KEY ? '账单中 API Key 为空：控制台体验、订阅套餐、托管智能体、Batch 等非 API Key 调用，或腾讯云中未匹配到 Key 用量的费用'
-          : `ID <span class="mono">${esc(id)}</span>${copyBtn(id, '复制 Key ID')} · <span class="mono">${esc(k.apiKeyValue || '—')}</span> · 业务空间 ${esc(wsName(k.wsKey))}${k.wsKey ? ` <span class="mono">${esc(k.wsKey)}</span>${copyBtn(k.wsKey, '复制业务空间ID')}` : ''} · 创建于 ${fmtTime(k.gmtCreate, false)}`}</div>
-        ${k && id !== NONE_KEY ? `<div class="tag-line">${icon('tag')}<span>成本中心 <b>${esc(k.costCenter || '未分配')}</b></span><span>负责人 <b>${esc(k.owner || '—')}</b></span>${k.note || k.remark ? `<span class="muted" title="${esc(k.note ? '本地备注' : '云厂商备注')}">${esc(k.note || k.remark)}</span>` : ''}${isAdmin() ? `<button class="link" data-edit-tags>编辑</button>` : ''}</div>` : ''}</div>
+          : `ID <span class="mono">${esc(id)}</span>${copyBtn(id, '复制 Key ID')} · <span class="mono">${esc(k.apiKeyValue || '—')}</span> · 业务空间 ${dimLink('ws', k.wsKey || NO_WS, wsName(k.wsKey))}${k.wsKey ? ` <span class="mono">${esc(k.wsKey)}</span>${copyBtn(k.wsKey, '复制业务空间ID')}` : ''} · 创建于 ${fmtTime(k.gmtCreate, false)}`}</div>
+        ${k && id !== NONE_KEY ? `<div class="tag-line">${icon('tag')}<span>成本中心 <b>${k.costCenter ? dimLink('cc', k.costCenter, k.costCenter) : '未分配'}</b></span><span>负责人 <b>${k.owner ? dimLink('owner', k.owner, k.owner) : '—'}</b></span>${k.note || k.remark ? `<span class="muted" title="${esc(k.note ? '本地备注' : '云厂商备注')}">${esc(k.note || k.remark)}</span>` : ''}${isAdmin() ? `<button class="link" data-edit-tags>编辑</button>` : ''}</div>` : ''}</div>
       <div class="row"><span class="lbl muted" style="font-size:12px">费用口径</span>${segMetric()}<button class="btn" data-key-detail>${icon('list')}账单明细</button></div>
     </div>
     ${lines.some(l => l.alloc === 1) ? `<div class="notice info">${icon('info')}<div><b>费用按用量分摊</b><span class="why">腾讯云账单按推理服务 / 模型出账、不含 API Key。该 Key 的费用 = 每天各模型（输入 / 缓存命中 / 输出）真实账单金额 × 该 Key 在对应 Token 用量中的占比，所有 Key 合计与腾讯云账单一致。</span></div></div>` : ''}
@@ -74,13 +75,13 @@ export function render(v, id) {
         ${tokenStatsHtml({ a, pa, daily, us, period: p, scope: 'key', provider: k?.provider || 'aliyun' })}</section>
       <section class="panel ${us ? 'c6' : 'c12'}"><div class="panel-h"><h3>每日 Token 消耗</h3><span class="sub">按 Token 类型堆叠 · 虚线为日均</span></div><div class="legend" id="kTokLegend"></div><div class="chart" id="kTok"></div></section>
       ${us ? `<section class="panel c6"><div class="panel-h"><h3>每日调用次数</h3>${reqHelp()}<span class="sub">成功 / 失败</span></div><div class="legend" id="kReqLegend"></div><div class="chart" id="kReq"></div></section>` : ''}
-      <section class="panel c8"><div class="panel-h"><h3>每日费用</h3><span class="sub">按模型堆叠 · 虚线为日均</span></div><div class="legend" id="kLegend"></div><div class="chart" id="kDaily"></div></section>
-      <section class="panel c4"><div class="panel-h"><h3>模型构成</h3><span class="sub">${a.models.size} 个模型</span></div><div id="kModels"></div></section>
+      <section class="panel c8"><div class="panel-h"><h3>每日费用</h3><span class="sub">按模型堆叠 · 虚线为日均 · 点击柱查看当日明细，点击柱段只看该模型</span></div><div class="legend" id="kLegend"></div><div class="chart" id="kDaily"></div></section>
+      <section class="panel c4"><div class="panel-h"><h3>模型构成</h3><span class="sub">${a.models.size} 个模型 · 点击查看该 Key 的模型详情</span></div><div id="kModels"></div></section>
       <section class="panel c6"><div class="panel-h"><h3>月度费用</h3>${help('近 12 个账期的账期账单，按模型堆叠；范围取决于同步回溯月数。')}</div><div class="legend" id="kHLegend"></div><div class="chart" id="kHist"></div></section>
       <section class="panel c6"><div class="panel-h"><h3>计费维度</h3><span class="sub">按费用拆分</span></div><div id="kDims"></div></section>
-      <section class="panel c12"><div class="panel-h"><h3>模型明细</h3><span class="sub">${esc(state.compareLabel)} · 点击查看模型详情</span><div class="actions"><button class="btn sm" id="csvM">${icon('download')}导出</button></div></div><div id="kModelTbl"></div></section>
-      <section class="panel c12"><div class="panel-h"><h3>计费项明细</h3><span class="sub">模型 × 计费项 × 单价</span><div class="actions"><button class="btn sm" id="csvI">${icon('download')}导出</button></div></div><div id="kItemTbl"></div></section>
-      <section class="panel c6"><div class="panel-h"><h3>调用渠道</h3></div><div id="kCh"></div></section>
+      <section class="panel c12"><div class="panel-h"><h3>模型明细</h3><span class="sub">${esc(state.compareLabel)} · 点击查看该 Key 在该模型上的详情</span><div class="actions"><button class="btn sm" id="csvM">${icon('download')}导出</button></div></div><div id="kModelTbl"></div></section>
+      <section class="panel c12"><div class="panel-h"><h3>计费项明细</h3><span class="sub">模型 × 计费项 × 单价 · 点击行查看对应账单明细</span><div class="actions"><button class="btn sm" id="csvI">${icon('download')}导出</button></div></div><div id="kItemTbl"></div></section>
+      <section class="panel c6"><div class="panel-h"><h3>调用渠道</h3><span class="sub">点击查看该渠道账单明细</span></div><div id="kCh"></div></section>
       <section class="panel c6"><div class="panel-h"><h3>权限与变更记录</h3>${help(`权限来自${PROVIDERS[k?.provider || 'aliyun']}同步；变更记录为每次同步检测到的描述、归属、权限等变化。`)}</div>
         <div class="kv" style="margin-bottom:14px">
           <div><span>模型权限</span><b>${!k ? '—' : k.authType === 'All' || k.allowAllModels ? '<span class="warn-text">全部模型</span>' : esc((k.accessibleModels || []).join('、') || '—')}</b></div>
@@ -98,13 +99,17 @@ export function render(v, id) {
   if (others.length) series.push({ id: '__other', label: `其他 ${others.length} 个模型`, color: 'var(--other)' });
   const cell = new Map();
   daily.forEach(l => { const kk = l.date + '|' + (colored.includes(l.model) ? l.model : '__other'); cell.set(kk, (cell.get(kk) || 0) + metricVal(l)); });
-  $('#kLegend', v).innerHTML = series.length > 1 ? legendHtml(series) : '';
+  $('#kLegend', v).innerHTML = series.length > 1 ? legendHtml(series, '点击查看该 Key 的模型详情') : '';
+  bindLegend($('#kLegend', v), m => app.openModel(m, { key: id }));
   const totalDaily = sum(daily, metricVal);
   const calDays = daysBetween(p.from, p.to < state.today ? p.to : state.today);
-  columnChart($('#kDaily', v), { xs: days, series, cell: (x, s) => cell.get(x + '|' + s) || 0, avg: days.length ? totalDaily / Math.max(1, calDays) : null, height: 260, xLabel: x => x.slice(5), tipTitle: x => `${x}（周${WEEK[weekday(x)]}）`, empty: '本期无按日费用', onX: x => app.openDay(x, id), clickHint: '点击查看当日明细' });
+  columnChart($('#kDaily', v), {
+    xs: days, series, cell: (x, s) => cell.get(x + '|' + s) || 0, avg: days.length ? totalDaily / Math.max(1, calDays) : null, height: 260, xLabel: x => x.slice(5), tipTitle: x => `${x}（周${WEEK[weekday(x)]}）`, empty: '本期无按日费用',
+    onX: x => app.openDay(x, { key: id }), onSeg: (x, m) => app.openDay(x, { key: id, model: m }), clickHint: '点击查看当日明细', segHint: '点击柱段只看该模型',
+  });
 
   // 每日 Token（按类型堆叠）与每日调用次数
-  drawDailyTokens($('#kTok', v), $('#kTokLegend', v), daily, p, { onX: x => app.openDay(x, id) });
+  drawDailyTokens($('#kTok', v), $('#kTokLegend', v), daily, p, { onX: x => app.openDay(x, { key: id }) });
   if (us) drawDailyRequests($('#kReq', v), $('#kReqLegend', v), us, p);
 
   // 模型构成
@@ -112,7 +117,8 @@ export function render(v, id) {
   const colorOfModel = m => { const i = colored.indexOf(m); return i >= 0 ? `var(--s${i + 1})` : 'var(--other)'; };
   const parts = mAgg.slice(0, 7).map(x => ({ id: x.key, label: x.key, value: x.cost, color: colorOfModel(x.key) }));
   if (mAgg.length > 7) parts.push({ id: '__other', label: `其他 ${mAgg.length - 7} 个`, value: sum(mAgg.slice(7), x => x.cost), color: 'var(--other)' });
-  $('#kModels', v).innerHTML = segbar(parts) + legendList(parts, a.cost);
+  $('#kModels', v).innerHTML = segbar(parts) + legendList(parts, a.cost, true, '点击查看该 Key 的模型详情');
+  bindActivate($('#kModels', v), '.li.clickable', li => app.openModel(li.dataset.pid, { key: id }));
 
   // 月度
   const hm = uniq(hist.map(l => l.date)).sort();
@@ -129,7 +135,7 @@ export function render(v, id) {
   const pm = aggregate(prevLines, l => l.model);
   const max = Math.max(0, ...mAgg.map(x => x.cost));
   const tm = table('keyModels', $('#kModelTbl', v), {
-    sort: 'cost', pageSize: 0, caption: '模型明细', onRowClick: r => app.openModel(r.model),
+    sort: 'cost', pageSize: 0, caption: '模型明细', onRowClick: r => app.openModel(r.model, { key: id }),
     columns: [
       { key: 'model', label: '模型', fmt: x => `<span class="sw" style="background:${colorOfModel(x)}"></span><span class="mono">${esc(x)}</span>` },
       { key: 'cost', label: `费用（${METRICS[ui.f.metric]}）`, align: 'r', fmt: x => dataBar(x, max) },
@@ -157,7 +163,7 @@ export function render(v, id) {
   // 计费项
   const byItem = aggregate(lines, l => `${l.model}\u0001${l.io}\u0001${l.listPrice}\u0001${l.usageUnit}\u0001${l.listPriceUnit}`);
   const ti = table('keyItems', $('#kItemTbl', v), {
-    sort: 'cost', pageSize: 50, caption: '计费项明细',
+    sort: 'cost', pageSize: 50, caption: '计费项明细', onRowClick: r => app.setFilter({ key: id, model: r.model, item: r.io }, '#/detail', true),
     columns: [
       { key: 'model', label: '模型', cls: 'mono' },
       { key: 'label', label: '计费项', fmt: (x, r) => `${esc(x)}<span class="sub mono">${esc(r.io)}</span>` },
@@ -175,7 +181,7 @@ export function render(v, id) {
   }));
   $('#csvI', v).onclick = () => ti.csv(`Key_${id}_计费项_${periodTag()}.csv`);
 
-  rankList($('#kCh', v), sortedAggs(aggregate(lines, l => l.channel)).map(x => ({ id: x.key, label: channelLabel(x.key), sub: x.key || '', value: x.cost })), { total: a.cost });
+  rankList($('#kCh', v), sortedAggs(aggregate(lines, l => l.channel)).map(x => ({ id: x.key, label: channelLabel(x.key), sub: x.key || '', value: x.cost })), { total: a.cost, onClick: it => app.setFilter({ key: id, channel: it.id }, '#/detail', true) });
   v.querySelector('[data-key-detail]').onclick = () => app.setFilter({ key: id }, '#/detail', true);
   v.querySelector('[data-edit-tags]')?.addEventListener('click', () => editTags([id]));
   loadChanges(v, id);

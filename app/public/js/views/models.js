@@ -2,9 +2,10 @@
 import {
   $, esc, state, ui, app, money, moneyShort, compact, intFmt, pct, sum, uniq, metricVal, METRICS, NONE_KEY, DIMS, keyShort,
   filterLines, aggregate, aggAll, sortedAggs, totalTokens, unitsText, deltaPill, tipRows, icon, help, segCtl, ioInfo, num, periodTag, WEEK, weekday, copyBtn, PROVIDERS, provTag, multiCloud, usageFiltered, usageAgg, normModel, REQ_SRC,
+  scopeLines, scopeUsage, scopeLabel, scopeFilter, dimVal, dimName, groupHash, NO_WS, callsOn, hasTags,
 } from '../core.js';
 import { tokenStatsHtml, drawDailyTokens, drawDailyRequests, periodDays, reqHelp } from '../stats.js';
-import { columnChart, rankList, stackRank, segbar, legendHtml } from '../charts.js';
+import { columnChart, rankList, stackRank, segbar, legendHtml, bindLegend } from '../charts.js';
 import { table, dataBar } from '../table.js';
 
 const TOKEN_PARTS = [{ label: '输入（非缓存）', color: 'var(--s1)' }, { label: '缓存命中', color: 'var(--s3)' }, { label: '输出', color: 'var(--s2)' }, { label: '向量', color: 'var(--s7)' }];
@@ -61,7 +62,7 @@ export function render(v) {
       <div><span>缓存命中率</span><b>${all.tIn ? pct(all.tCache, all.tIn) : '-'}</b></div>
       <div><span>输出 / 输入</span><b>${all.tIn ? (all.tOut / all.tIn * 100).toFixed(1) + '%' : '-'}</b></div>
       <div><span>单价最高（>10 万 Token）</span><b title="${esc(priciest?.model || '')}">${priciest ? esc(priciest.model) : '-'}</b></div>
-      ${reqN ? `<div><span>请求次数（腾讯云）</span><b>${compact(reqN)}</b></div><div><span>单次平均 Token</span><b>${intFmt(reqTok / reqN)}</b></div>` : ''}
+      ${reqN ? `<div><span>请求次数</span><b title="${esc(REQ_SRC)}">${compact(reqN)}</b></div><div><span>单次平均 Token</span><b>${intFmt(reqTok / reqN)}</b></div>` : ''}
     </div>
     <section class="panel"><div class="panel-h"><h3>模型明细</h3><span class="sub">点击行查看模型详情（Token 与调用统计、使用该模型的 Key、每日费用、计费项）</span>
       <div class="actions">${segCtl('density', { normal: '标准', compact: '紧凑' })}<button class="btn sm" id="csvM">${icon('download')}导出</button></div></div><div id="tblM"></div></section>
@@ -69,9 +70,9 @@ export function render(v) {
       <section class="panel c6"><div class="panel-h"><h3>Token 用量结构</h3><span class="sub">按总 Token 排序</span></div><div id="mdTok"></div></section>
       <section class="panel c6"><div class="panel-h"><h3>单位成本</h3>${help('每百万 Token 费用 = 费用 ÷ 总 Token × 10⁶；不同模型的输入/输出/缓存结构不同，单位成本可用于横向评估性价比。')}<span class="sub">每百万 Token 费用</span></div><div id="mdUnit"></div></section>
       <section class="panel c6"><div class="panel-h"><h3>计费维度</h3><span class="sub">按费用拆分</span></div><div id="mdDims"></div></section>
-      <section class="panel c6"><div class="panel-h"><h3>每日费用</h3><span class="sub">按模型堆叠</span></div><div class="legend" id="mdLegend"></div><div class="chart" id="mdDaily"></div></section>
-      <section class="panel c12"><div class="panel-h"><h3>API Key × 模型</h3><span class="sub">交叉分析每个 Key 在各模型上的消耗 · 点击 Key 进入详情</span><div class="actions">${segCtl('hmMetric', { cost: '费用', tokens: 'Token' })}</div></div><div id="mx"></div></section>
-      <section class="panel c12"><div class="panel-h"><h3>模型 × 计费项明细</h3><span class="sub">按模型、计费项与单价汇总</span><div class="actions"><button class="btn sm" id="csvI">${icon('download')}导出</button></div></div><div id="tblI"></div></section>
+      <section class="panel c6"><div class="panel-h"><h3>每日费用</h3><span class="sub">按模型堆叠 · 点击图例筛选模型，点击柱段查看当日该模型</span></div><div class="legend" id="mdLegend"></div><div class="chart" id="mdDaily"></div></section>
+      <section class="panel c12"><div class="panel-h"><h3>API Key × 模型</h3><span class="sub">交叉分析每个 Key 在各模型上的消耗 · 点击 Key 进入详情，点击模型列头或格子查看模型详情（格子限定该 Key）</span><div class="actions">${segCtl('hmMetric', { cost: '费用', tokens: 'Token' })}</div></div><div id="mx"></div></section>
+      <section class="panel c12"><div class="panel-h"><h3>模型 × 计费项明细</h3><span class="sub">按模型、计费项与单价汇总 · 点击行查看对应账单明细</span><div class="actions"><button class="btn sm" id="csvI">${icon('download')}导出</button></div></div><div id="tblI"></div></section>
     </div>`;
   const max = Math.max(0, ...rows.map(r => r.cost));
   let cols;
@@ -114,11 +115,11 @@ export function render(v) {
   if (unitRows.length && excluded) $('#mdUnit', v).insertAdjacentHTML('beforeend', `<div class="panel-foot">仅比较 Token ≥ 10 万的模型，另有 ${excluded} 个低用量模型未列入（见上方明细表）。</div>`);
   $('#mdDims', v).innerHTML = billDimsHtml(lines);
   dailyByModel($('#mdDaily', v), $('#mdLegend', v), daily);
-  matrix($('#mx', v), lines);
+  keyModelMatrix($('#mx', v), lines, { cellScope: k => ({ global: true, key: k }) });
 
   const byItem = aggregate(lines, l => `${l.model}\u0001${l.io}\u0001${l.listPrice}\u0001${l.usageUnit}\u0001${l.listPriceUnit}`);
   const t2 = table('items', $('#tblI', v), {
-    sort: 'cost', pageSize: 50, caption: '模型计费项明细',
+    sort: 'cost', pageSize: 50, caption: '模型计费项明细', onRowClick: r => app.setFilter({ model: r.model, item: r.io }, '#/detail'),
     columns: [
       { key: 'model', label: '模型', cls: 'mono' },
       { key: 'label', label: '计费项', fmt: (x, r) => `${esc(x)}<span class="sub mono">${esc(r.io)}</span>` },
@@ -145,11 +146,19 @@ function dailyByModel(el, lg, daily) {
   if (others.length) series.push({ id: '__other', label: `其他 ${others.length} 个`, color: 'var(--other)' });
   const cell = new Map();
   daily.forEach(l => { const k = l.date + '|' + (colored.includes(l.model) ? l.model : '__other'); cell.set(k, (cell.get(k) || 0) + metricVal(l)); });
-  lg.innerHTML = series.length > 1 ? legendHtml(series) : '';
-  columnChart(el, { xs: days, series, cell: (x, s) => cell.get(x + '|' + s) || 0, height: 240, xLabel: x => x.slice(5), tipTitle: x => `${x}（周${WEEK[weekday(x)]}）`, empty: '暂无按日数据' });
+  lg.innerHTML = series.length > 1 ? legendHtml(series, '点击按此模型筛选') : '';
+  bindLegend(lg, m => app.setFilter({ model: m }));
+  columnChart(el, {
+    xs: days, series, cell: (x, s) => cell.get(x + '|' + s) || 0, height: 240, xLabel: x => x.slice(5), tipTitle: x => `${x}（周${WEEK[weekday(x)]}）`, empty: '暂无按日数据',
+    onX: x => app.openDay(x), onSeg: (x, m) => app.openDay(x, { global: true, model: m }), clickHint: '点击查看当日明细', segHint: '点击柱段只看该模型',
+  });
 }
 
-function matrix(el, lines) {
+/**
+ * API Key × 模型 矩阵（模型分析、业务空间详情共用）
+ * 点击行 → Key 详情；点击模型列头 → 模型详情（headScope 范围）；点击格子 → 模型详情（cellScope(key) 范围，限定该 Key）
+ */
+export function keyModelMatrix(el, lines, { cellScope = k => ({ key: k }), headScope = null } = {}) {
   const useTok = ui.hmMetric === 'tokens';
   const val = l => (useTok ? (l.tokens || 0) : metricVal(l));
   const byModel = aggregate(lines, l => l.model);
@@ -163,39 +172,51 @@ function matrix(el, lines) {
   const cols = models.concat(extra.length ? ['__other'] : []);
   const fmt = x => (useTok ? compact(x) : moneyShort(x));
   const shade = x => (x > 0 && max ? Math.min(7, Math.max(1, Math.ceil(Math.sqrt(x / max) * 7))) : 0);
-  el.innerHTML = `<div class="tbl-wrap"><table class="dt ${ui.density === 'compact' ? 'compact' : ''}"><thead><tr><th class="sticky">API Key</th>${cols.map(c => `<th class="r mono">${esc(c === '__other' ? `其他 ${extra.length} 个` : c)}</th>`).join('')}<th class="r">合计</th></tr></thead><tbody>
+  const sc = s => esc(JSON.stringify(s));
+  el.innerHTML = `<div class="tbl-wrap"><table class="dt ${ui.density === 'compact' ? 'compact' : ''}"><thead><tr><th class="sticky">API Key</th>${cols.map(c => (c === '__other' ? `<th class="r">其他 ${extra.length} 个</th>` : `<th class="r mono"><button type="button" class="lnk" data-model="${esc(c)}"${headScope ? ` data-scope="${sc(headScope)}"` : ''} title="查看模型详情：${esc(c)}">${esc(c)}</button></th>`)).join('')}<th class="r">合计</th></tr></thead><tbody>
     ${keys.map(k => {
       let rs = 0;
       const tds = cols.map(c => {
         const x = cell.get(k + '|' + c) || 0; rs += x; const s = shade(x);
-        return `<td class="r ${s ? 'cell-heat' : ''} ${s >= 4 ? 'dk' : ''}" style="${s ? `background:var(--q${s})` : ''}" data-tip="${esc(tipRows(`${keyShort(k)} × ${c === '__other' ? '其他模型' : c}`, [[useTok ? 'Token' : '费用', useTok ? intFmt(x) : money(x)]]))}">${x > 0 ? esc(fmt(x)) : '<span class="muted">·</span>'}</td>`;
+        const tip = esc(tipRows(`${keyShort(k)} × ${c === '__other' ? '其他模型' : c}`, [[useTok ? 'Token' : '费用', useTok ? intFmt(x) : money(x)]]) + (x > 0 && c !== '__other' ? '<div class="tip-hint">点击查看该 Key 的该模型详情</div>' : ''));
+        const inner = x > 0 ? esc(fmt(x)) : '<span class="muted">·</span>';
+        return `<td class="r ${s ? 'cell-heat' : ''} ${s >= 4 ? 'dk' : ''}" style="${s ? `background:var(--q${s})` : ''}" data-tip="${tip}">${x > 0 && c !== '__other' ? `<button type="button" class="cell-btn" data-model="${esc(c)}" data-scope="${sc(cellScope(k))}" aria-label="${esc(`${keyShort(k)} × ${c}`)}">${inner}</button>` : inner}</td>`;
       }).join('');
       return `<tr class="${k !== NONE_KEY ? 'clickable' : ''}" data-key="${esc(k)}" ${k !== NONE_KEY ? 'tabindex="0"' : ''}><td class="sticky"><span class="sw" style="background:${DIMS.key.color(k)}"></span>${esc(keyShort(k))}</td>${tds}<td class="r"><b>${esc(fmt(rs))}</b></td></tr>`;
     }).join('')}</tbody></table></div>`;
-  const go = tr => { if (tr && tr.dataset.key !== NONE_KEY) app.go(`#/key/${tr.dataset.key}`); };
-  el.onclick = e => go(e.target.closest('tr[data-key]'));
-  el.onkeydown = e => { if (e.key === 'Enter') go(e.target.closest('tr[data-key]')); };
+  const go = tr => { if (tr && tr.dataset.key !== NONE_KEY) app.go(`#/key/${encodeURIComponent(tr.dataset.key)}`); };
+  el.onclick = e => { if (e.target.closest('button')) return; go(e.target.closest('tr[data-key]')); };
+  el.onkeydown = e => { if (e.key === 'Enter' && e.target.matches('tr[data-key]')) go(e.target); };
 }
 
-/* ---------------- 模型详情抽屉 ---------------- */
-export function openModel(model) {
+/* ---------------- 模型详情抽屉 ----------------
+ * scope 为空：沿用全局筛选；scope 为对象：限定在某个 Key / 业务空间等范围内（见 core.scopeLines）
+ */
+export function openModel(model, scope = null) {
   const d = $('#drawer');
   const of = l => l.model === model;
-  const lines = filterLines().filter(of), prevLines = filterLines(state.prev).filter(of), daily = filterLines(state.daily).filter(of);
-  const a = aggAll(lines), pa = aggAll(prevLines), tot = sum(filterLines(), metricVal);
+  const base = scopeLines(state.lines, scope);
+  const lines = base.filter(of), prevLines = scopeLines(state.prev, scope).filter(of), daily = scopeLines(state.daily, scope).filter(of);
+  const a = aggAll(lines), pa = aggAll(prevLines), tot = sum(base, metricVal);
   const t = totalTokens(a), pt = totalTokens(pa);
-  const uf = usageFiltered(), nm = normModel(model);
+  const uf = scopeUsage(scope), nm = normModel(model);
   const mRows = (uf || []).filter(u => normModel(u.model) === nm);
-  const us = mRows.length ? usageAgg(mRows, () => 'm').get('m') : null;
+  // 只有该模型的账单全部来自有调用次数数据源的云厂商时才显示请求数（否则单次平均会被低估）
+  const callsOk = lines.length > 0 && lines.every(l => callsOn(l.provider));
+  const us = mRows.length && callsOk ? usageAgg(mRows, () => 'm').get('m') : null;
   const usByKey = usageAgg(mRows, u => u.apiKeyId);
+  const sLabel = scopeLabel(scope);
+  const keyScoped = scope && typeof scope === 'object' && scope.key != null;
   $('#drawerTitle').textContent = model;
-  $('#drawerTags').innerHTML = `<span class="pill neutral">模型</span>${copyBtn(model, '复制模型名')}`;
-  $('#drawerActions').innerHTML = `<button class="btn sm" data-dact="filter">按此模型筛选</button><button class="btn sm" data-dact="detail">账单明细</button>`;
+  $('#drawerTags').innerHTML = `<span class="pill neutral">模型</span>${sLabel ? `<span class="pill info" title="限定范围">${esc(sLabel)}</span>` : ''}${copyBtn(model, '复制模型名')}`;
+  $('#drawerActions').innerHTML = `<button class="btn sm" data-dact="filter" title="${esc(sLabel ? `按“${sLabel} · ${model}”筛选全部页面` : '按此模型筛选全部页面')}">按此筛选</button><button class="btn sm" data-dact="detail">${icon('list')}账单明细</button>`;
   $('#drawerActions').onclick = e => {
     const b = e.target.closest('[data-dact]'); if (!b) return;
     d.close();
-    if (b.dataset.dact === 'filter') app.setFilter({ model });
-    else app.setFilter({ model }, '#/detail');
+    const entity = scope && typeof scope === 'object' && !scope.global; // 实体范围（Key / 业务空间详情）：替换其余筛选
+    const patch = { ...scopeFilter(scope), model };
+    if (b.dataset.dact === 'filter') app.setFilter(patch, null, !!entity);
+    else app.setFilter(patch, '#/detail', !!entity);
   };
   $('#drawerBody').innerHTML = `
     <div class="kpi-wrap" style="margin:0"><div class="kpi-row n4">
@@ -204,30 +225,46 @@ export function openModel(model) {
       ${tile('unit', '每百万 Token', t ? money(a.cost / t * 1e6) : '—', t && pt ? deltaPill(a.cost / t, pa.cost / pt) : '', state.compareLabel, '费用 ÷ Token × 10⁶')}
       ${tile('cache', '缓存命中率', a.tIn ? pct(a.tCache, a.tIn) : '—', a.tIn && pa.tIn ? deltaPill(a.tCache / a.tIn, pa.tCache / pa.tIn, { pp: true, goodWhenUp: true }) : '', state.compareLabel, `${a.keys.size} 个 Key 使用`)}
     </div></div>
-    <section><h3>Token 消耗与调用统计 ${help(`Token 来自账单用量；请求次数与单次平均：${REQ_SRC}。受当前全局筛选影响。`)}</h3>${tokenStatsHtml({ a, pa, daily, us, period: state.data.period, scope: 'model', provider: lines.length && lines.every(l => l.provider === 'tencent') ? 'tencent' : 'aliyun', compact: true, unavailable: uf === null })}</section>
+    <section><h3>Token 消耗与调用统计 ${help(`Token 来自账单用量；请求次数与单次平均：${REQ_SRC}。${sLabel ? `限定范围：${sLabel}。` : '受当前全局筛选影响。'}`)}</h3>${tokenStatsHtml({ a, pa, daily, us, period: state.data.period, scope: 'model', provider: lines.length && lines.every(l => l.provider === 'tencent') ? 'tencent' : 'aliyun', compact: true, unavailable: uf === null })}</section>
     <section><h3>每日 Token 消耗</h3><div class="legend" id="dmTokLegend"></div><div class="chart" id="dmTok"></div></section>
     ${us ? `<section><h3>每日调用次数 ${reqHelp()}</h3><div class="legend" id="dmReqLegend"></div><div class="chart" id="dmReq"></div></section>` : ''}
-    <section><h3>每日费用（按 API Key）</h3><div class="legend" id="dmLegend"></div><div class="chart" id="dmDaily"></div></section>
-    <section><h3>使用该模型的 API Key</h3><div id="dmKeys"></div></section>
-    <section><h3>计费项</h3><div id="dmItems"></div></section>`;
+    ${keyScoped ? '' : '<section><h3>每日费用（按 API Key）</h3><div class="legend" id="dmLegend"></div><div class="chart" id="dmDaily"></div></section>'}
+    ${keyScoped ? '' : '<section><h3>使用该模型的 API Key <span class="sub">点击进入 Key 详情</span></h3><div id="dmKeys"></div></section>'}
+    ${keyScoped || (scope && scope.ws != null) ? '' : '<section><h3>按业务空间 <span class="sub">点击查看业务空间详情</span></h3><div id="dmWs"></div></section>'}
+    <section><h3>计费项 <span class="sub">点击查看对应账单明细</span></h3><div id="dmItems"></div></section>`;
   if (!d.open) d.showModal();
   d.querySelector('.dlg-b').scrollTop = 0;
-  drawDailyTokens($('#dmTok'), $('#dmTokLegend'), daily, state.data.period, { height: 200 });
+  const dayScope = extra => (scope && typeof scope === 'object' ? { ...scope, model, ...extra } : { global: true, model, ...extra });
+  drawDailyTokens($('#dmTok'), $('#dmTokLegend'), daily, state.data.period, { height: 200, onX: x => app.openDay(x, dayScope()) });
   if (us) drawDailyRequests($('#dmReq'), $('#dmReqLegend'), us, state.data.period, { height: 200 });
-  const days = uniq(daily.map(l => l.date)).sort();
-  const ranked = sortedAggs(aggregate(daily, DIMS.key.of)).map(x => x.key);
-  const colored = ranked.filter(k => DIMS.key.color(k) !== 'var(--other)'), others = ranked.filter(k => !colored.includes(k));
-  const series = colored.map(k => ({ id: k, label: keyShort(k), color: DIMS.key.color(k) }));
-  if (others.length) series.push({ id: '__other', label: `其他 ${others.length} 个 Key`, color: 'var(--other)' });
-  const cell = new Map(); daily.forEach(l => { const id = DIMS.key.of(l); const k = l.date + '|' + (colored.includes(id) ? id : '__other'); cell.set(k, (cell.get(k) || 0) + metricVal(l)); });
-  $('#dmLegend').innerHTML = series.length > 1 ? legendHtml(series) : '';
-  columnChart($('#dmDaily'), { xs: days, series, cell: (x, s) => cell.get(x + '|' + s) || 0, height: 220, xLabel: x => x.slice(5), tipTitle: x => x, empty: '暂无按日数据' });
   const pk = aggregate(prevLines, DIMS.key.of);
-  rankList($('#dmKeys'), sortedAggs(aggregate(lines, DIMS.key.of)).map(x => ({ id: x.key, label: keyShort(x.key), sub: [`${compact(totalTokens(x))} Token`, (u => (u && u.requests ? `${intFmt(u.requests)} 次 · 单次 ${intFmt(u.tokens / u.requests)} Token` : ''))(usByKey.get(x.key === NONE_KEY ? '' : x.key))].filter(Boolean).join(' · '), value: x.cost, prev: pk.get(x.key)?.cost ?? 0, color: DIMS.key.color(x.key) })),
-    { total: a.cost, showDelta: true, limit: 20, onClick: it => { if (it.id !== NONE_KEY) { d.close(); app.go(`#/key/${it.id}`); } } });
+  if (!keyScoped) {
+    const days = uniq(daily.map(l => l.date)).sort();
+    const ranked = sortedAggs(aggregate(daily, DIMS.key.of)).map(x => x.key);
+    const colored = ranked.filter(k => DIMS.key.color(k) !== 'var(--other)'), others = ranked.filter(k => !colored.includes(k));
+    const series = colored.map(k => ({ id: k, label: keyShort(k), color: DIMS.key.color(k) }));
+    if (others.length) series.push({ id: '__other', label: `其他 ${others.length} 个 Key`, color: 'var(--other)' });
+    const cell = new Map(); daily.forEach(l => { const id = DIMS.key.of(l); const k = l.date + '|' + (colored.includes(id) ? id : '__other'); cell.set(k, (cell.get(k) || 0) + metricVal(l)); });
+    $('#dmLegend').innerHTML = series.length > 1 ? legendHtml(series.map(s => ({ ...s, id: s.id === NONE_KEY ? null : s.id })), '点击进入 Key 详情') : '';
+    bindLegend($('#dmLegend'), k => { d.close(); app.go(`#/key/${encodeURIComponent(k)}`); });
+    columnChart($('#dmDaily'), {
+      xs: days, series, cell: (x, s) => cell.get(x + '|' + s) || 0, height: 220, xLabel: x => x.slice(5), tipTitle: x => `${x}（周${WEEK[weekday(x)]}）`, empty: '暂无按日数据',
+      onX: x => app.openDay(x, dayScope()), onSeg: (x, k) => app.openDay(x, dayScope({ key: k })), clickHint: '点击查看当日明细', segHint: '点击柱段只看该 Key',
+    });
+    rankList($('#dmKeys'), sortedAggs(aggregate(lines, DIMS.key.of)).map(x => {
+      const k = state.apiKeys.get(x.key);
+      return { id: x.key, label: keyShort(x.key), sub: [k ? dimName('ws', k.wsKey || NO_WS) : '', `${compact(totalTokens(x))} Token`, (u => (u && u.requests ? `${intFmt(u.requests)} 次 · 单次 ${intFmt(u.tokens / u.requests)} Token` : ''))(usByKey.get(x.key === NONE_KEY ? '' : x.key))].filter(Boolean).join(' · '), value: x.cost, prev: pk.get(x.key)?.cost ?? 0, color: DIMS.key.color(x.key) };
+    }), { total: a.cost, showDelta: true, limit: 20, onClick: it => { if (it.id !== NONE_KEY) { d.close(); app.go(`#/key/${encodeURIComponent(it.id)}`); } } });
+  }
+  if ($('#dmWs')) {
+    const pw = aggregate(prevLines, dimVal.ws);
+    rankList($('#dmWs'), sortedAggs(aggregate(lines, dimVal.ws)).map(x => ({ id: x.key, label: dimName('ws', x.key), sub: `${x.keys.size} 个 Key · ${compact(totalTokens(x))} Token`, value: x.cost, prev: pw.get(x.key)?.cost ?? 0, color: DIMS.ws.color(x.key) })),
+      { total: a.cost, showDelta: true, limit: 12, onClick: it => { d.close(); app.go(groupHash('ws', it.id)); } });
+  }
   const byItem = aggregate(lines, l => `${l.io}\u0001${l.listPrice}\u0001${l.listPriceUnit}`);
   table('modelItems', $('#dmItems'), {
     sort: 'cost', pageSize: 0, caption: '模型计费项',
+    onRowClick: r => { d.close(); const entity = scope && typeof scope === 'object' && !scope.global; app.setFilter({ ...scopeFilter(scope), model, item: r.io }, '#/detail', !!entity); },
     columns: [
       { key: 'label', label: '计费项', fmt: (x, r) => `${esc(x)}<span class="sub mono">${esc(r.io)}</span>` },
       { key: 'price', label: '单价', align: 'r', fmt: (x, r) => (x !== '' ? `${esc(x)}<span class="sub">${esc(r.unit)}</span>` : '-'), sortVal: r => num(r.price) },

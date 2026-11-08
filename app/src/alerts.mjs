@@ -388,7 +388,7 @@ export class AlertService {
       if (tm.length) lines.push('', '#### 昨日模型 Top 3', ...tm);
       const an = this.evaluateAnomaly(today);
       if (an.length) lines.push('', '#### 异常提示', ...an.map(i => i.text));
-      return { title: `费用日报 · ${day}`, level: 'info', lines, empty: yc < 0.005 && mtd < 0.005, period: today };
+      return { title: `费用日报 · ${day}`, level: 'info', lines, empty: yc < 0.005 && mtd < 0.005, period: today, path: `#/overview?from=${day}&to=${day}` };
     }
     if (kind === 'weekly') {
       const last = isoWeek(addDays(isoWeek(today).from, -1)), prev = isoWeek(addDays(last.from, -1));
@@ -404,7 +404,7 @@ export class AlertService {
       if (up.length) lines.push('', '#### 增长最快', ...up.map(x => `${this.keyName(x.id, keys)} +${yuan(x.d)}`));
       const tm = top(this.store.dailyByModel(last.from, last.to), 3, r => clean(r.model), c);
       if (tm.length) lines.push('', '#### 模型 Top 3', ...tm);
-      return { title: `费用周报 · ${last.key}`, level: 'info', lines, empty: c < 0.005 && o < 0.005, period: last.key };
+      return { title: `费用周报 · ${last.key}`, level: 'info', lines, empty: c < 0.005 && o < 0.005, period: last.key, path: `#/overview?from=${last.from}&to=${last.to}` };
     }
     // monthly
     const cycle = addMonths(today.slice(0, 7), -1), pcyc = addMonths(cycle, -1);
@@ -419,7 +419,7 @@ export class AlertService {
     if (cc.length > 1 || (cc[0] && cc[0].k !== '未分配成本中心')) lines.push('', '#### 按成本中心', ...top(cc.map(x => ({ k: x.k, cost: x.cost })), 6, r => r.k, c));
     const tm = top(this.store.monthByModel(cycle), 3, r => clean(r.model), c);
     if (tm.length) lines.push('', '#### 模型 Top 3', ...tm);
-    return { title: `费用月报 · ${cycle}`, level: 'info', lines, empty: c < 0.005 && o < 0.005, period: cycle, ready: isCycleFinal(cycle, today) };
+    return { title: `费用月报 · ${cycle}`, level: 'info', lines, empty: c < 0.005 && o < 0.005, period: cycle, ready: isCycleFinal(cycle, today), path: `#/overview?cycle=${cycle}` };
   }
 
   /* ---------- 评估并发送 ---------- */
@@ -440,21 +440,22 @@ export class AlertService {
         st.sent[ch.id] ||= {};
         st.reports[ch.id] ||= {};
         const msgs = [];
-        const alertMsg = (event, title, items) => {
+        const alertMsg = (event, title, items, path) => {
           const fresh = items.filter(i => !st.sent[ch.id][i.code]);
           if (!fresh.length) return;
           const show = fresh.filter(i => !i.hidden);
           if (!show.length) { for (const i of fresh) st.sent[ch.id][i.code] = Date.now(); return; }
           const level = show.some(i => i.level === 'bad') ? 'bad' : show.every(i => i.level === 'good') ? 'good' : show.some(i => i.level === 'warn') ? 'warn' : 'info';
-          msgs.push({ event, title, level, lines: show.map(i => i.text), codes: fresh.map(i => i.code), mention: EVENT_TYPES[event].mention && level !== 'good' });
+          msgs.push({ event, title, level, lines: show.map(i => i.text), codes: fresh.map(i => i.code), mention: EVENT_TYPES[event].mention && level !== 'good', path });
         };
-        if (ch.events.budget) alertMsg('budget', `预算告警 · ${cycle}`, get('budget', () => this.evaluateBudget(today)));
-        if (ch.events.anomaly && afterHour) alertMsg('anomaly', `费用异常提醒 · ${addDays(today, -1)}`, get('anomaly', () => this.evaluateAnomaly(today)));
-        if (ch.events.sync) alertMsg('sync', '数据同步告警', get('sync', () => this.evaluateSync()));
+        // 消息中的“查看详情”直达对应页面与统计周期（地址中带周期参数，打开即为下钻后的视图）
+        if (ch.events.budget) alertMsg('budget', `预算告警 · ${cycle}`, get('budget', () => this.evaluateBudget(today)), `#/keys?cycle=${cycle}`);
+        if (ch.events.anomaly && afterHour) alertMsg('anomaly', `费用异常提醒 · ${addDays(today, -1)}`, get('anomaly', () => this.evaluateAnomaly(today)), `#/keys?from=${addDays(today, -1)}&to=${addDays(today, -1)}`);
+        if (ch.events.sync) alertMsg('sync', '数据同步告警', get('sync', () => this.evaluateSync()), '#/admin/sync');
         if (ch.events.keyChange) {
           if (st.lastChangeId[ch.id] == null) st.lastChangeId[ch.id] = this.store.maxChangeId(); // 首次启用不补发历史变更
           const items = this.evaluateChanges(st.lastChangeId[ch.id]);
-          if (items.length) { msgs.push({ event: 'keyChange', title: `API Key 变更通知（${items.length} 项）`, level: items.some(i => i.level === 'warn') ? 'warn' : 'info', lines: items.map(i => i.text), changeTo: Math.max(...items.map(i => i.id)) }); }
+          if (items.length) { msgs.push({ event: 'keyChange', title: `API Key 变更通知（${items.length} 项）`, level: items.some(i => i.level === 'warn') ? 'warn' : 'info', lines: items.map(i => i.text), changeTo: Math.max(...items.map(i => i.id)), path: '#/changes' }); }
         } else delete st.lastChangeId[ch.id];
         if (afterHour) {
           for (const kind of ['daily', 'weekly', 'monthly']) {
@@ -463,7 +464,7 @@ export class AlertService {
             if (kind === 'monthly' && !r.ready) continue;
             if (st.reports[ch.id][kind] === r.period) continue;
             if (r.empty) { st.reports[ch.id][kind] = r.period; continue; }
-            msgs.push({ event: kind, title: r.title, level: r.level, lines: r.lines, report: { kind, period: r.period } });
+            msgs.push({ event: kind, title: r.title, level: r.level, lines: r.lines, report: { kind, period: r.period }, path: r.path });
           }
         }
         for (const m of msgs) {
@@ -497,12 +498,12 @@ export class AlertService {
     return this.busy;
   }
 
-  async send(ch, { webhook, secret }, { title, level, lines, today = todayIn(this.tz), mention = false }) {
+  async send(ch, { webhook, secret }, { title, level, lines, today = todayIn(this.tz), mention = false, path = '' }) {
     const brand = clean(this.store.branding().name) || '大模型费用分析';
     const time = new Intl.DateTimeFormat('zh-CN', { timeZone: this.tz, hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date());
     const src = this.providers().map(p => PROVIDER_NAMES[p]).join(' / ') || '云厂商';
     const footer = `${brand} · 统计至 ${today} ${time} · 口径：应付金额（税前）· 数据来源：${src}费用中心`;
-    const link = this.publicUrl ? this.publicUrl.replace(/\/+$/, '') + '/#/overview' : '';
+    const link = this.publicUrl ? this.publicUrl.replace(/\/+$/, '') + '/' + (/^#\/[\w/?&=.~%-]*$/.test(path) ? path : '#/overview') : '';
     const type = ch.type;
     const mentions = mention && (ch.atAll || ch.atMobiles?.length) ? { all: !!ch.atAll, mobiles: ALERT_TYPES[type]?.mention === 'mobile' ? ch.atMobiles || [] : [] } : null;
     const fullTitle = `【${brand}】${title}`;

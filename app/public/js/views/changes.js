@@ -1,5 +1,5 @@
 /* 变更记录：同步时检测到的 API Key / 业务空间变化 */
-import { $, esc, state, ui, app, http, fmtTime, icon, help } from '../core.js';
+import { $, esc, state, ui, app, http, fmtTime, icon, help, groupHash } from '../core.js';
 import { table } from '../table.js';
 
 const FIELD = { remark: '备注', description: '描述', workspace_id: '业务空间ID', workspace_name: '业务空间', disabled: '禁用', auth_type: '授权类型', allow_all_models: '全部模型', accessible_models: '可访问模型', access_ips: 'IP 白名单', api_key_masked: 'API Key', name: '名称', region: '地域', service_site: '服务站点', api_host: 'API Host', tenant_id: '租户ID', gmt_create: '创建时间' };
@@ -29,7 +29,7 @@ export async function render(v) {
   v.querySelectorAll('[data-ent]').forEach(b => b.onclick = () => { ui.chgEntity = b.dataset.ent; render(v); });
   const t = table('changes', $('#tbl', v), {
     sort: 'ts', pageSize: 100, caption: '变更明细', empty: '暂无变更记录',
-    onRowClick: r => (r.entity === 'api_key' ? app.go(`#/key/${r.entity_id}`) : null),
+    onRowClick: r => app.go(r.entity === 'api_key' ? `#/key/${encodeURIComponent(r.entity_id)}` : groupHash('ws', r.entity_id)),
     columns: [
       { key: 'ts', label: '时间', fmt: x => fmtTime(x), csv: r => fmtTime(r.ts) },
       { key: 'entity', label: '对象', fmt: x => (x === 'api_key' ? 'API Key' : '业务空间') },
