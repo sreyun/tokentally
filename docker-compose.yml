@@ -1,4 +1,4 @@
-# 百炼 API Key 费用分析
+# TokenTally · 大模型 API Key 费用分析（阿里云百炼 + 腾讯云 TokenHub）
 #
 # 直接 HTTP 访问：           docker compose up -d --build
 # 自动 HTTPS（推荐对外）：   在 .env 设置 DOMAIN、BIND_ADDR=127.0.0.1、TRUST_PROXY=true 后
@@ -6,7 +6,7 @@
 services:
   app:
     build: .
-    image: bailian-cost:1.1.0
+    image: bailian-cost:1.2.0
     container_name: bailian-cost
     restart: unless-stopped
     env_file: .env
@@ -21,7 +21,7 @@ services:
     # ---- 容器加固 ----
     read_only: true
     tmpfs:
-      - /tmp:size=16m,mode=1777
+      - /tmp:size=64m,mode=1777   # SQLite 备份（VACUUM INTO）排序时可能使用临时空间
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -31,7 +31,7 @@ services:
     cpus: 1.0
     pids_limit: 128
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/readyz"]
       interval: 30s
       timeout: 5s
       retries: 3

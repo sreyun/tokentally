@@ -89,6 +89,15 @@ export const I = {
   send: '<path d="M22 2L11 13M22 2l-7 20-4-9-9-4z"/>',
   copy: '<rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1"/>',
   chevL: '<path d="M15 6l-6 6 6 6"/>', chevR: '<path d="M9 6l6 6-6 6"/>',
+  cloud: '<path d="M7 18a5 5 0 0 1-.9-9.9A6 6 0 0 1 17.7 9 4.5 4.5 0 0 1 17.5 18z"/>',
+  tag: '<path d="M20.6 13.4l-7.2 7.2a2 2 0 0 1-2.8 0L3 13V3h10l7.6 7.6a2 2 0 0 1 0 2.8z"/><circle cx="7.5" cy="7.5" r="1.5"/>',
+  bell: '<path d="M18 8a6 6 0 1 0-12 0c0 7-3 9-3 9h18s-3-2-3-9M13.7 21a2 2 0 0 1-3.4 0"/>',
+  database: '<ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5"/>',
+  print: '<path d="M6 9V2h12v7M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="8"/>',
+  plus: '<path d="M12 5v14M5 12h14"/>',
+  edit: '<path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/>',
+  trash: '<path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6"/>',
+  activity: '<path d="M22 12h-4l-3 9L9 3l-3 9H2"/>',
 };
 /** 复制按钮（行内小图标），点击由 main.js 统一处理 */
 export const copyBtn = (text, label = '复制') => (text ? `<button type="button" class="copy" data-copy="${esc(text)}" title="${esc(label)}：${esc(text)}" aria-label="${esc(label)} ${esc(text)}">${icon('copy')}</button>` : '');
@@ -105,11 +114,12 @@ export const state = {
   keyActivity: new Map(), budgets: { monthly: null, alertPct: 80, keys: {} }, changes: null,
   compareLabel: '', compareRange: '', currency: 'CNY',
   colors: { key: new Map(), model: new Map(), ws: new Map() },
+  providers: [], usage: new Map(), usageRows: [],
 };
 export const ui = {
   tab: 'overview',
   period: { mode: 'month', cycle: '', preset: '30', from: '', to: '', ...LS.get('bc.period', {}) },
-  f: { ws: '', key: '', model: '', channel: '__all', dir: '', item: '', q: '', metric: LS.get('bc.metric', 'pretax') },
+  f: { provider: '', ws: '', key: '', model: '', cc: '', channel: '__all', dir: '', item: '', q: '', metric: LS.get('bc.metric', 'pretax') },
   moreFilters: false, onlySpent: false,
   trendMode: 'daily', trendBy: 'key', compBy: 'ws', varBy: 'key', hmMetric: 'cost', adminTab: 'aliyun',
   density: LS.get('bc.density', 'normal'),
@@ -120,6 +130,45 @@ export const METRICS = { pretax: '应付金额', gross: '原价', after: '优惠
 export const metricVal = l => (ui.f.metric === 'gross' ? l.gross : ui.f.metric === 'after' ? l.after : l.pretax);
 export const NONE_KEY = '__none__';
 export const isAdmin = () => state.me?.role === 'admin';
+export const PROVIDERS = { aliyun: '阿里云', tencent: '腾讯云' };
+/** 当前数据中涉及多个云厂商时才显示云厂商维度，避免单云用户看到无意义的筛选 */
+export const multiCloud = () => state.providers.length > 1;
+export const provTag = (p, force = false) => (p && (force || multiCloud()) ? `<span class="prov ${esc(p)}" title="${esc(PROVIDERS[p] || p)}">${esc(PROVIDERS[p] || p)}</span>` : '');
+export const brandName = () => state.status?.branding?.name || '大模型费用分析';
+/** 是否有任一 Key 设置了成本中心 / 负责人 */
+export const hasTags = () => [...state.apiKeys.values()].some(k => k.costCenter || k.owner);
+export const NO_CC = '__nocc__';
+
+/* =========================================================================
+ * 对话框：动态创建 <dialog>，支持表单提交（返回 Promise）
+ * ========================================================================= */
+export function modal({ title, body, submit = '确定', cancel = '取消', wide = false, onSubmit, onOpen, danger = false }) {
+  return new Promise(resolve => {
+    const d = document.createElement('dialog');
+    d.className = 'modal' + (wide ? ' wide' : '');
+    d.setAttribute('aria-label', title);
+    d.innerHTML = `<div class="dlg-h"><h2>${esc(title)}</h2><span class="sp"></span><button type="button" class="btn ghost icon sm" data-x aria-label="关闭">${icon('x')}</button></div>
+      <form class="dlg-b" novalidate>${body}<div class="bad-text dlg-err" role="alert"></div>
+      <div class="row dlg-f"><span class="sp"></span>${cancel ? `<button type="button" class="btn" data-x>${esc(cancel)}</button>` : ''}${submit ? `<button type="submit" class="btn ${danger ? 'danger' : 'primary'}">${esc(submit)}</button>` : ''}</div></form>`;
+    document.body.appendChild(d);
+    const form = d.querySelector('form'), err = d.querySelector('.dlg-err');
+    const close = v => { d.close(); d.remove(); resolve(v); };
+    d.addEventListener('cancel', e => { e.preventDefault(); close(null); });
+    d.addEventListener('click', e => { if (e.target.closest('[data-x]') || e.target === d) close(null); });
+    form.onsubmit = async e => {
+      e.preventDefault();
+      err.textContent = '';
+      const btn = form.querySelector('[type=submit]');
+      if (btn) btn.disabled = true;
+      try { const v = onSubmit ? await onSubmit(form, d) : Object.fromEntries(new FormData(form)); if (v !== false) close(v ?? true); }
+      catch (ex) { err.textContent = ex.message; }
+      finally { if (btn) btn.disabled = false; }
+    };
+    d.showModal();
+    onOpen?.(form, d);
+    (form.querySelector('input:not([type=hidden]):not([type=checkbox]), select, textarea') || form.querySelector('button'))?.focus();
+  });
+}
 
 /* =========================================================================
  * HTTP / Toast
@@ -194,6 +243,7 @@ export function mapLines(block) {
     const pretax = num(v(r, 'pretax'));
     const ws = v(r, 'workspace_id');
     return {
+      provider: v(r, 'provider') || 'aliyun', alloc: v(r, 'alloc') || 0,
       date: v(r, 'period') || '', apiKeyId: v(r, 'api_key_id') || '', workspaceId: ws === '-' ? '' : (ws || ''), model: v(r, 'model') || '(未知模型)',
       io, ioi: ioInfo(io), channel: v(r, 'channel') || '', stopFlag: v(r, 'stop_flag') || '', kind: v(r, 'kind') || '',
       usage: v(r, 'usage') ?? null, usageUnit: v(r, 'usage_unit') || '', tokens: v(r, 'tokens') ?? null,
@@ -219,6 +269,18 @@ export function applyData(d) {
   state.prevDaily = mapLines(d.prevDaily);
   state.history = mapLines(d.history);
   state.keyActivity = new Map((d.keyActivity || []).map(a => [a.apiKeyId || NONE_KEY, a]));
+  // 请求次数 / 失败次数（腾讯云 TokenHub 用量统计提供；阿里云账单不含请求数）
+  state.usageRows = mapUsage(d.usage);
+  state.usage = new Map();
+  for (const u of state.usageRows) {
+    const k = state.usage.get(u.apiKeyId) || { requests: 0, fails: 0, tokens: 0, input: 0, output: 0, cache: 0, models: new Map(), days: new Map() };
+    k.requests += u.requests; k.fails += u.fails; k.tokens += u.tokens; k.input += u.input; k.output += u.output; k.cache += u.cache;
+    const m = k.models.get(u.model) || { requests: 0, fails: 0, tokens: 0 };
+    m.requests += u.requests; m.fails += u.fails; m.tokens += u.tokens; k.models.set(u.model, m);
+    const dd = k.days.get(u.day) || { requests: 0, fails: 0, tokens: 0 };
+    dd.requests += u.requests; dd.fails += u.fails; dd.tokens += u.tokens; k.days.set(u.day, dd);
+    state.usage.set(u.apiKeyId, k);
+  }
   state.budgets = { monthly: null, alertPct: 80, keys: {}, ...(d.budgets || {}) };
   state.compareLabel = d.period.mode === 'month' ? (usePrevMtd ? '较上月同期' : '较上月') : '较上一周期';
   state.compareRange = usePrevMtd ? d.period.prevMtdLabel : d.period.prevLabel;
@@ -226,11 +288,24 @@ export function applyData(d) {
   finalize();
 }
 
+function mapUsage(block) {
+  if (!block) return [];
+  const idx = Object.fromEntries(block.cols.map((c, i) => [c, i]));
+  const g = (r, c) => (idx[c] == null ? 0 : num(r[idx[c]]));
+  return block.rows.map(r => ({ provider: r[idx.provider], day: idx.day == null ? '' : r[idx.day], apiKeyId: r[idx.api_key_id] || '', model: r[idx.model], requests: g(r, 'requests'), fails: g(r, 'fails'), input: g(r, 'input_tokens'), output: g(r, 'output_tokens'), cache: g(r, 'cache_tokens'), tokens: g(r, 'total_tokens') }));
+}
+/** 用量统计口径：请求数可用时计算单次平均 Token / 费用（Token 取用量统计，费用取账单） */
+export function perCall(us, cost) {
+  if (!us || !us.requests) return null;
+  const ok = us.requests - us.fails;
+  return { requests: us.requests, fails: us.fails, success: us.requests ? ok / us.requests : null, tokPer: us.tokens / us.requests, inPer: us.input / us.requests, outPer: us.output / us.requests, costPer: cost / us.requests, costPerK: cost / us.requests * 1000 };
+}
+
 function finalize() {
   const all = [...state.lines, ...state.daily, ...state.prev, ...state.prevDaily, ...state.history];
   for (const l of all) {
     if (l.apiKeyId && !state.apiKeys.has(l.apiKeyId)) {
-      state.apiKeys.set(l.apiKeyId, { apiKeyId: l.apiKeyId, apiKeyValue: '', description: '', workspaceId: l.workspaceId, workspaceName: '', disabled: null, source: 'bill', accessIps: [], accessibleModels: [] });
+      state.apiKeys.set(l.apiKeyId, { apiKeyId: l.apiKeyId, provider: l.provider, apiKeyValue: '', description: '', workspaceId: l.workspaceId, workspaceName: '', disabled: null, source: 'bill', accessIps: [], accessibleModels: [], costCenter: '', owner: '', note: '' });
     }
     const k = l.apiKeyId ? state.apiKeys.get(l.apiKeyId) : null;
     if (k && (!k.workspaceId || k.workspaceId === '-') && l.workspaceId) k.workspaceId = l.workspaceId;
@@ -251,8 +326,11 @@ function finalize() {
     for (const l of state.lines) { const k = f(l); t.set(k, (t.get(k) || 0) + l.pretax + l.gross * 1e-6); }
     return new Map([...t.entries()].filter(e => e[1] > 0).sort((a, b) => b[1] - a[1]).slice(0, 7).map((e, i) => [e[0], i]));
   };
+  for (const l of all) l.cc = (l.apiKeyId && state.apiKeys.get(l.apiKeyId)?.costCenter) || '';
   state.colors = { key: rank(l => l.apiKeyId || NONE_KEY), model: rank(l => l.model), ws: rank(l => l.wsKey) };
   state.currency = state.lines.find(l => l.currency)?.currency || 'CNY';
+  const used = new Set([...(state.data?.providers || []), ...[...state.apiKeys.values()].map(k => k.provider || 'aliyun'), ...state.lines.map(l => l.provider)]);
+  state.providers = Object.keys(PROVIDERS).filter(p => used.has(p));
 }
 
 /* ---------- 名称 ---------- */
@@ -273,10 +351,14 @@ export function wsName(wsKey) {
 }
 const colorFrom = (map, id) => { const i = map.get(id); return i == null ? 'var(--other)' : `var(--s${i + 1})`; };
 export const keyColor = id => colorFrom(state.colors.key, id || NONE_KEY);
+const PROV_COLOR = { aliyun: 'var(--s2)', tencent: 'var(--s1)' };
+export const ccName = cc => (cc ? cc : '（未分配成本中心）');
 export const DIMS = {
   key: { label: 'API Key', of: l => l.apiKeyId || NONE_KEY, short: keyShort, color: keyColor },
   model: { label: '模型', of: l => l.model, short: id => id, color: id => colorFrom(state.colors.model, id) },
   ws: { label: '业务空间', of: l => l.wsKey, short: id => wsName(id), color: id => colorFrom(state.colors.ws, id) },
+  provider: { label: '云厂商', of: l => l.provider, short: id => PROVIDERS[id] || id, color: id => PROV_COLOR[id] || 'var(--other)' },
+  cc: { label: '成本中心', of: l => l.cc, short: ccName, color: id => (id ? `var(--s${(Math.abs([...id].reduce((h, c) => h * 31 + c.charCodeAt(0), 7)) % 7) + 1})` : 'var(--other)') },
 };
 
 /* =========================================================================
@@ -296,6 +378,8 @@ export function filterLines(arr = state.lines) {
 function filterLinesRaw(arr) {
   const f = ui.f, q = f.q.trim().toLowerCase();
   return arr.filter(l => {
+    if (f.provider && l.provider !== f.provider) return false;
+    if (f.cc && (f.cc === NO_CC ? !!l.cc : l.cc !== f.cc)) return false;
     if (f.ws && (f.ws === '__nows' ? !!l.wsKey : l.wsKey !== f.ws)) return false;
     if (f.key && (l.apiKeyId || NONE_KEY) !== f.key) return false;
     if (f.model && l.model !== f.model) return false;
@@ -303,13 +387,14 @@ function filterLinesRaw(arr) {
     if (f.dir && l.ioi.dir !== f.dir) return false;
     if (f.item && l.io !== f.item) return false;
     if (q) {
-      const hay = `${l.apiKeyId} ${keyDesc(l.apiKeyId)} ${l.model} ${wsName(l.wsKey)} ${l.workspaceId} ${l.instanceId || ''} ${l.io} ${l.ioi.label} ${l.channel}`.toLowerCase();
+      const k = l.apiKeyId ? state.apiKeys.get(l.apiKeyId) : null;
+      const hay = `${l.apiKeyId} ${keyDesc(l.apiKeyId)} ${l.model} ${wsName(l.wsKey)} ${l.workspaceId} ${l.instanceId || ''} ${l.io} ${l.ioi.label} ${l.channel} ${l.cc} ${k?.owner || ''} ${PROVIDERS[l.provider] || ''}`.toLowerCase();
       if (!hay.includes(q)) return false;
     }
     return true;
   });
 }
-export const activeFilterCount = () => ['ws', 'key', 'model', 'dir', 'item', 'q'].filter(k => ui.f[k]).length + (ui.f.channel !== '__all' ? 1 : 0);
+export const activeFilterCount = () => ['provider', 'ws', 'key', 'model', 'cc', 'dir', 'item', 'q'].filter(k => ui.f[k]).length + (ui.f.channel !== '__all' ? 1 : 0);
 
 export function newAgg(key) {
   return { key, cost: 0, gross: 0, pretax: 0, after: 0, tIn: 0, tCache: 0, tOut: 0, tEmb: 0, tOther: 0, units: {}, models: new Map(), keys: new Set(), wss: new Set(), days: new Map(), items: new Set(), lines: 0 };

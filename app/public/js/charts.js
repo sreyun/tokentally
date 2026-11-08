@@ -32,7 +32,8 @@ export function sparkline(values, color = 'var(--s1)') {
 }
 
 /** 堆叠柱状图 */
-export function columnChart(el, { xs, series, cell, avg = null, height = 260, xLabel = x => x, tipTitle = x => x, aria = '', empty = '暂无数据', weekend = true, onX, clickHint = '' }) {
+export function columnChart(el, { xs, series, cell, avg = null, height = 260, xLabel = x => x, tipTitle = x => x, aria = '', empty = '暂无数据', weekend = true, onX, clickHint = '', fmt = null }) {
+  const vf = fmt || money, af = fmt ? (v => (v ? compact(v) : '0')) : axisMoney;
   if (!xs.length) { el.innerHTML = `<div class="nodata">${esc(empty)}</div>`; return; }
   const W = width(el), H = height;
   const m = { l: 60, r: 10, t: 16, b: 26 }, pw = W - m.l - m.r, ph = H - m.t - m.b;
@@ -44,7 +45,7 @@ export function columnChart(el, { xs, series, cell, avg = null, height = 260, xL
   if (weekend) xs.forEach((x, i) => { if (x.length === 10 && isWeekend(x)) body += `<rect class="weekend" x="${m.l + band * i}" y="${m.t}" width="${band}" height="${ph}"/>`; });
   for (let v = 0; v <= top + step / 2; v += step) {
     const y = base - v / top * ph;
-    body += `<line class="${v === 0 ? 'baseline' : 'gridline'}" x1="${m.l}" x2="${W - m.r}" y1="${y}" y2="${y}"/><text x="${m.l - 8}" y="${y + 4}" text-anchor="end">${esc(axisMoney(v, top))}</text>`;
+    body += `<line class="${v === 0 ? 'baseline' : 'gridline'}" x1="${m.l}" x2="${W - m.r}" y1="${y}" y2="${y}"/><text x="${m.l - 8}" y="${y + 4}" text-anchor="end">${esc(af(v, top))}</text>`;
   }
   xs.forEach((x, i) => {
     const th = totals[i] / top * ph;
@@ -63,15 +64,15 @@ export function columnChart(el, { xs, series, cell, avg = null, height = 260, xL
   });
   if (avg > 0) {
     const y = base - avg / top * ph;
-    body += `<line class="avgline" x1="${m.l}" x2="${W - m.r}" y1="${y}" y2="${y}"/><text class="ann" x="${m.l + 6}" y="${y - 6}">日均 ${esc(money(avg))}</text>`;
+    body += `<line class="avgline" x1="${m.l}" x2="${W - m.r}" y1="${y}" y2="${y}"/><text class="ann" x="${m.l + 6}" y="${y - 6}">日均 ${esc(vf(avg))}</text>`;
   }
   const every = Math.max(1, Math.ceil(xs.length * 46 / pw));
   xs.forEach((x, i) => {
     if (i % every === 0) body += `<text x="${m.l + band * i + band / 2}" y="${H - 7}" text-anchor="middle">${esc(xLabel(x))}</text>`;
     const rows = series.map(sr => [sr.label, cell(x, sr.id), sr.color]).filter(r => r[1] > 0).sort((a, b) => b[1] - a[1]);
-    const tip = tipRows(`${tipTitle(x)} · 合计 ${money(totals[i])}`, rows.slice(0, 10).map(r => [r[0], money(r[1]), r[2]]).concat(rows.length > 10 ? [[`其余 ${rows.length - 10} 项`, money(sum(rows.slice(10), r => r[1])), '']] : []))
+    const tip = tipRows(`${tipTitle(x)} · 合计 ${vf(totals[i])}`, rows.slice(0, 10).map(r => [r[0], vf(r[1]), r[2]]).concat(rows.length > 10 ? [[`其余 ${rows.length - 10} 项`, vf(sum(rows.slice(10), r => r[1])), '']] : []))
       + (onX && clickHint && totals[i] > 0 ? `<div class="tip-hint">${esc(clickHint)}</div>` : '');
-    body += `<rect class="hit" ${onX && totals[i] > 0 ? 'style="cursor:pointer" tabindex="0" role="button"' : ''} aria-label="${esc(`${tipTitle(x)} ${money(totals[i])}`)}" data-x="${esc(x)}" x="${m.l + band * i}" y="${m.t}" width="${band}" height="${ph}" data-tip="${esc(tip)}"/>`;
+    body += `<rect class="hit" ${onX && totals[i] > 0 ? 'style="cursor:pointer" tabindex="0" role="button"' : ''} aria-label="${esc(`${tipTitle(x)} ${vf(totals[i])}`)}" data-x="${esc(x)}" x="${m.l + band * i}" y="${m.t}" width="${band}" height="${ph}" data-tip="${esc(tip)}"/>`;
   });
   el.innerHTML = `<svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" role="img" aria-label="${esc(aria)}"><defs>${defs}</defs>${body}</svg>`;
   const pick = e => { const r = e.target.closest('[data-x]'); return r && totals[xs.indexOf(r.dataset.x)] > 0 ? r.dataset.x : null; };

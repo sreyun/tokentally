@@ -4,6 +4,7 @@
 import {
   $, $$, esc, LS, state, ui, app, http, toast, icon, opt, applyData, addDays, addMonths, lastDayOf, ago, fmtTime, uniq,
   keyShort, wsName, channelLabel, ioInfo, NONE_KEY, isAdmin, activeFilterCount, METRICS, filterLines,
+  PROVIDERS, multiCloud, NO_CC, ccName, brandName,
 } from './core.js';
 import * as Overview from './views/overview.js';
 import * as Keys from './views/keys.js';
@@ -22,10 +23,10 @@ const ROUTES = {
   key: { label: 'API Key 详情', nav: 'keys', sub: '单个 Key 的费用、趋势、模型构成、计费项与变更', view: Key },
   models: { label: '模型分析', icon: 'model', sub: '模型费用、Token 结构、单位成本与计费维度', view: Models, filters: true },
   pivot: { label: '成本分摊', icon: 'layers', sub: '多维透视：任选维度交叉汇总，用于成本分摊与结构分析', view: Pivot, filters: true },
-  detail: { label: '账单明细', icon: 'list', sub: '逐条账单，与阿里云费用中心实例账单一一对应', view: Detail, filters: true },
+  detail: { label: '账单明细', icon: 'list', sub: '逐条账单，与云厂商费用中心账单对应（腾讯云 Key 级费用按用量分摊）', view: Detail, filters: true },
   governance: { label: 'Key 治理', icon: 'shield', sub: '描述、归属、闲置、权限、费用异常与预算检查', view: Gov },
-  changes: { label: '变更记录', icon: 'history', sub: '与阿里云同步时检测到的 API Key / 业务空间变化', view: Changes, noData: true, noPeriod: true },
-  admin: { label: '系统管理', icon: 'settings', sub: '阿里云接入、数据同步、预算、用户与安全审计', view: Admin, admin: true, noData: true, noPeriod: true },
+  changes: { label: '变更记录', icon: 'history', sub: '与云厂商同步时检测到的 API Key / 业务空间变化', view: Changes, noData: true, noPeriod: true },
+  admin: { label: '系统管理', icon: 'settings', sub: '云厂商接入、数据同步、预算与告警、用户、品牌与备份、安全审计', view: Admin, admin: true, noData: true, noPeriod: true },
 };
 const NAV = [{ sec: '成本分析' }, 'overview', 'keys', 'models', 'pivot', 'detail', { sec: '治理' }, 'governance', 'changes', { sec: '系统', admin: true }, 'admin'];
 let route = { name: 'overview', arg: '' };
@@ -76,7 +77,7 @@ window.addEventListener('hashchange', () => {
 window.addEventListener('beforeunload', e => { if (app.dirty) { e.preventDefault(); e.returnValue = ''; } });
 app.render = () => render();
 app.setFilter = (patch, hash, reset = false) => {
-  if (reset) Object.assign(ui.f, { ws: '', key: '', model: '', channel: '__all', dir: '', item: '', q: '' });
+  if (reset) Object.assign(ui.f, { provider: '', ws: '', key: '', model: '', cc: '', channel: '__all', dir: '', item: '', q: '' });
   Object.assign(ui.f, patch);
   if (hash) app.go(hash); else render();
 };
@@ -151,11 +152,14 @@ function renderTitle(r) {
   if (route.name === 'admin') title = `系统管理 · ${Admin.ADMIN_TABS[route.arg] || '阿里云接入'}`;
   $('#pageTitle').textContent = title;
   $('#pageSub').textContent = r.sub;
-  document.title = `${title} · 百炼费用分析`;
+  document.title = `${title} · ${brandName()}`;
 }
 function renderSideFoot() {
   const s = state.status;
   if (!s) return;
+  const b = s.branding || {};
+  $('#brandName').textContent = b.name || '大模型费用分析';
+  $('#brandSub').textContent = b.subtitle || '';
   const d = s.data;
   $('#sideFoot').innerHTML = `<div class="side-card"><b>数据范围</b><br>${d.minDay ? `${esc(d.minDay)} ~ ${esc(d.maxDay)}` : '尚无账单数据'}<br>日账单 ${Number(d.dailyLines || 0).toLocaleString()} 条 · ${d.cycles.length} 个账期<br>时区 ${esc(s.tz)} · v${esc(s.version)}</div>`;
 }
@@ -220,10 +224,12 @@ $('#btnApply').onclick = () => {
 $('#btnRefresh').onclick = () => loadData();
 
 /* ---------------- 筛选 ---------------- */
-const FILTER_LABEL = { ws: '业务空间', key: 'API Key', model: '模型', dir: 'Token 类型', item: '计费项', channel: '渠道', q: '关键字' };
+const FILTER_LABEL = { provider: '云厂商', ws: '业务空间', key: 'API Key', model: '模型', cc: '成本中心', dir: 'Token 类型', item: '计费项', channel: '渠道', q: '关键字' };
 const DIR_LABEL = { in: '输入（含缓存）', out: '输出', emb: '向量', other: '其他' };
 function filterValueLabel(k, v) {
   if (k === 'ws') return v === '__nows' ? '（未归属）' : wsName(v);
+  if (k === 'provider') return PROVIDERS[v] || v;
+  if (k === 'cc') return v === NO_CC ? '（未分配）' : ccName(v);
   if (k === 'key') return keyShort(v);
   if (k === 'dir') return DIR_LABEL[v] || v;
   if (k === 'item') return ioInfo(v).label;
@@ -239,15 +245,18 @@ function renderFilters(r) {
   const keyIds = [...state.apiKeys.keys()].sort((a, b) => keyShort(a).localeCompare(keyShort(b), 'zh-CN'));
   if (L.some(l => !l.apiKeyId)) keyIds.push(NONE_KEY);
   const models = uniq(L.map(l => l.model)).sort();
+  const ccs = uniq([...state.apiKeys.values()].map(k => k.costCenter).filter(Boolean)).sort((a, b) => a.localeCompare(b, 'zh-CN'));
   const cls = v => (v ? 'inp active' : 'inp');
   const moreCount = ['dir', 'item'].filter(k => f[k]).length + (f.channel !== '__all' ? 1 : 0);
   bar.hidden = false;
   bar.innerHTML = `<div class="fgroup">
+    ${multiCloud() || f.provider ? `<select class="${cls(f.provider)}" data-f="provider" aria-label="云厂商" title="云厂商">${opt('', '全部云厂商', f.provider)}${state.providers.map(p => opt(p, PROVIDERS[p], f.provider)).join('')}</select>` : ''}
     <select class="${cls(f.ws)}" data-f="ws" aria-label="业务空间" title="业务空间">${opt('', '全部业务空间', f.ws)}${wsOpts.map(([k, n]) => opt(k, n, f.ws)).join('')}</select>
     <select class="${cls(f.key)}" data-f="key" aria-label="API Key" title="API Key">${opt('', '全部 API Key', f.key)}${keyIds.map(id => opt(id, id === NONE_KEY ? '无 API Key（控制台/订阅）' : `${keyShort(id)} · ${id}`, f.key)).join('')}</select>
     <select class="${cls(f.model)}" data-f="model" aria-label="模型" title="模型">${opt('', '全部模型', f.model)}${models.map(m => opt(m, m, f.model)).join('')}</select>
+    ${ccs.length || f.cc ? `<select class="${cls(f.cc)}" data-f="cc" aria-label="成本中心" title="成本中心">${opt('', '全部成本中心', f.cc)}${ccs.map(c => opt(c, c, f.cc)).join('')}${opt(NO_CC, '（未分配成本中心）', f.cc)}</select>` : ''}
     <button class="btn" id="btnMore" aria-expanded="${ui.moreFilters}" aria-controls="moreFilters">${icon('filter')}更多筛选${moreCount ? `<span class="count">${moreCount}</span>` : ''}</button>
-    <div class="search">${icon('search')}<input class="inp" type="search" data-f="q" value="${esc(f.q)}" placeholder="搜索 Key、描述、模型、业务空间（按 / 聚焦）" aria-label="关键字搜索（快捷键 /）"></div>
+    <div class="search">${icon('search')}<input class="inp" type="search" data-f="q" value="${esc(f.q)}" placeholder="搜索 Key、模型、成本中心…（/）" title="搜索 Key、描述、模型、业务空间、成本中心、负责人（快捷键 /）" aria-label="关键字搜索（快捷键 /）"></div>
     </div>
     <div class="metric"><span class="lbl">费用口径</span><div class="seg sm" role="group" aria-label="费用口径">${Object.entries(METRICS).map(([k, l]) => `<button type="button" data-metric="${k}" aria-pressed="${f.metric === k}" title="${k === 'pretax' ? '扣除优惠与优惠券后的税前金额' : k === 'gross' ? '官网目录价金额' : '扣除优惠后的金额'}">${l.replace('金额', '')}</button>`).join('')}</div></div>`;
   more.hidden = !ui.moreFilters;
@@ -269,10 +278,11 @@ function renderFilters(r) {
 function renderNotices(r, extra) {
   const list = extra.slice();
   const s = state.status;
-  if (s && !s.aliyun.configured) list.push({ level: 'warn', title: s.aliyun.secretState === 'undecryptable' ? '已保存的 AccessKey 无法解密' : '尚未配置阿里云 AccessKey', why: isAdmin() ? '请在“系统管理 → 阿里云接入”中配置 RAM 用户 AccessKey（百炼只读 + 费用中心只读），保存后系统会自动同步数据。' : '请联系管理员完成配置。', go: isAdmin() ? '#/admin/aliyun' : null });
+  if (s && !s.anyConfigured) list.push({ level: 'warn', title: '尚未配置云厂商访问密钥', why: isAdmin() ? '请在“系统管理”中配置阿里云 RAM AccessKey（百炼只读 + 费用中心只读）或腾讯云 CAM API 密钥（TokenHub 只读 + 计费只读），保存后系统会自动同步数据。' : '请联系管理员完成配置。', go: isAdmin() ? '#/admin/aliyun' : null });
+  for (const p of Object.keys(PROVIDERS)) if (s?.providers?.[p]?.secretState === 'undecryptable') list.push({ level: 'warn', title: `已保存的${PROVIDERS[p]}访问密钥无法解密`, why: '主密钥（APP_MASTER_KEY）已变化，请重新填写访问密钥。', go: isAdmin() ? `#/admin/${p}` : null });
   const d = state.data;
-  if (d && !r.noData && route.name !== 'governance' && route.name !== 'key' && !state.lines.length && s?.aliyun.configured) {
-    list.push({ level: 'info', title: '所选周期暂无账单数据', why: d.period.mode === 'month' && !d.period.syncedAt ? '该账期尚未同步。管理员可在“系统管理 → 数据同步”中同步指定账期，或调大回溯月数。' : '该周期内没有百炼费用，或账单仍在同步中。' });
+  if (d && !r.noData && route.name !== 'governance' && route.name !== 'key' && !state.lines.length && s?.anyConfigured) {
+    list.push({ level: 'info', title: '所选周期暂无账单数据', why: d.period.mode === 'month' && !d.period.syncedAt ? '该账期尚未同步。管理员可在“系统管理 → 数据同步”中同步指定账期，或调大回溯月数。' : '该周期内没有大模型费用，或账单仍在同步中。' });
   } else if (d && r.filters && state.lines.length && activeFilterCount() && !filterLines().length) {
     list.push({ level: 'info', title: '当前筛选条件下没有数据', why: '可移除部分筛选条件，或切换统计周期。', unf: true });
   }
@@ -287,7 +297,7 @@ function syncSummary() {
   const last = Math.max(s.meta.lastSuccessAt || 0, s.bills.lastSuccessAt || 0);
   const bad = s.meta.last?.status === 'error' || s.bills.last?.status === 'error';
   const warn = !s.bills.lastSuccessAt || s.meta.last?.status === 'partial' || s.bills.last?.status === 'partial';
-  return { dot: bad ? 'bad' : warn ? 'warn' : 'ok', text: last ? `已同步 · ${ago(s.bills.lastSuccessAt || last)}` : '尚未同步' };
+  return { dot: bad ? 'bad' : warn ? 'warn' : 'ok', text: s.bills.lastSuccessAt ? `已同步 · ${ago(s.bills.lastSuccessAt)}` : last ? '部分已同步' : '尚未同步' };
 }
 function renderSyncBtn() {
   const x = syncSummary();
@@ -327,8 +337,12 @@ function renderSyncPop() {
       <span>每 ${x.intervalMin} 分钟自动同步${x.nextAt && !x.running ? ` · 下次约 ${esc(fmtTime(x.nextAt).slice(11))}` : ''}</span></div></div>`;
   };
   const p = state.data?.period;
-  pop.innerHTML = `<div class="pop-h">数据同步状态</div><div class="pop-body">
-    ${row('API Key / 业务空间', s.sync.meta)}${row('费用账单', s.sync.bills)}
+  const conf = s.sync.configured || [];
+  const rows = conf.length > 1
+    ? conf.map(pv => `<div class="sync-prov">${esc(PROVIDERS[pv])}</div>${row('API Key / 业务空间', s.sync.providers[pv].meta)}${row('费用账单', s.sync.providers[pv].bills)}`).join('')
+    : row('API Key / 业务空间', s.sync.meta) + row('费用账单', s.sync.bills);
+  pop.innerHTML = `<div class="pop-h">数据同步状态${conf.length === 1 ? ` · ${esc(PROVIDERS[conf[0]])}` : ''}</div><div class="pop-body">
+    ${rows}
     ${p ? `<div class="hint">${p.mode === 'month' ? `当前账期 ${esc(p.cycle)}：${p.final ? '已出账，为终版账单' : '未出账，账单持续入账中（约延迟数小时）'}` : `当前查询 ${esc(p.from)} ~ ${esc(p.to)}`}</div>` : ''}
     ${isAdmin() ? `<div class="row"><button class="btn sm primary" data-sync-now="meta">${icon('sync')}同步 Key</button><button class="btn sm" data-sync-now="bills">同步账单</button><button class="btn sm ghost" data-go="#/admin/sync">更多…</button></div>` : ''}
   </div>`;
@@ -493,11 +507,11 @@ async function poll() {
   await app.refreshStatus();
   const s = state.status?.sync;
   if (!s) return;
-  const latest = Math.max(s.meta.lastSuccessAt || 0, s.bills.lastSuccessAt || 0);
+  const latest = Math.max(s.meta.changedAt || 0, s.bills.changedAt || 0);
   if (latest > lastSyncSeen) {
     const first = !lastSyncSeen;
-    const billsChanged = (s.bills.lastSuccessAt || 0) > lastBillsSeen;
-    lastSyncSeen = latest; lastBillsSeen = s.bills.lastSuccessAt || 0;
+    const billsChanged = (s.bills.changedAt || 0) > lastBillsSeen;
+    lastSyncSeen = latest; lastBillsSeen = s.bills.changedAt || 0;
     if (!first && !$('#drawer').open && !document.querySelector('#dlgPwd[open]')) {
       await loadData({ silent: true });
       if (billsChanged && route.name !== 'admin') toast('账单数据已同步更新', '', 2200);
@@ -507,8 +521,8 @@ async function poll() {
 async function start() {
   await app.refreshStatus();
   const s = state.status?.sync;
-  lastSyncSeen = Math.max(s?.meta.lastSuccessAt || 0, s?.bills.lastSuccessAt || 0);
-  lastBillsSeen = s?.bills.lastSuccessAt || 0;
+  lastSyncSeen = Math.max(s?.meta.changedAt || 0, s?.bills.changedAt || 0);
+  lastBillsSeen = s?.bills.changedAt || 0;
   if (!ui.period.cycle || ui.period.cycle > state.today.slice(0, 7)) ui.period.cycle = state.today.slice(0, 7);
   if (ui.period.mode === 'range' && ui.period.preset !== 'custom') applyPreset(ui.period.preset);
   route = parseHash();

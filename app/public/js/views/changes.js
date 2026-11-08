@@ -2,7 +2,7 @@
 import { $, esc, state, ui, app, http, fmtTime, icon, help } from '../core.js';
 import { table } from '../table.js';
 
-const FIELD = { description: '描述', workspace_id: '业务空间ID', workspace_name: '业务空间', disabled: '禁用', auth_type: '授权类型', allow_all_models: '全部模型', accessible_models: '可访问模型', access_ips: 'IP 白名单', api_key_masked: 'API Key', name: '名称', region: '地域', service_site: '服务站点', api_host: 'API Host', tenant_id: '租户ID', gmt_create: '创建时间' };
+const FIELD = { remark: '备注', description: '描述', workspace_id: '业务空间ID', workspace_name: '业务空间', disabled: '禁用', auth_type: '授权类型', allow_all_models: '全部模型', accessible_models: '可访问模型', access_ips: 'IP 白名单', api_key_masked: 'API Key', name: '名称', region: '地域', service_site: '服务站点', api_host: 'API Host', tenant_id: '租户ID', gmt_create: '创建时间' };
 const CHG = { create: ['新增', 'good'], update: ['修改', 'warn'], delete: ['删除', 'bad'], restore: ['恢复', 'good'] };
 const fmtJson = s => { try { const o = JSON.parse(s || 'null'); return o ? Object.entries(o).map(([k, x]) => `${FIELD[k] || k}：${x == null || x === '' ? '（空）' : x}`).join('；') : ''; } catch { return ''; } };
 
@@ -23,7 +23,7 @@ export async function render(v) {
       <div><span>删除</span><b>${n('delete')}</b></div>
       <div><span>恢复</span><b>${n('restore')}</b></div>
     </div>
-    <section class="panel"><div class="panel-h"><h3>变更明细</h3>${help('每次与阿里云同步时比对得到的新增、修改（描述、归属、状态、权限、IP 白名单等）、删除与恢复。首次同步时的记录为初始化。')}
+    <section class="panel"><div class="panel-h"><h3>变更明细</h3>${help('每次与云厂商同步时比对得到的新增、修改（描述、归属、状态、权限、IP 白名单等）、删除与恢复。首次同步时的记录为初始化。')}
       <div class="actions"><div class="seg sm" role="group">${[['', '全部'], ['api_key', 'API Key'], ['workspace', '业务空间']].map(([k, l]) => `<button type="button" data-ent="${k}" aria-pressed="${f === k}">${l}</button>`).join('')}</div>
       <button class="btn sm" id="csv">${icon('download')}导出</button></div></div><div id="tbl"></div></section>`;
   v.querySelectorAll('[data-ent]').forEach(b => b.onclick = () => { ui.chgEntity = b.dataset.ent; render(v); });

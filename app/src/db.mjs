@@ -1,5 +1,6 @@
 /**
  * SQLite 持久化（node:sqlite，无第三方依赖）
+ * v3 起支持多云：业务空间 / API Key / 账单 / 同步记录均带 provider（aliyun | tencent）
  */
 import { DatabaseSync } from 'node:sqlite';
 import { encrypt, decrypt, sha256, randomToken } from './crypto.mjs';
@@ -89,18 +90,60 @@ CREATE TABLE IF NOT EXISTS sync_runs (
 CREATE INDEX IF NOT EXISTS idx_runs_kind ON sync_runs(kind, started_at);
 `;
 
+/* v3：多云 + 用量明细 + 成本中心标签 */
+const SCHEMA_V3 = `
+ALTER TABLE api_keys ADD COLUMN provider TEXT NOT NULL DEFAULT 'aliyun';
+ALTER TABLE api_keys ADD COLUMN remark TEXT;
+ALTER TABLE workspaces ADD COLUMN provider TEXT NOT NULL DEFAULT 'aliyun';
+ALTER TABLE bill_lines ADD COLUMN provider TEXT NOT NULL DEFAULT 'aliyun';
+ALTER TABLE bill_lines ADD COLUMN alloc INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE sync_runs ADD COLUMN provider TEXT NOT NULL DEFAULT 'aliyun';
+CREATE INDEX IF NOT EXISTS idx_bill_prov ON bill_lines(provider, granularity, period);
+
+CREATE TABLE bill_periods_v3 (
+  provider TEXT NOT NULL DEFAULT 'aliyun', granularity TEXT NOT NULL, period TEXT NOT NULL, product_code TEXT NOT NULL,
+  cycle TEXT NOT NULL, synced_at INTEGER NOT NULL, line_count INTEGER, pretax REAL, final INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (provider, granularity, period, product_code)
+);
+INSERT INTO bill_periods_v3 SELECT 'aliyun', granularity, period, product_code, cycle, synced_at, line_count, pretax, final FROM bill_periods;
+DROP TABLE bill_periods;
+ALTER TABLE bill_periods_v3 RENAME TO bill_periods;
+
+CREATE TABLE bill_cycles_v3 (
+  provider TEXT NOT NULL DEFAULT 'aliyun', cycle TEXT NOT NULL, product_codes TEXT, synced_at INTEGER NOT NULL, final INTEGER NOT NULL DEFAULT 0, pretax REAL, gross REAL,
+  PRIMARY KEY (provider, cycle)
+);
+INSERT INTO bill_cycles_v3 SELECT 'aliyun', cycle, product_codes, synced_at, final, pretax, gross FROM bill_cycles;
+DROP TABLE bill_cycles;
+ALTER TABLE bill_cycles_v3 RENAME TO bill_cycles;
+
+CREATE TABLE IF NOT EXISTS usage_lines (
+  provider TEXT NOT NULL, day TEXT NOT NULL, api_key_id TEXT NOT NULL, model TEXT NOT NULL,
+  input_tokens REAL, output_tokens REAL, cache_tokens REAL, total_tokens REAL, requests REAL, fails REAL, synced_at INTEGER,
+  PRIMARY KEY (provider, day, api_key_id, model)
+);
+CREATE INDEX IF NOT EXISTS idx_usage_day ON usage_lines(day);
+
+CREATE TABLE IF NOT EXISTS key_tags (
+  api_key_id TEXT PRIMARY KEY, cost_center TEXT, owner TEXT, note TEXT, updated_at INTEGER, updated_by TEXT
+);
+`;
+
+export const PROVIDERS = { aliyun: '阿里云', tencent: '腾讯云' };
 export const LINE_COLS = [
-  'period', 'api_key_id', 'workspace_id', 'model', 'io', 'channel', 'stop_flag', 'kind', 'usage', 'usage_unit', 'tokens',
+  'period', 'provider', 'api_key_id', 'workspace_id', 'model', 'io', 'channel', 'stop_flag', 'kind', 'usage', 'usage_unit', 'tokens',
   'list_price', 'list_price_unit', 'gross', 'pretax', 'after_discount', 'invoice_discount', 'coupons', 'cash_coupons', 'prepaid',
-  'resource_pkg', 'currency', 'billing_item', 'commodity_code', 'product_detail', 'instance_id', 'region', 'item',
+  'resource_pkg', 'currency', 'billing_item', 'commodity_code', 'product_detail', 'instance_id', 'region', 'item', 'alloc',
 ];
-const SLIM_COLS = ['period', 'api_key_id', 'workspace_id', 'model', 'io', 'channel', 'kind', 'usage', 'usage_unit', 'tokens', 'list_price', 'list_price_unit', 'gross', 'pretax', 'after_discount'];
-const INSERT_COLS = ['granularity', 'period', 'cycle', 'product_code', 'instance_id', 'api_key_id', 'workspace_id', 'model', 'io', 'channel', 'stop_flag', 'kind',
+const SLIM_COLS = ['period', 'provider', 'api_key_id', 'workspace_id', 'model', 'io', 'channel', 'kind', 'usage', 'usage_unit', 'tokens', 'list_price', 'list_price_unit', 'gross', 'pretax', 'after_discount', 'alloc'];
+const INSERT_COLS = ['provider', 'granularity', 'period', 'cycle', 'product_code', 'instance_id', 'api_key_id', 'workspace_id', 'model', 'io', 'channel', 'stop_flag', 'kind',
   'billing_item', 'billing_item_code', 'commodity_code', 'product_detail', 'usage', 'usage_unit', 'tokens', 'list_price', 'list_price_unit',
-  'gross', 'pretax', 'after_discount', 'invoice_discount', 'coupons', 'cash_coupons', 'prepaid', 'resource_pkg', 'currency', 'region', 'item', 'subscription_type', 'synced_at'];
+  'gross', 'pretax', 'after_discount', 'invoice_discount', 'coupons', 'cash_coupons', 'prepaid', 'resource_pkg', 'currency', 'region', 'item', 'subscription_type', 'alloc', 'synced_at'];
 
 export const DEFAULT_ALIYUN = { msRegion: 'cn-beijing', bssSite: 'cn', productCode: '' };
+export const DEFAULT_TENCENT = { region: 'ap-guangzhou', site: 'cn', businessCode: '', estimate: true };
 export const DEFAULT_SYNC = { metaIntervalMin: 5, billIntervalMin: 60, backfillMonths: 3, perWorkspaceKeys: true, concurrency: 3 };
+export const DEFAULT_BRANDING = { name: '大模型费用分析', subtitle: 'TokenTally · 多云 LLM 成本' };
 
 const n0 = v => (v == null || v === '' ? null : v);
 const shiftDay = (d, n) => { const t = new Date(d + 'T00:00:00Z'); t.setUTCDate(t.getUTCDate() + n); return t.toISOString().slice(0, 10); };
@@ -111,6 +154,7 @@ const jsonOrNull = v => (v == null ? null : JSON.stringify(v));
 
 export class Store {
   constructor(file, masterKey) {
+    this.file = file;
     this.db = new DatabaseSync(file);
     this.key = masterKey;
     this.stmts = new Map();
@@ -140,6 +184,11 @@ export class Store {
         UPDATE api_keys SET workspace_name = '' WHERE workspace_name = '-';
         PRAGMA user_version = 2;`);
     }
+    if (v < 3) {
+      this.db.exec('BEGIN IMMEDIATE');
+      try { this.db.exec(SCHEMA_V3); this.db.exec('PRAGMA user_version = 3'); this.db.exec('COMMIT'); }
+      catch (e) { this.db.exec('ROLLBACK'); throw e; }
+    }
   }
 
   /* ---------------- settings ---------------- */
@@ -160,8 +209,10 @@ export class Store {
   }
   setSecret(k, v) { this.setSetting(k, v ? encrypt(this.key, v, k) : null); }
   aliyunSettings() { return { ...DEFAULT_ALIYUN, ...(this.getSetting('aliyun', {}) || {}) }; }
+  tencentSettings() { return { ...DEFAULT_TENCENT, ...(this.getSetting('tencent', {}) || {}) }; }
   syncSettings() { return { ...DEFAULT_SYNC, ...(this.getSetting('sync', {}) || {}) }; }
   budgets() { return { ...DEFAULT_BUDGETS, ...(this.getSetting('budgets', {}) || {}) }; }
+  branding() { return { ...DEFAULT_BRANDING, ...(this.getSetting('branding', {}) || {}) }; }
 
   /* ---------------- users / sessions ---------------- */
   countUsers() { return this.q('SELECT COUNT(*) AS n FROM users').get().n; }
@@ -207,6 +258,7 @@ export class Store {
   deleteSession(idHash) { this.q('DELETE FROM sessions WHERE id_hash = ?').run(idHash); }
   deleteUserSessions(userId, exceptHash = '') { this.q('DELETE FROM sessions WHERE user_id = ? AND id_hash <> ?').run(Number(userId), exceptHash); }
   purgeSessions(idleMs) { this.q('DELETE FROM sessions WHERE expires_at <= ? OR last_seen <= ?').run(Date.now(), Date.now() - idleMs); }
+  countSessions() { return this.q('SELECT COUNT(*) AS n FROM sessions WHERE expires_at > ?').get(Date.now()).n; }
 
   audit(username, ip, action, detail) {
     this.q('INSERT INTO audit_log(ts, username, ip, action, detail) VALUES(?,?,?,?,?)')
@@ -226,10 +278,10 @@ export class Store {
   }
 
   /**
-   * 写入一次完整的元数据同步结果，记录新增/修改/删除/恢复。
-   * markMissing=true 时，本次未出现的记录标记为已删除（保留历史，账单仍可关联描述）。
+   * 写入某个云厂商一次完整的元数据同步结果，记录新增/修改/删除/恢复。
+   * markMissing=true 时，本次未出现的（同一厂商的）记录标记为已删除（保留历史，账单仍可关联描述）。
    */
-  applyMeta(wsList, keyList, { markMissing }) {
+  applyMeta(provider, wsList, keyList, { markMissing }) {
     const now = Date.now();
     let changes = 0;
     const diff = (cur, row, fields) => {
@@ -250,20 +302,20 @@ export class Store {
         };
         const cur = this.q('SELECT * FROM workspaces WHERE workspace_id = ?').get(id);
         if (!cur) {
-          this.q(`INSERT INTO workspaces(workspace_id, name, region, service_site, api_host, tenant_id, gmt_create, first_seen, last_seen, updated_at)
-            VALUES(?,?,?,?,?,?,?,?,?,?)`).run(id, row.name, row.region, row.service_site, row.api_host, row.tenant_id, row.gmt_create, now, now, now);
+          this.q(`INSERT INTO workspaces(workspace_id, provider, name, region, service_site, api_host, tenant_id, gmt_create, first_seen, last_seen, updated_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?)`).run(id, provider, row.name, row.region, row.service_site, row.api_host, row.tenant_id, row.gmt_create, now, now, now);
           this.logChange('workspace', id, row.name, 'create', null, row); changes++;
           continue;
         }
         const d = diff(cur, row, WS_FIELDS);
         if (d) { this.logChange('workspace', id, row.name, 'update', d[0], d[1]); changes++; }
         if (cur.deleted_at) { this.logChange('workspace', id, row.name, 'restore', null, null); changes++; }
-        this.q(`UPDATE workspaces SET name=?, region=?, service_site=?, api_host=?, tenant_id=?, gmt_create=?, last_seen=?, deleted_at=NULL,
+        this.q(`UPDATE workspaces SET provider=?, name=?, region=?, service_site=?, api_host=?, tenant_id=?, gmt_create=?, last_seen=?, deleted_at=NULL,
           updated_at = CASE WHEN ? THEN ? ELSE updated_at END WHERE workspace_id=?`)
-          .run(row.name, row.region, row.service_site, row.api_host, row.tenant_id, row.gmt_create, now, d || cur.deleted_at ? 1 : 0, now, id);
+          .run(provider, row.name, row.region, row.service_site, row.api_host, row.tenant_id, row.gmt_create, now, d || cur.deleted_at ? 1 : 0, now, id);
       }
       if (markMissing) {
-        for (const cur of this.q('SELECT workspace_id, name FROM workspaces WHERE deleted_at IS NULL').all()) {
+        for (const cur of this.q('SELECT workspace_id, name FROM workspaces WHERE deleted_at IS NULL AND provider = ?').all(provider)) {
           if (seenWs.has(cur.workspace_id)) continue;
           this.q('UPDATE workspaces SET deleted_at = ?, updated_at = ? WHERE workspace_id = ?').run(now, now, cur.workspace_id);
           this.logChange('workspace', cur.workspace_id, cur.name, 'delete', null, null); changes++;
@@ -271,7 +323,7 @@ export class Store {
       }
 
       const seenKeys = new Set();
-      const KEY_FIELDS = ['api_key_masked', 'description', 'workspace_id', 'workspace_name', 'disabled', 'auth_type', 'allow_all_models', 'accessible_models', 'access_ips'];
+      const KEY_FIELDS = ['api_key_masked', 'description', 'remark', 'workspace_id', 'workspace_name', 'disabled', 'auth_type', 'allow_all_models', 'accessible_models', 'access_ips'];
       for (const k of keyList) {
         const id = String(k.apiKeyId ?? '');
         if (!id) continue;
@@ -280,7 +332,7 @@ export class Store {
         const scope = auth.modelAccessScope || {};
         const dis = k.disabled;
         const row = {
-          api_key_masked: k.apiKeyValue || '', description: k.description || '', workspace_id: clean(k.workspaceId), workspace_name: clean(k.workspaceName),
+          api_key_masked: k.apiKeyValue || '', description: k.description || '', remark: k.remark || '', workspace_id: clean(k.workspaceId), workspace_name: clean(k.workspaceName),
           disabled: dis == null ? null : (dis === true || dis === 1 || dis === '1' || dis === 'true') ? 1 : 0,
           auth_type: auth.type || '', allow_all_models: scope.allowAllModels == null ? null : (scope.allowAllModels ? 1 : 0),
           accessible_models: JSON.stringify([...(scope.accessibleModels || [])].sort()), access_ips: JSON.stringify(auth.accessIps || []),
@@ -288,24 +340,24 @@ export class Store {
         };
         const cur = this.q('SELECT * FROM api_keys WHERE api_key_id = ?').get(id);
         if (!cur) {
-          this.q(`INSERT INTO api_keys(api_key_id, api_key_masked, description, workspace_id, workspace_name, disabled, auth_type, allow_all_models,
-            accessible_models, access_ips, created_by, gmt_create, first_seen, last_seen, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-            .run(id, row.api_key_masked, row.description, row.workspace_id, row.workspace_name, row.disabled, row.auth_type, row.allow_all_models,
+          this.q(`INSERT INTO api_keys(api_key_id, provider, api_key_masked, description, remark, workspace_id, workspace_name, disabled, auth_type, allow_all_models,
+            accessible_models, access_ips, created_by, gmt_create, first_seen, last_seen, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+            .run(id, provider, row.api_key_masked, row.description, row.remark, row.workspace_id, row.workspace_name, row.disabled, row.auth_type, row.allow_all_models,
               row.accessible_models, row.access_ips, row.created_by, row.gmt_create, now, now, now);
           this.logChange('api_key', id, row.description, 'create', null, { description: row.description, workspace_name: row.workspace_name }); changes++;
           continue;
         }
-        const d = diff(cur, row, KEY_FIELDS);
+        const d = diff({ ...cur, remark: cur.remark ?? '' }, row, KEY_FIELDS);
         if (d) { this.logChange('api_key', id, row.description, 'update', d[0], d[1]); changes++; }
         if (cur.deleted_at) { this.logChange('api_key', id, row.description, 'restore', null, null); changes++; }
-        this.q(`UPDATE api_keys SET api_key_masked=?, description=?, workspace_id=?, workspace_name=?, disabled=?, auth_type=?, allow_all_models=?,
+        this.q(`UPDATE api_keys SET provider=?, api_key_masked=?, description=?, remark=?, workspace_id=?, workspace_name=?, disabled=?, auth_type=?, allow_all_models=?,
           accessible_models=?, access_ips=?, created_by=?, gmt_create=?, last_seen=?, deleted_at=NULL,
           updated_at = CASE WHEN ? THEN ? ELSE updated_at END WHERE api_key_id=?`)
-          .run(row.api_key_masked, row.description, row.workspace_id, row.workspace_name, row.disabled, row.auth_type, row.allow_all_models,
+          .run(provider, row.api_key_masked, row.description, row.remark, row.workspace_id, row.workspace_name, row.disabled, row.auth_type, row.allow_all_models,
             row.accessible_models, row.access_ips, row.created_by, row.gmt_create, now, d || cur.deleted_at ? 1 : 0, now, id);
       }
       if (markMissing) {
-        for (const cur of this.q('SELECT api_key_id, description FROM api_keys WHERE deleted_at IS NULL').all()) {
+        for (const cur of this.q('SELECT api_key_id, description FROM api_keys WHERE deleted_at IS NULL AND provider = ?').all(provider)) {
           if (seenKeys.has(cur.api_key_id)) continue;
           this.q('UPDATE api_keys SET deleted_at = ?, updated_at = ? WHERE api_key_id = ?').run(now, now, cur.api_key_id);
           this.logChange('api_key', cur.api_key_id, cur.description, 'delete', null, null); changes++;
@@ -314,42 +366,90 @@ export class Store {
     });
     return changes;
   }
+  /** 用量中出现、但 Key 列表里没有的已删除 Key（腾讯云用量接口保留原名称）：补一条“已删除”记录，便于关联描述 */
+  ensureGhostKey(provider, id, name, workspaceId) {
+    if (!id || this.q('SELECT 1 FROM api_keys WHERE api_key_id = ?').get(id)) return false;
+    const now = Date.now();
+    this.q(`INSERT INTO api_keys(api_key_id, provider, description, workspace_id, first_seen, last_seen, deleted_at, updated_at) VALUES(?,?,?,?,?,?,?,?)`)
+      .run(id, provider, name || '', workspaceId || '', now, now, now, now);
+    return true;
+  }
 
-  listWorkspaces() { return this.q('SELECT * FROM workspaces ORDER BY gmt_create').all(); }
-  listApiKeys() { return this.q('SELECT * FROM api_keys ORDER BY CAST(api_key_id AS INTEGER) DESC').all(); }
+  listWorkspaces() { return this.q('SELECT * FROM workspaces ORDER BY provider, gmt_create').all(); }
+  listApiKeys() { return this.q('SELECT * FROM api_keys ORDER BY provider, CAST(api_key_id AS INTEGER) DESC, api_key_id DESC').all(); }
   listChanges(limit = 1000) { return this.q('SELECT * FROM change_log ORDER BY id DESC LIMIT ?').all(limit); }
+  changesSince(id) { return this.q('SELECT * FROM change_log WHERE id > ? ORDER BY id LIMIT 200').all(Number(id) || 0); }
+  maxChangeId() { return this.q('SELECT COALESCE(MAX(id), 0) AS n FROM change_log').get().n; }
+  providersInUse() { return this.q('SELECT DISTINCT provider FROM api_keys UNION SELECT DISTINCT provider FROM bill_lines').all().map(r => r.provider); }
+
+  /* ---------------- 成本中心 / 负责人标签 ---------------- */
+  listKeyTags() { return this.q('SELECT * FROM key_tags').all(); }
+  setKeyTag(id, { costCenter = '', owner = '', note = '' }, by = '') {
+    const cc = String(costCenter || '').trim().slice(0, 40), ow = String(owner || '').trim().slice(0, 40), nt = String(note || '').trim().slice(0, 200);
+    if (!cc && !ow && !nt) { this.q('DELETE FROM key_tags WHERE api_key_id = ?').run(id); return null; }
+    this.q(`INSERT INTO key_tags(api_key_id, cost_center, owner, note, updated_at, updated_by) VALUES(?,?,?,?,?,?)
+      ON CONFLICT(api_key_id) DO UPDATE SET cost_center=excluded.cost_center, owner=excluded.owner, note=excluded.note, updated_at=excluded.updated_at, updated_by=excluded.updated_by`)
+      .run(id, cc, ow, nt, Date.now(), by);
+    return { costCenter: cc, owner: ow, note: nt };
+  }
 
   /* ---------------- 账单 ---------------- */
-  getPeriod(gran, period, code) {
-    return this.q('SELECT * FROM bill_periods WHERE granularity = ? AND period = ? AND product_code = ?').get(gran, period, code);
+  getPeriod(provider, gran, period, code) {
+    return this.q('SELECT * FROM bill_periods WHERE provider = ? AND granularity = ? AND period = ? AND product_code = ?').get(provider, gran, period, code);
   }
-  getCycle(cycle) { return this.q('SELECT * FROM bill_cycles WHERE cycle = ?').get(cycle); }
-  listCycles() { return this.q('SELECT * FROM bill_cycles ORDER BY cycle DESC').all(); }
+  /** 账期同步状态（多云合并：任一厂商已同步即视为已同步；全部已出账才视为终版） */
+  getCycle(cycle, provider) {
+    if (provider) return this.q('SELECT * FROM bill_cycles WHERE provider = ? AND cycle = ?').get(provider, cycle);
+    return this.q(`SELECT cycle, MAX(synced_at) AS synced_at, MIN(final) AS final, SUM(pretax) AS pretax, SUM(gross) AS gross, GROUP_CONCAT(provider) AS providers
+      FROM bill_cycles WHERE cycle = ? GROUP BY cycle`).get(cycle);
+  }
+  listCycles() {
+    return this.q(`SELECT cycle, MAX(synced_at) AS synced_at, MIN(final) AS final, SUM(pretax) AS pretax, SUM(gross) AS gross, GROUP_CONCAT(provider) AS providers
+      FROM bill_cycles GROUP BY cycle ORDER BY cycle DESC`).all();
+  }
+  listCyclesByProvider() { return this.q('SELECT * FROM bill_cycles ORDER BY cycle DESC, provider').all(); }
 
-  /** 以“账期/日 + 产品”为单位整体替换，保证与阿里云账单一致（含金额回调、出账修正） */
-  replaceBillPeriod(gran, period, cycle, code, rows, final) {
-    const now = Date.now();
+  insertLines(provider, gran, period, cycle, code, rows, now) {
     const ins = this.q(`INSERT INTO bill_lines(${INSERT_COLS.join(',')}) VALUES(${INSERT_COLS.map(() => '?').join(',')})`);
+    let pretax = 0;
+    for (const r of rows) {
+      pretax += r.pretax || 0;
+      ins.run(provider, gran, period, cycle, code, r.instance_id, r.api_key_id, r.workspace_id, r.model, r.io, r.channel, r.stop_flag, r.kind,
+        r.billing_item, r.billing_item_code, r.commodity_code, r.product_detail, n0(r.usage), r.usage_unit, n0(r.tokens), r.list_price, r.list_price_unit,
+        r.gross, r.pretax, r.after_discount, r.invoice_discount, r.coupons, r.cash_coupons, r.prepaid, r.resource_pkg, r.currency, r.region, r.item,
+        r.subscription_type, r.alloc || 0, now);
+    }
+    this.q(`INSERT INTO bill_periods(provider, granularity, period, product_code, cycle, synced_at, line_count, pretax, final) VALUES(?,?,?,?,?,?,?,?,?)
+      ON CONFLICT(provider, granularity, period, product_code) DO UPDATE SET synced_at=excluded.synced_at, line_count=excluded.line_count, pretax=excluded.pretax, final=excluded.final`)
+      .run(provider, gran, period, code, cycle, now, rows.length, pretax, 0);
+    return pretax;
+  }
+  /** 以“厂商 + 账期/日 + 产品”为单位整体替换，保证与云厂商账单一致（含金额回调、出账修正） */
+  replaceBillPeriod(provider, gran, period, cycle, code, rows, final) {
+    const now = Date.now();
     this.tx(() => {
-      this.q('DELETE FROM bill_lines WHERE granularity = ? AND period = ? AND product_code = ?').run(gran, period, code);
-      let pretax = 0;
-      for (const r of rows) {
-        pretax += r.pretax || 0;
-        ins.run(gran, period, cycle, code, r.instance_id, r.api_key_id, r.workspace_id, r.model, r.io, r.channel, r.stop_flag, r.kind,
-          r.billing_item, r.billing_item_code, r.commodity_code, r.product_detail, n0(r.usage), r.usage_unit, n0(r.tokens), r.list_price, r.list_price_unit,
-          r.gross, r.pretax, r.after_discount, r.invoice_discount, r.coupons, r.cash_coupons, r.prepaid, r.resource_pkg, r.currency, r.region, r.item,
-          r.subscription_type, now);
-      }
-      this.q(`INSERT INTO bill_periods(granularity, period, product_code, cycle, synced_at, line_count, pretax, final) VALUES(?,?,?,?,?,?,?,?)
-        ON CONFLICT(granularity, period, product_code) DO UPDATE SET synced_at=excluded.synced_at, line_count=excluded.line_count, pretax=excluded.pretax, final=excluded.final`)
-        .run(gran, period, code, cycle, now, rows.length, pretax, final ? 1 : 0);
+      this.q('DELETE FROM bill_lines WHERE provider = ? AND granularity = ? AND period = ? AND product_code = ?').run(provider, gran, period, code);
+      this.insertLines(provider, gran, period, cycle, code, rows, now);
+      if (final) this.q('UPDATE bill_periods SET final = 1 WHERE provider = ? AND granularity = ? AND period = ? AND product_code = ?').run(provider, gran, period, code);
     });
   }
-  markCycle(cycle, codes, final) {
-    const t = this.q("SELECT COALESCE(SUM(pretax),0) AS p, COALESCE(SUM(gross),0) AS g FROM bill_lines WHERE granularity = 'M' AND cycle = ?").get(cycle);
-    this.q(`INSERT INTO bill_cycles(cycle, product_codes, synced_at, final, pretax, gross) VALUES(?,?,?,?,?,?)
-      ON CONFLICT(cycle) DO UPDATE SET product_codes=excluded.product_codes, synced_at=excluded.synced_at, final=excluded.final, pretax=excluded.pretax, gross=excluded.gross`)
-      .run(cycle, codes.join(','), Date.now(), final ? 1 : 0, t.p, t.g);
+  /** 一个账期的日账单 + 月账单整体替换（腾讯云：按月拉取明细后在本地拆分到日） */
+  replaceBillCycle(provider, cycle, code, dayRows, days, monthRows, final) {
+    const now = Date.now();
+    this.tx(() => {
+      // 产品代码可能随账单变化（如新增混元等产品），整账期替换，不按产品代码删除
+      this.q('DELETE FROM bill_lines WHERE provider = ? AND cycle = ?').run(provider, cycle);
+      this.q('DELETE FROM bill_periods WHERE provider = ? AND cycle = ?').run(provider, cycle);
+      for (const day of days) this.insertLines(provider, 'D', day, cycle, code, dayRows.get(day) || [], now);
+      this.insertLines(provider, 'M', cycle, cycle, code, monthRows, now);
+      if (final) this.q('UPDATE bill_periods SET final = 1 WHERE provider = ? AND cycle = ? AND product_code = ?').run(provider, cycle, code);
+    });
+  }
+  markCycle(provider, cycle, codes, final) {
+    const t = this.q("SELECT COALESCE(SUM(pretax),0) AS p, COALESCE(SUM(gross),0) AS g FROM bill_lines WHERE provider = ? AND granularity = 'M' AND cycle = ?").get(provider, cycle);
+    this.q(`INSERT INTO bill_cycles(provider, cycle, product_codes, synced_at, final, pretax, gross) VALUES(?,?,?,?,?,?,?)
+      ON CONFLICT(provider, cycle) DO UPDATE SET product_codes=excluded.product_codes, synced_at=excluded.synced_at, final=excluded.final, pretax=excluded.pretax, gross=excluded.gross`)
+      .run(provider, cycle, codes.join(','), Date.now(), final ? 1 : 0, t.p, t.g);
   }
   replaceMsOverview(cycle, groupCode, groups) {
     const now = Date.now();
@@ -365,6 +465,29 @@ export class Store {
     return this.q('SELECT key, name, amount, article_codes, synced_at FROM ms_overview WHERE cycle = ? AND group_code = ? ORDER BY amount DESC').all(cycle, groupCode);
   }
 
+  /* ---------------- 用量明细（腾讯云 TokenHub：Key × 模型 × 日） ---------------- */
+  replaceUsage(provider, from, to, rows) {
+    const now = Date.now();
+    this.tx(() => {
+      this.q('DELETE FROM usage_lines WHERE provider = ? AND day >= ? AND day <= ?').run(provider, from, to);
+      const ins = this.q(`INSERT INTO usage_lines(provider, day, api_key_id, model, input_tokens, output_tokens, cache_tokens, total_tokens, requests, fails, synced_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(provider, day, api_key_id, model) DO UPDATE SET input_tokens=input_tokens+excluded.input_tokens,
+        output_tokens=output_tokens+excluded.output_tokens, cache_tokens=cache_tokens+excluded.cache_tokens, total_tokens=total_tokens+excluded.total_tokens,
+        requests=requests+excluded.requests, fails=fails+excluded.fails`);
+      for (const r of rows) ins.run(provider, r.day, r.api_key_id, r.model, r.input_tokens || 0, r.output_tokens || 0, r.cache_tokens || 0, r.total_tokens || 0, r.requests || 0, r.fails || 0, now);
+    });
+  }
+  usageRows(provider, from, to) {
+    return this.q('SELECT day, api_key_id, model, input_tokens, output_tokens, cache_tokens, total_tokens, requests, fails FROM usage_lines WHERE provider = ? AND day >= ? AND day <= ?').all(provider, from, to);
+  }
+  /** 前端：按 日 × Key × 模型 的请求次数、失败次数与 Token（腾讯云 TokenHub 用量统计） */
+  queryUsage(from, to) {
+    const cols = ['provider', 'day', 'api_key_id', 'model', 'requests', 'fails', 'input_tokens', 'output_tokens', 'cache_tokens', 'total_tokens'];
+    const rows = this.q(`SELECT provider, day, api_key_id, model, requests, fails, input_tokens, output_tokens, cache_tokens, total_tokens
+      FROM usage_lines WHERE day >= ? AND day <= ? ORDER BY day`).all(from, to);
+    return { cols, rows: rows.map(r => cols.map(c => r[c])) };
+  }
+
   /** 返回紧凑数组：{ cols, rows }；slim=true 时只返回趋势/对比所需的列 */
   queryLines(gran, from, to, slim = false) {
     const cols = slim ? SLIM_COLS : LINE_COLS;
@@ -373,10 +496,10 @@ export class Store {
   }
   /** 同比/环比用：按维度聚合的上期数据 */
   queryAgg(gran, from, to) {
-    const cols = ['api_key_id', 'workspace_id', 'model', 'io', 'channel', 'kind', 'gross', 'pretax', 'after_discount', 'tokens', 'usage_unit'];
-    const rows = this.q(`SELECT api_key_id, workspace_id, model, io, channel, kind, SUM(gross) AS gross, SUM(pretax) AS pretax, SUM(after_discount) AS after_discount,
+    const cols = ['provider', 'api_key_id', 'workspace_id', 'model', 'io', 'channel', 'kind', 'gross', 'pretax', 'after_discount', 'tokens', 'usage_unit'];
+    const rows = this.q(`SELECT provider, api_key_id, workspace_id, model, io, channel, kind, SUM(gross) AS gross, SUM(pretax) AS pretax, SUM(after_discount) AS after_discount,
       SUM(tokens) AS tokens, usage_unit FROM bill_lines WHERE granularity = ? AND period >= ? AND period <= ?
-      GROUP BY api_key_id, workspace_id, model, io, channel, kind, usage_unit`).all(gran, from, to);
+      GROUP BY provider, api_key_id, workspace_id, model, io, channel, kind, usage_unit`).all(gran, from, to);
     return { cols, rows: rows.map(r => cols.map(c => r[c])) };
   }
   /** 每个 Key 的最近消费日、近 7/30 天应付金额（基于日账单） */
@@ -396,16 +519,32 @@ export class Store {
     const daily = this.q("SELECT period AS day, SUM(pretax) AS cost FROM bill_lines WHERE granularity = 'D' AND period >= ? AND period <= ? GROUP BY period").all(cycle + '-01', cycle + '-31');
     return { month, daily };
   }
-  /** 数据版本指纹：账单、对账、Key/空间元数据、预算任一变化都会改变，用于 /api/data 的 ETag */
+  /** 日报 / 周报 / 异常检测：日账单按 日 × Key 汇总（含 Token） */
+  dailyByKey(from, to) {
+    return this.q(`SELECT period AS day, COALESCE(api_key_id, '') AS id, provider, SUM(pretax) AS cost, SUM(COALESCE(tokens, 0)) AS tokens
+      FROM bill_lines WHERE granularity = 'D' AND period >= ? AND period <= ? GROUP BY period, COALESCE(api_key_id, ''), provider`).all(from, to);
+  }
+  dailyByModel(from, to) {
+    return this.q(`SELECT model, SUM(pretax) AS cost, SUM(COALESCE(tokens, 0)) AS tokens FROM bill_lines WHERE granularity = 'D' AND period >= ? AND period <= ? GROUP BY model`).all(from, to);
+  }
+  monthByKey(cycle) {
+    return this.q(`SELECT COALESCE(api_key_id, '') AS id, provider, SUM(pretax) AS cost, SUM(gross) AS gross FROM bill_lines WHERE granularity = 'M' AND period = ? GROUP BY COALESCE(api_key_id, ''), provider`).all(cycle);
+  }
+  monthByModel(cycle) {
+    return this.q(`SELECT model, SUM(pretax) AS cost FROM bill_lines WHERE granularity = 'M' AND period = ? GROUP BY model`).all(cycle);
+  }
+  /** 数据版本指纹：账单、对账、用量、Key/空间元数据、标签、预算任一变化都会改变，用于 /api/data 的 ETag */
   dataVersion() {
     const r = this.q(`SELECT
       (SELECT COALESCE(MAX(synced_at), 0) || ':' || COUNT(*) FROM bill_periods) AS b,
-      (SELECT COALESCE(MAX(synced_at), 0) FROM bill_cycles) AS c,
+      (SELECT COALESCE(MAX(synced_at), 0) || ':' || COUNT(*) FROM bill_cycles) AS c,
       (SELECT COALESCE(MAX(synced_at), 0) FROM ms_overview) AS m,
+      (SELECT COALESCE(MAX(synced_at), 0) || ':' || COUNT(*) FROM usage_lines) AS u,
       (SELECT COALESCE(MAX(updated_at), 0) || ':' || COALESCE(MAX(last_seen), 0) || ':' || COUNT(*) FROM api_keys) AS k,
       (SELECT COALESCE(MAX(updated_at), 0) || ':' || COALESCE(MAX(last_seen), 0) || ':' || COUNT(*) FROM workspaces) AS w,
-      (SELECT COALESCE(MAX(updated_at), 0) FROM settings WHERE k = 'budgets') AS s`).get();
-    return [r.b, r.c, r.m, r.k, r.w, r.s].join('|');
+      (SELECT COALESCE(MAX(updated_at), 0) || ':' || COUNT(*) FROM key_tags) AS t,
+      (SELECT COALESCE(MAX(updated_at), 0) FROM settings WHERE k IN ('budgets', 'branding')) AS s`).get();
+    return [r.b, r.c, r.m, r.u, r.k, r.w, r.t, r.s].join('|');
   }
   dataRange() {
     const d = this.q("SELECT MIN(period) AS min, MAX(period) AS max, COUNT(*) AS n FROM bill_lines WHERE granularity = 'D'").get();
@@ -413,18 +552,28 @@ export class Store {
   }
 
   /* ---------------- 同步任务 ---------------- */
-  startRun(kind, trig) {
-    return this.q("INSERT INTO sync_runs(kind, trig, started_at, status) VALUES(?,?,?,'running')").run(kind, trig, Date.now()).lastInsertRowid;
+  startRun(kind, trig, provider = 'aliyun') {
+    return this.q("INSERT INTO sync_runs(kind, trig, provider, started_at, status) VALUES(?,?,?,?,'running')").run(kind, trig, provider, Date.now()).lastInsertRowid;
   }
   finishRun(id, status, detail, error, calls) {
     this.q('UPDATE sync_runs SET finished_at = ?, status = ?, detail = ?, error = ?, api_calls = ? WHERE id = ?')
       .run(Date.now(), status, jsonOrNull(detail), error || null, calls ?? null, id);
   }
-  lastRun(kind, status) {
+  lastRun(kind, status, provider = 'aliyun') {
     return status
-      ? this.q('SELECT * FROM sync_runs WHERE kind = ? AND status = ? ORDER BY id DESC LIMIT 1').get(kind, status)
-      : this.q("SELECT * FROM sync_runs WHERE kind = ? AND status <> 'running' ORDER BY id DESC LIMIT 1").get(kind);
+      ? this.q('SELECT * FROM sync_runs WHERE kind = ? AND status = ? AND provider = ? ORDER BY id DESC LIMIT 1').get(kind, status, provider)
+      : this.q("SELECT * FROM sync_runs WHERE kind = ? AND provider = ? AND status <> 'running' ORDER BY id DESC LIMIT 1").get(kind, provider);
+  }
+  /** 最近 n 次（已结束）同步结果，用于判断连续失败 */
+  recentRuns(kind, provider, n = 5) {
+    return this.q("SELECT id, status, started_at, finished_at, error FROM sync_runs WHERE kind = ? AND provider = ? AND status <> 'running' ORDER BY id DESC LIMIT ?").all(kind, provider, n);
   }
   listRuns(limit = 100) { return this.q('SELECT * FROM sync_runs ORDER BY id DESC LIMIT ?').all(limit); }
   failStaleRuns() { this.q("UPDATE sync_runs SET status = 'error', error = '服务重启，任务中断', finished_at = ? WHERE status = 'running'").run(Date.now()); }
+
+  /* ---------------- 备份 ---------------- */
+  /** 在线一致性备份（VACUUM INTO 生成完整的单文件数据库副本） */
+  backupTo(file) {
+    this.db.prepare('VACUUM INTO ?').run(file);
+  }
 }

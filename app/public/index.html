@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
 <meta name="color-scheme" content="light dark">
-<title>百炼费用分析</title>
+<title>大模型费用分析</title>
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/app.css">
 </head>
@@ -14,7 +14,7 @@
   <aside class="sidebar" aria-label="主导航">
     <div class="brand">
       <div class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke-width="2.2" stroke-linecap="round"><path d="M4 19V11M10 19V5M16 19v-6M22 19H2"/></svg></div>
-      <div class="brand-text"><b>百炼费用分析</b><span>MODEL STUDIO · COST INSIGHT</span></div>
+      <div class="brand-text"><b id="brandName">大模型费用分析</b><span id="brandSub">TokenTally · 多云 LLM 成本</span></div>
     </div>
     <nav id="nav"></nav>
     <div class="side-foot" id="sideFoot"></div>
@@ -27,8 +27,8 @@
 
       <div class="tb-group" id="periodBox" role="group" aria-label="统计周期">
         <div class="seg" id="modeSeg">
-          <button type="button" data-mode="month" title="按阿里云账期（自然月），金额与费用中心“按账期”账单一致">账期</button>
-          <button type="button" data-mode="range" title="按自然日（北京时间），金额与费用中心“按天”账单一致">日期</button>
+          <button type="button" data-mode="month" title="按账期（自然月），金额与云厂商费用中心“按账期”账单一致">账期</button>
+          <button type="button" data-mode="range" title="按自然日（北京时间），金额与云厂商费用中心“按天”账单一致">日期</button>
         </div>
         <span class="tb-group" id="monthBox">
           <button class="btn ghost icon" id="btnPrev" title="上一账期" aria-label="上一账期"><svg class="ico" viewBox="0 0 24 24"><path d="M15 6l-6 6 6 6"/></svg></button>
@@ -65,10 +65,10 @@
       <details class="note" id="note">
         <summary>数据口径说明</summary>
         <div>
-          “账期”使用阿里云费用中心月度实例账单（DescribeInstanceBill · MONTHLY），“日期”使用按天账单（DAILY），自然日按北京时间划分，金额与阿里云控制台一致。
-          应付金额 = 原价 − 优惠 − 优惠券抵扣（税前）；可在筛选栏切换为原价或优惠后金额。账单相对实际调用约延迟数小时，当月数据会随同步持续更新，次月 3 日后出账为准。
+          <b>阿里云百炼</b>：“账期”使用费用中心月度实例账单（DescribeInstanceBill · MONTHLY），“日期”使用按天账单（DAILY），金额与阿里云控制台一致；账单实例ID格式 <span class="mono">ApiKeyID;业务空间ID;模型;计费项;[调用渠道];[免费额度用完即停]</span>，ApiKeyID 为空表示控制台体验、订阅套餐、Batch 等非 API Key 调用。<br>
+          <b>腾讯云 TokenHub</b>：账单来自计费中心账单明细（DescribeBillDetail，按资源出账，不含 API Key）。Key 级费用 = 当日该模型同一计费项（输入 / 缓存命中 / 输出）的真实账单金额 × 该 Key 在当日该模型对应 Token 用量（TokenHub 用量统计）中的占比，标记为“分摊”；资源本身为 API Key 时直接归属。合计金额与腾讯云账单完全一致。缺少费用权限时可按目录价“估算”。<br>
+          自然日按北京时间划分。应付金额 = 原价 − 优惠 − 优惠券抵扣（税前）；可在筛选栏切换为原价或优惠后金额。账单相对实际调用约延迟数小时，当月数据会随同步持续更新，次月 3 日后出账为准。
           环比：历史账期对比上月全月，当月对比上月同期（相同天数），按日期查询对比上一个等长周期。
-          账单实例ID格式：<span class="mono">ApiKeyID;业务空间ID;模型;计费项;[调用渠道];[免费额度用完即停]</span>，ApiKeyID 为空表示控制台体验、订阅套餐、Batch 等非 API Key 调用。
         </div>
       </details>
     </main>

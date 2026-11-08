@@ -4,7 +4,9 @@
  *  - BssOpenApi 2017-12-14（RPC）：QueryBillOverview / DescribeInstanceBill
  */
 import crypto from 'node:crypto';
+import { callLog, recordCall, summarize } from './calllog.mjs';
 
+export { callLog };
 export const MS_REGIONS = ['cn-beijing', 'cn-hongkong', 'ap-southeast-1', 'us-east-1', 'eu-central-1'];
 export const BSS_ENDPOINTS = { cn: 'business.aliyuncs.com', intl: 'business.ap-southeast-1.aliyuncs.com' };
 
@@ -99,12 +101,6 @@ export function selfTest() {
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-/** 最近的接口调用记录（不含任何密钥），供管理页面排查 */
-export const callLog = [];
-function recordCall(entry) {
-  callLog.unshift(entry);
-  if (callLog.length > 300) callLog.length = 300;
-}
 
 export class AliyunClient {
   constructor({ accessKeyId, accessKeySecret, securityToken = '', msRegion = 'cn-beijing', bssSite = 'cn' }) {
@@ -131,11 +127,11 @@ export class AliyunClient {
       accessKeyId: this.accessKeyId, accessKeySecret: this.accessKeySecret, securityToken: this.securityToken,
       date: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'), nonce: crypto.randomBytes(16).toString('hex'),
     });
-    const headers = { Accept: 'application/json', 'User-Agent': 'bailian-cost/1.0', Authorization: s.authorization };
+    const headers = { Accept: 'application/json', 'User-Agent': 'tokentally/1.2', Authorization: s.authorization };
     for (const [k, v] of Object.entries(s.headers)) if (k !== 'host') headers[k] = v;
     const url = `https://${host}${path}${s.query ? '?' + s.query : ''}`;
     const t0 = Date.now();
-    const entry = { ts: t0, product, action, query: summarize(q), status: 0, ms: 0, ok: false, code: '', message: '', requestId: '' };
+    const entry = { ts: t0, provider: 'aliyun', product, action, query: summarize(q), status: 0, ms: 0, ok: false, code: '', message: '', requestId: '' };
     this.calls++;
     let res, text;
     try {
@@ -199,9 +195,6 @@ export class AliyunClient {
   }
 }
 
-function summarize(q) {
-  return Object.entries(q).map(([k, v]) => `${k}=${v.length > 80 ? v.slice(0, 80) + '…' : v}`).join(' ');
-}
 
 /* ===================================================================
  * 账单解析：实例ID = ApiKeyID;业务空间ID;模型;计费项;[调用渠道];[免费额度用完即停]

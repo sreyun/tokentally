@@ -2,11 +2,12 @@
 import {
   $, esc, state, ui, app, http, money, moneyShort, compact, intFmt, pct, sum, uniq, metricVal, METRICS, NONE_KEY, DIMS, keyObj, keyShort, keyDesc, wsName,
   aggregate, aggAll, sortedAggs, totalTokens, deltaPill, tipRows, icon, help, segCtl, fmtTime, budgetOf, budgetLevel, forecastOf, channelLabel,
-  WEEK, weekday, ioInfo, num, periodTag, daysBetween, copyBtn,
+  WEEK, weekday, ioInfo, num, periodTag, daysBetween, copyBtn, PROVIDERS, provTag, isAdmin, perCall, unitsText,
 } from '../core.js';
 import { columnChart, rankList, segbar, legendList, legendHtml } from '../charts.js';
 import { table, dataBar } from '../table.js';
 import { billDimsHtml } from './models.js';
+import { editTags } from './keys.js';
 
 export function render(v, id) {
   const k = keyObj(id);
@@ -24,6 +25,7 @@ export function render(v, id) {
   const budget = p.mode === 'month' ? budgetOf(id) : null;
   const fc = forecastOf(daily, l => l.pretax);
   const act = state.keyActivity.get(id);
+  const us = state.usage.get(id);
   const days = uniq(daily.map(l => l.date)).sort();
   const statusPill = id === NONE_KEY ? '<span class="pill neutral">非 Key 调用</span>'
     : k.source === 'deleted' ? `<span class="pill bad">已删除 ${fmtTime(k.deletedAt, false)}</span>` : k.source === 'bill' ? '<span class="pill warn">不在 Key 列表</span>'
@@ -46,21 +48,28 @@ export function render(v, id) {
     </div>
     <div class="entity-h">
       <span class="entity-ico">${icon('key')}</span>
-      <div class="entity-t"><h2>${esc(keyShort(id))} ${statusPill}${k && !k.description && id !== NONE_KEY ? '<span class="pill warn">无描述</span>' : ''}</h2>
-        <div class="sub">${id === NONE_KEY ? '账单实例ID中 ApiKeyID 为空：控制台体验、订阅套餐、托管智能体、Batch 等非 API Key 调用'
-          : `ID <span class="mono">${esc(id)}</span>${copyBtn(id, '复制 Key ID')} · <span class="mono">${esc(k.apiKeyValue || '—')}</span> · 业务空间 ${esc(wsName(k.wsKey))}${k.wsKey ? ` <span class="mono">${esc(k.wsKey)}</span>${copyBtn(k.wsKey, '复制业务空间ID')}` : ''} · 创建于 ${fmtTime(k.gmtCreate, false)}`}</div></div>
+      <div class="entity-t"><h2>${esc(keyShort(id))} ${provTag(k?.provider, !!k)} ${statusPill}${k && !k.description && id !== NONE_KEY ? '<span class="pill warn">无描述</span>' : ''}</h2>
+        <div class="sub">${id === NONE_KEY ? '账单中 API Key 为空：控制台体验、订阅套餐、托管智能体、Batch 等非 API Key 调用，或腾讯云中未匹配到 Key 用量的费用'
+          : `ID <span class="mono">${esc(id)}</span>${copyBtn(id, '复制 Key ID')} · <span class="mono">${esc(k.apiKeyValue || '—')}</span> · 业务空间 ${esc(wsName(k.wsKey))}${k.wsKey ? ` <span class="mono">${esc(k.wsKey)}</span>${copyBtn(k.wsKey, '复制业务空间ID')}` : ''} · 创建于 ${fmtTime(k.gmtCreate, false)}`}</div>
+        ${k && id !== NONE_KEY ? `<div class="tag-line">${icon('tag')}<span>成本中心 <b>${esc(k.costCenter || '未分配')}</b></span><span>负责人 <b>${esc(k.owner || '—')}</b></span>${k.note || k.remark ? `<span class="muted" title="${esc(k.note ? '本地备注' : '云厂商备注')}">${esc(k.note || k.remark)}</span>` : ''}${isAdmin() ? `<button class="link" data-edit-tags>编辑</button>` : ''}</div>` : ''}</div>
       <div class="row"><span class="lbl muted" style="font-size:12px">费用口径</span>${segMetric()}<button class="btn" data-key-detail>${icon('list')}账单明细</button></div>
     </div>
+    ${lines.some(l => l.alloc === 1) ? `<div class="notice info">${icon('info')}<div><b>费用按用量分摊</b><span class="why">腾讯云账单按推理服务 / 模型出账、不含 API Key。该 Key 的费用 = 每天各模型（输入 / 缓存命中 / 输出）真实账单金额 × 该 Key 在对应 Token 用量中的占比，所有 Key 合计与腾讯云账单一致。</span></div></div>` : ''}
+    ${lines.some(l => l.alloc === 2) ? `<div class="notice warn">${icon('warn')}<div><b>费用为目录价估算</b><span class="why">腾讯云 CAM 子用户缺少计费只读权限，当前按 TokenHub 模型目录价 × 用量估算，未含折扣与阶梯价。</span></div></div>` : ''}
     <div class="kpi-wrap"><div class="kpi-row">
       ${tile('wallet', `本期费用 · ${METRICS[ui.f.metric]}`, money(a.cost), deltaPill(a.cost, pa.cost), state.compareLabel, `上期 ${money(pa.cost)} · 原价 ${moneyShort(a.gross)}`)}
-      ${tile('layers', '费用排名', rank ? `第 ${rank}<small>/ ${allByKey.length}</small>` : '—', '', '', `占全部费用 ${pct(a.cost, totalAll)}`)}
+      ${us ? tile('activity', '请求次数', compact(us.requests), '', '', `成功率 ${us.requests ? ((1 - us.fails / us.requests) * 100).toFixed(2) + '%' : '—'}`)
+        : tile('layers', '费用排名', rank ? `第 ${rank}<small>/ ${allByKey.length}</small>` : '—', '', '', `占全部费用 ${pct(a.cost, totalAll)}`)}
       ${tile('token', 'Token 总量', compact(tokens), deltaPill(tokens, ptokens, { neutral: true }), state.compareLabel, `输入 ${compact(a.tIn)} · 输出 ${compact(a.tOut)}`)}
       ${tile('unit', '每百万 Token 成本', perM == null ? '—' : money(perM), perM == null ? '' : deltaPill(perM, pPerM), perM == null ? '' : state.compareLabel, '费用 ÷ 总 Token × 10⁶')}
       ${tile('cache', '缓存命中率', hit == null ? '—' : (hit * 100).toFixed(1) + '%', hit == null ? '' : deltaPill(hit, pHit, { pp: true, goodWhenUp: true }), hit == null ? '' : state.compareLabel, hit == null ? '—' : `命中 ${compact(a.tCache)} Token`)}
       ${budget ? budgetTile(a.pretax, budget, fc?.value ?? null)
-        : tile('calendar', fc ? '预计本月' : '近 7 / 30 天', fc ? money(fc.value) : `${moneyShort(act?.c7 || 0)}<small>/ ${moneyShort(act?.c30 || 0)}</small>`, '', '', fc ? `日均 ${money(fc.avg)}` : `最近消费 ${act?.lastDay || '—'}`)}
+        : tile('calendar', fc ? '预计本月' : '近 7 天', fc ? money(fc.value) : moneyShort(act?.c7 || 0), '', '', fc ? `日均 ${money(fc.avg)}` : `近 30 天 ${moneyShort(act?.c30 || 0)} · 最近 ${act?.lastDay ? act.lastDay.slice(5) : '—'}`)}
     </div></div>
     <div class="bi">
+      ${tokenPanel(id, a, pa, daily, us, p)}
+      <section class="panel ${us ? 'c6' : 'c12'}"><div class="panel-h"><h3>每日 Token 消耗</h3><span class="sub">按 Token 类型堆叠 · 虚线为日均</span></div><div class="legend" id="kTokLegend"></div><div class="chart" id="kTok"></div></section>
+      ${us ? `<section class="panel c6"><div class="panel-h"><h3>每日调用次数</h3>${help('来自腾讯云 TokenHub 用量统计（按 API Key × 模型 × 日）。悬停查看当日请求数、失败数与单次平均 Token。')}<span class="sub">成功 / 失败</span></div><div class="legend" id="kReqLegend"></div><div class="chart" id="kReq"></div></section>` : ''}
       <section class="panel c8"><div class="panel-h"><h3>每日费用</h3><span class="sub">按模型堆叠 · 虚线为日均</span></div><div class="legend" id="kLegend"></div><div class="chart" id="kDaily"></div></section>
       <section class="panel c4"><div class="panel-h"><h3>模型构成</h3><span class="sub">${a.models.size} 个模型</span></div><div id="kModels"></div></section>
       <section class="panel c6"><div class="panel-h"><h3>月度费用</h3>${help('近 12 个账期的账期账单，按模型堆叠；范围取决于同步回溯月数。')}</div><div class="legend" id="kHLegend"></div><div class="chart" id="kHist"></div></section>
@@ -68,7 +77,7 @@ export function render(v, id) {
       <section class="panel c12"><div class="panel-h"><h3>模型明细</h3><span class="sub">${esc(state.compareLabel)} · 点击查看模型详情</span><div class="actions"><button class="btn sm" id="csvM">${icon('download')}导出</button></div></div><div id="kModelTbl"></div></section>
       <section class="panel c12"><div class="panel-h"><h3>计费项明细</h3><span class="sub">模型 × 计费项 × 单价</span><div class="actions"><button class="btn sm" id="csvI">${icon('download')}导出</button></div></div><div id="kItemTbl"></div></section>
       <section class="panel c6"><div class="panel-h"><h3>调用渠道</h3></div><div id="kCh"></div></section>
-      <section class="panel c6"><div class="panel-h"><h3>权限与变更记录</h3>${help('权限来自阿里云同步；变更记录为每次同步检测到的描述、归属、权限等变化。')}</div>
+      <section class="panel c6"><div class="panel-h"><h3>权限与变更记录</h3>${help(`权限来自${PROVIDERS[k?.provider || 'aliyun']}同步；变更记录为每次同步检测到的描述、归属、权限等变化。`)}</div>
         <div class="kv" style="margin-bottom:14px">
           <div><span>模型权限</span><b>${!k ? '—' : k.authType === 'All' || k.allowAllModels ? '<span class="warn-text">全部模型</span>' : esc((k.accessibleModels || []).join('、') || '—')}</b></div>
           <div><span>IP 白名单</span><b class="mono">${!k ? '—' : ipOpen ? '<span class="warn-text">不限</span>' : esc(k.accessIps.join(', '))}</b></div>
@@ -89,6 +98,31 @@ export function render(v, id) {
   const totalDaily = sum(daily, metricVal);
   const calDays = daysBetween(p.from, p.to < state.today ? p.to : state.today);
   columnChart($('#kDaily', v), { xs: days, series, cell: (x, s) => cell.get(x + '|' + s) || 0, avg: days.length ? totalDaily / Math.max(1, calDays) : null, height: 260, xLabel: x => x.slice(5), tipTitle: x => `${x}（周${WEEK[weekday(x)]}）`, empty: '本期无按日费用', onX: x => app.openDay(x, id), clickHint: '点击查看当日明细' });
+
+  // 每日 Token（按类型堆叠）
+  const TOKS = [['in', '输入（非缓存）', 'var(--s1)'], ['hit', '缓存命中', 'var(--s3)'], ['out', '输出', 'var(--s2)'], ['emb', '向量', 'var(--s7)'], ['other', '其他', 'var(--other)']];
+  const tcell = new Map();
+  const tType = l => (l.ioi.dir === 'in' ? (l.ioi.cache === 'hit' ? 'hit' : 'in') : ['out', 'emb'].includes(l.ioi.dir) ? l.ioi.dir : 'other');
+  daily.forEach(l => { if (l.tokens == null) return; const kk = l.date + '|' + tType(l); tcell.set(kk, (tcell.get(kk) || 0) + l.tokens); });
+  const tSeries = TOKS.filter(([t]) => [...tcell.keys()].some(k => k.endsWith('|' + t))).map(([t, label, color]) => ({ id: t, label, color }));
+  const tDays = uniq(daily.filter(l => l.tokens).map(l => l.date)).sort();
+  const tTotal = sum(daily, l => l.tokens || 0);
+  $('#kTokLegend', v).innerHTML = tSeries.length > 1 ? legendHtml(tSeries) : '';
+  columnChart($('#kTok', v), {
+    xs: tDays, series: tSeries, cell: (x, s) => tcell.get(x + '|' + s) || 0, avg: tDays.length ? tTotal / Math.max(1, calDays) : null, height: 240, fmt: compact,
+    xLabel: x => x.slice(5), tipTitle: x => `${x}（周${WEEK[weekday(x)]}）`, empty: '本期无 Token 用量（可能为按次计费的模型）', onX: x => app.openDay(x, id), clickHint: '点击查看当日明细',
+  });
+  if (us) {
+    const rd = [...us.days.keys()].sort();
+    $('#kReqLegend', v).innerHTML = legendHtml([{ label: '成功', color: 'var(--s3)' }, { label: '失败', color: 'var(--s8)' }]);
+    columnChart($('#kReq', v), {
+      xs: rd, series: [{ id: 'ok', label: '成功', color: 'var(--s3)' }, { id: 'fail', label: '失败', color: 'var(--s8)' }], height: 240, fmt: x => intFmt(x),
+      cell: (x, s) => { const dd = us.days.get(x); return dd ? (s === 'ok' ? dd.requests - dd.fails : dd.fails) : 0; },
+      avg: rd.length ? us.requests / Math.max(1, calDays) : null, xLabel: x => x.slice(5),
+      tipTitle: x => { const dd = us.days.get(x); return `${x}（周${WEEK[weekday(x)]}）${dd && dd.requests ? ` · 单次平均 ${intFmt(dd.tokens / dd.requests)} Token` : ''}`; },
+      empty: '本期无调用记录',
+    });
+  }
 
   // 模型构成
   const mAgg = sortedAggs(aggregate(lines, l => l.model)).filter(x => x.cost > 0);
@@ -123,11 +157,17 @@ export function render(v, id) {
       { key: 'tOut', label: '输出 Token', align: 'r', fmt: x => intFmt(x) },
       { key: 'perM', label: '¥/百万Token', align: 'r', fmt: x => (x == null ? '-' : money(x)), sortVal: r => r.perM ?? -1 },
       { key: 'days', label: '使用天数', align: 'r' },
+      ...(us ? [
+        { key: 'req', label: '请求数', align: 'r', fmt: x => (x == null ? '—' : intFmt(x)), sortVal: r => r.req ?? -1 },
+        { key: 'fail', label: '失败率', align: 'r', fmt: x => (x == null ? '—' : (x * 100).toFixed(2) + '%'), sortVal: r => r.fail ?? -1 },
+        { key: 'tokPer', label: '单次均 Token', align: 'r', fmt: x => (x == null ? '—' : intFmt(x)), sortVal: r => r.tokPer ?? -1 },
+        { key: 'costPer', label: '单次均费用', align: 'r', fmt: x => (x == null ? '—' : money(x, x < 0.01 ? 4 : 3)), sortVal: r => r.costPer ?? -1 },
+      ] : []),
     ],
-    footer: rs => ['合计', money(sum(rs, r => r.cost)), deltaPill(sum(rs, r => r.cost), sum(rs, r => r.prev)), '', intFmt(sum(rs, r => r.tIn)), '', intFmt(sum(rs, r => r.tOut)), '', ''],
+    footer: rs => ['合计', money(sum(rs, r => r.cost)), deltaPill(sum(rs, r => r.cost), sum(rs, r => r.prev)), '', intFmt(sum(rs, r => r.tIn)), '', intFmt(sum(rs, r => r.tOut)), '', '', ...(us ? [intFmt(us.requests), us.requests ? (us.fails / us.requests * 100).toFixed(2) + '%' : '—', us.requests ? intFmt(us.tokens / us.requests) : '—', us.requests ? money(a.cost / us.requests, 4) : '—'] : [])],
   }).setRows(mAgg.map(x => {
-    const t = totalTokens(x);
-    return { model: x.key, cost: x.cost, prev: pm.get(x.key)?.cost || 0, share: a.cost ? x.cost / a.cost : 0, tIn: x.tIn, tOut: x.tOut, hit: x.tIn ? x.tCache / x.tIn : null, perM: t ? x.cost / t * 1e6 : null, days: uniq(daily.filter(l => l.model === x.key && metricVal(l) > 0).map(l => l.date)).length };
+    const t = totalTokens(x), um = us?.models.get(x.key);
+    return { model: x.key, cost: x.cost, prev: pm.get(x.key)?.cost || 0, share: a.cost ? x.cost / a.cost : 0, tIn: x.tIn, tOut: x.tOut, hit: x.tIn ? x.tCache / x.tIn : null, perM: t ? x.cost / t * 1e6 : null, days: uniq(daily.filter(l => l.model === x.key && metricVal(l) > 0).map(l => l.date)).length, req: um ? um.requests : null, fail: um && um.requests ? um.fails / um.requests : null, tokPer: um && um.requests ? um.tokens / um.requests : null, costPer: um && um.requests ? x.cost / um.requests : null };
   }));
   $('#csvM', v).onclick = () => tm.csv(`Key_${id}_模型明细_${periodTag()}.csv`);
 
@@ -154,7 +194,46 @@ export function render(v, id) {
 
   rankList($('#kCh', v), sortedAggs(aggregate(lines, l => l.channel)).map(x => ({ id: x.key, label: channelLabel(x.key), sub: x.key || '', value: x.cost })), { total: a.cost });
   v.querySelector('[data-key-detail]').onclick = () => app.setFilter({ key: id }, '#/detail', true);
+  v.querySelector('[data-edit-tags]')?.addEventListener('click', () => editTags([id]));
   loadChanges(v, id);
+}
+
+/** Token 消耗与调用统计：总量与结构、日均 / 峰值、请求数、成功率、单次平均 Token / 费用 */
+function tokenPanel(id, a, pa, daily, us, p) {
+  const tokens = totalTokens(a), ptokens = totalTokens(pa);
+  const calDays = Math.max(1, daysBetween(p.from, p.to < state.today ? p.to : state.today));
+  const dayTok = new Map();
+  daily.forEach(l => { if (l.tokens) dayTok.set(l.date, (dayTok.get(l.date) || 0) + l.tokens); });
+  const peak = [...dayTok.entries()].sort((x, y) => y[1] - x[1])[0];
+  const active = [...dayTok.values()].filter(x => x > 0).length;
+  const pc = perCall(us, a.cost);
+  const units = unitsText(a);
+  const cell = (label, value, sub = '', cls = '') => `<div class="tok-cell ${cls}"><span>${esc(label)}</span><b>${value}</b>${sub ? `<em>${sub}</em>` : ''}</div>`;
+  const share = x => (tokens ? `占 ${(x / tokens * 100).toFixed(1)}%` : '');
+  const nIn = a.tIn - a.tCache;
+  return `<section class="panel c12"><div class="panel-h"><h3>Token 消耗与调用统计</h3>${help('Token 来自账单用量；请求次数、成功率与单次平均来自腾讯云 TokenHub 用量统计（阿里云账单不提供调用次数）。单次平均费用 = 本期费用 ÷ 请求次数。')}
+      <span class="sub">${esc(p.mode === 'month' ? p.cycle + ' 账期' : `${p.from} ~ ${p.to}`)} · ${METRICS[ui.f.metric]}</span></div>
+    <div class="tok-grid">
+      <div class="tok-group"><h4>Token 消耗</h4><div class="tok-cells">
+        ${cell('总 Token', compact(tokens), `${deltaPill(tokens, ptokens, { neutral: true })} <span class="muted">${esc(state.compareLabel)}</span>`, 'big')}
+        ${cell('输入（非缓存）', compact(nIn), share(nIn))}
+        ${cell('缓存命中', compact(a.tCache), a.tIn ? `命中率 ${(a.tCache / a.tIn * 100).toFixed(1)}%` : '')}
+        ${cell('输出', compact(a.tOut), share(a.tOut))}
+        ${a.tEmb ? cell('向量', compact(a.tEmb), share(a.tEmb)) : ''}
+        ${cell('输出 / 输入', a.tIn ? (a.tOut / a.tIn * 100).toFixed(1) + '%' : '—', '输出 Token ÷ 输入 Token')}
+        ${cell('日均 Token', compact(tokens / calDays), `按 ${calDays} 个自然日`)}
+        ${cell('峰值日', peak ? compact(peak[1]) : '—', peak ? `${peak[0].slice(5)}（周${WEEK[weekday(peak[0])]}）` : '')}
+        ${cell('消耗天数', `${active}<small>/ ${calDays}</small>`, active ? `活跃日均 ${compact(tokens / active)}` : '')}
+        ${units ? cell('按次 / 其他计费用量', esc(units), '非 Token 计费项') : ''}
+      </div></div>
+      <div class="tok-group"><h4>调用</h4>${pc ? `<div class="tok-cells">
+        ${cell('请求次数', intFmt(pc.requests), `日均 ${intFmt(pc.requests / calDays)} 次`, 'big')}
+        ${cell('成功率', (pc.success * 100).toFixed(2) + '%', `失败 ${intFmt(pc.fails)} 次`, pc.success < 0.95 ? 'bad' : pc.success < 0.99 ? 'warn' : '')}
+        ${cell('单次平均 Token', intFmt(pc.tokPer), `输入 ${intFmt(pc.inPer)} · 输出 ${intFmt(pc.outPer)}`)}
+        ${cell('单次平均费用', money(pc.costPer, pc.costPer < 0.01 ? 4 : 3), `每千次 ${money(pc.costPerK)}`)}
+        ${cell('单次平均缓存命中', intFmt(us.cache / pc.requests), us.input ? `占输入 ${(us.cache / us.input * 100).toFixed(1)}%` : '')}
+      </div>` : `<div class="tok-empty">${icon('info')}<div><b>暂无调用次数数据</b><span>${(keyObj(id)?.provider || 'aliyun') === 'aliyun' ? '阿里云费用中心账单只包含 Token 用量与费用，不提供调用次数，因此无法计算单次平均消耗；可在百炼控制台“模型观测”中查看该 Key 的调用量。' : '该周期 TokenHub 用量统计中没有该 Key 的调用记录。'}</span></div></div>`}</div>
+    </div></section>`;
 }
 
 function budgetTile(used, budget, fcv) {
@@ -173,7 +252,7 @@ function tile(ic, label, value, delta, cmp, meta) {
   return `<section class="kpi"><div class="kpi-h"><span class="kpi-ico">${icon(ic)}</span><span>${esc(label)}</span></div><div class="value">${value}</div>
     <div class="trend">${delta || ''}${delta && cmp ? `<span class="cmp">${esc(cmp)}</span>` : ''}</div><div class="meta" title="${esc(meta)}">${esc(meta)}</div></section>`;
 }
-const FIELD = { description: '描述', workspace_id: '业务空间ID', workspace_name: '业务空间', disabled: '禁用', auth_type: '授权类型', allow_all_models: '全部模型', accessible_models: '可访问模型', access_ips: 'IP 白名单', api_key_masked: 'API Key' };
+const FIELD = { remark: '备注', description: '描述', workspace_id: '业务空间ID', workspace_name: '业务空间', disabled: '禁用', auth_type: '授权类型', allow_all_models: '全部模型', accessible_models: '可访问模型', access_ips: 'IP 白名单', api_key_masked: 'API Key' };
 const CHG = { create: ['新增', 'good'], update: ['修改', 'warn'], delete: ['删除', 'bad'], restore: ['恢复', 'good'] };
 async function loadChanges(v, id) {
   const el = $('#kChanges', v);

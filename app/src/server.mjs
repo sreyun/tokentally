@@ -1,5 +1,5 @@
 /**
- * 百炼 API Key 费用分析 - Web 服务
+ * TokenTally 大模型 API Key 费用分析（阿里云百炼 + 腾讯云 TokenHub）- Web 服务
  * 零第三方依赖：node:http + node:sqlite + node:crypto
  */
 import http from 'node:http';
@@ -9,21 +9,25 @@ import zlib from 'node:zlib';
 import net from 'node:net';
 import crypto from 'node:crypto';
 import { config } from './config.mjs';
-import { Store } from './db.mjs';
-import { SyncService, todayIn, addDays, addMonths, isCycleFinal } from './sync.mjs';
-import { AlertService, ALERT_TYPES, validateWebhook } from './alerts.mjs';
+import { Store, PROVIDERS } from './db.mjs';
+import { SyncService, todayIn, addDays, addMonths, isCycleFinal, hourIn, PROVIDER_LIST } from './sync.mjs';
+import { AlertService, ALERT_TYPES, EVENT_TYPES, MAX_CHANNELS, validateWebhook, cleanMobiles } from './alerts.mjs';
 import { selfTest, AliyunClient, explainAliyunError, callLog, MS_REGIONS, BSS_ENDPOINTS } from './aliyun.mjs';
+import { tc3SelfTest, TencentClient, explainTencentError, TC_REGIONS, TC_SITES } from './tencent.mjs';
 import { loadMasterKey, hashPassword, verifyPassword, burnPasswordCheck, checkPasswordPolicy, randomPassword, maskId, sha256 } from './crypto.mjs';
 
-const VERSION = '1.1.0';
+const VERSION = '1.2.0';
 const log = (...a) => console.log(new Date().toISOString(), ...a);
 
-if (process.argv.includes('--selftest')) {
-  const ok = selfTest();
-  console.log(ok ? 'ACS3-HMAC-SHA256 签名自检通过' : '签名自检失败');
-  process.exit(ok ? 0 : 1);
+{
+  const a = selfTest(), t = tc3SelfTest();
+  if (process.argv.includes('--selftest')) {
+    console.log(a ? 'ACS3-HMAC-SHA256（阿里云）签名自检通过' : 'ACS3-HMAC-SHA256（阿里云）签名自检失败');
+    console.log(t ? 'TC3-HMAC-SHA256（腾讯云）签名自检通过' : 'TC3-HMAC-SHA256（腾讯云）签名自检失败');
+    process.exit(a && t ? 0 : 1);
+  }
+  if (!a || !t) { console.error('云 API 签名自检失败，服务未启动'); process.exit(1); }
 }
-if (!selfTest()) { console.error('ACS3-HMAC-SHA256 签名自检失败，服务未启动'); process.exit(1); }
 
 /* ===================================================================
  * 初始化：数据目录、主密钥、数据库、管理员、AccessKey
@@ -33,10 +37,12 @@ const master = loadMasterKey(config.dataDir, config.masterKey);
 const store = new Store(path.join(config.dataDir, 'bailian-cost.db'), master.key);
 store.failStaleRuns();
 
-function secretState() {
-  try { return store.getSecret('aliyun.accessKeyId') && store.getSecret('aliyun.accessKeySecret') ? 'ok' : 'none'; }
+const SECRET_NAMES = { aliyun: ['aliyun.accessKeyId', 'aliyun.accessKeySecret'], tencent: ['tencent.secretId', 'tencent.secretKey'] };
+function secretState(p = 'aliyun') {
+  try { return store.getSecret(SECRET_NAMES[p][0]) && store.getSecret(SECRET_NAMES[p][1]) ? 'ok' : 'none'; }
   catch { return 'undecryptable'; }
 }
+const anyConfigured = () => PROVIDER_LIST.some(p => secretState(p) === 'ok');
 
 if (store.countUsers() === 0) {
   const generated = !config.adminPassword;
@@ -58,15 +64,58 @@ if (config.bootstrapAkId && config.bootstrapAkSecret && secretState() === 'none'
   store.audit('system', '', 'aliyun.ak.bootstrap', { accessKeyId: maskId(config.bootstrapAkId) });
   log(`已从环境变量导入 AccessKey ${maskId(config.bootstrapAkId)}（已加密保存，可从环境变量中移除）`);
 }
+if (config.bootstrapTcId && config.bootstrapTcKey && secretState('tencent') === 'none') {
+  store.setSecret('tencent.secretId', config.bootstrapTcId.trim());
+  store.setSecret('tencent.secretKey', config.bootstrapTcKey.trim());
+  store.audit('system', '', 'tencent.key.bootstrap', { secretId: maskId(config.bootstrapTcId) });
+  log(`已从环境变量导入腾讯云 SecretId ${maskId(config.bootstrapTcId)}（已加密保存，可从环境变量中移除）`);
+}
 if (master.source === 'file') log('提示：未设置 APP_MASTER_KEY，主密钥保存在数据目录 .master.key。生产环境建议通过环境变量单独保管主密钥。');
-if (secretState() === 'undecryptable') log('警告：已保存的 AccessKey 无法用当前主密钥解密，请在“系统管理”中重新配置。');
+for (const p of PROVIDER_LIST) if (secretState(p) === 'undecryptable') log(`警告：已保存的${PROVIDERS[p]}密钥无法用当前主密钥解密，请在“系统管理”中重新配置。`);
+if (config.tencentEndpoint) log(`注意：腾讯云 API 地址已被 TENCENT_ENDPOINT_OVERRIDE 覆盖为 ${config.tencentEndpoint}（仅用于测试或私有网关）`);
 
-const sync = new SyncService({ store, tz: config.billTz, log });
-const alerts = new AlertService({ store, tz: config.billTz, log, publicUrl: config.publicUrl, allowPrivate: config.alertAllowPrivate });
+const sync = new SyncService({ store, tz: config.billTz, log, tencentEndpoint: config.tencentEndpoint });
+const alerts = new AlertService({ store, tz: config.billTz, log, publicUrl: config.publicUrl, allowPrivate: config.alertAllowPrivate, providers: () => sync.configured() });
 sync.onBillsSynced = () => alerts.check('bills');
+sync.onRunFinished = (p, kind) => { if (kind === 'meta') alerts.check('sync'); };
 sync.start();
 setInterval(() => store.purgeSessions(config.sessionIdleMinutes * 60_000), 10 * 60_000).unref();
 setInterval(() => store.purgeOld(), 24 * 3600_000).unref();
+setInterval(() => alerts.check('schedule'), 5 * 60_000).unref(); // 报表定时 & 无同步时的兜底检查
+
+/* ---------------- 自动备份：每天 BACKUP_HOUR 点生成一份，保留最近 BACKUP_KEEP 份 ---------------- */
+const BACKUP_DIR = path.join(config.dataDir, 'backups');
+const BACKUP_RE = /^tokentally-\d{8}-\d{6}(-manual)?\.db$/;
+function listBackups() {
+  try {
+    return fs.readdirSync(BACKUP_DIR).filter(f => BACKUP_RE.test(f)).map(f => { const st = fs.statSync(path.join(BACKUP_DIR, f)); return { name: f, size: st.size, mtime: st.mtimeMs, manual: f.includes('-manual') }; })
+      .sort((a, b) => b.mtime - a.mtime);
+  } catch { return []; }
+}
+function createBackup(manual = false) {
+  fs.mkdirSync(BACKUP_DIR, { recursive: true, mode: 0o700 });
+  const d = new Date(), p = n => String(n).padStart(2, '0');
+  const name = `tokentally-${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}${manual ? '-manual' : ''}.db`;
+  const file = path.join(BACKUP_DIR, name);
+  if (fs.existsSync(file)) fs.rmSync(file);
+  store.backupTo(file);
+  try { fs.chmodSync(file, 0o600); } catch { /* Windows */ }
+  // 只轮换自动备份；手动备份最多保留 10 份
+  const all = listBackups();
+  for (const [list, keep] of [[all.filter(b => !b.manual), Math.max(1, config.backupKeep)], [all.filter(b => b.manual), 10]]) for (const b of list.slice(keep)) fs.rmSync(path.join(BACKUP_DIR, b.name), { force: true });
+  return { name, size: fs.statSync(file).size };
+}
+let lastAutoBackup = '';
+if (config.backupKeep > 0) {
+  setInterval(() => {
+    const today = todayIn(config.billTz);
+    if (lastAutoBackup === today || hourIn(config.billTz) !== config.backupHour) return;
+    if (listBackups().some(b => !b.manual && new Date(b.mtime).toISOString().slice(0, 10) === new Date().toISOString().slice(0, 10) && Date.now() - b.mtime < 20 * 3600_000)) { lastAutoBackup = today; return; }
+    lastAutoBackup = today;
+    try { const r = createBackup(false); log(`自动备份完成：${r.name}（${(r.size / 1048576).toFixed(1)} MB）`); }
+    catch (e) { log('自动备份失败：' + e.message); }
+  }, 10 * 60_000).unref();
+}
 
 /* ===================================================================
  * 静态资源
@@ -187,11 +236,12 @@ const safeEqual = (a, b) => { const x = Buffer.from(String(a)), y = Buffer.from(
 
 /* 简易限流 */
 const ipHits = new Map();       // 全局：每 IP 每分钟
+const metricHits = new Map();   // /metrics 独立计数，避免与页面访问互相影响
 const loginFails = new Map();   // 登录失败：每 IP 窗口
-function rateLimited(ip, limit = 600) {
+function rateLimited(ip, limit = 600, map = ipHits) {
   const now = Date.now();
-  let e = ipHits.get(ip);
-  if (!e || now - e.t > 60_000) { e = { t: now, n: 0 }; ipHits.set(ip, e); }
+  let e = map.get(ip);
+  if (!e || now - e.t > 60_000) { e = { t: now, n: 0 }; map.set(ip, e); }
   return ++e.n > limit;
 }
 function loginBlocked(ip) {
@@ -206,7 +256,7 @@ function noteLoginFail(ip) {
 }
 setInterval(() => {
   const now = Date.now();
-  for (const [k, v] of ipHits) if (now - v.t > 60_000) ipHits.delete(k);
+  for (const m of [ipHits, metricHits]) for (const [k, v] of m) if (now - v.t > 60_000) m.delete(k);
   for (const [k, v] of loginFails) if (now - v.t > config.login.ipWindowMinutes * 60_000) loginFails.delete(k);
 }, 60_000).unref();
 
@@ -214,16 +264,22 @@ setInterval(() => {
  * 业务接口
  * =================================================================== */
 const parseJsonArr = s => { try { return JSON.parse(s || '[]'); } catch { return []; } };
-const keyOut = k => ({
-  apiKeyId: k.api_key_id, apiKeyValue: k.api_key_masked, description: k.description, workspaceId: k.workspace_id, workspaceName: k.workspace_name,
-  disabled: k.disabled == null ? null : !!k.disabled, authType: k.auth_type, allowAllModels: k.allow_all_models == null ? null : !!k.allow_all_models,
-  accessibleModels: parseJsonArr(k.accessible_models), accessIps: parseJsonArr(k.access_ips), createdBy: k.created_by, gmtCreate: k.gmt_create,
-  firstSeen: k.first_seen, lastSeen: k.last_seen, deletedAt: k.deleted_at, updatedAt: k.updated_at,
-});
+const keyOut = (k, tags) => {
+  const t = tags?.get(k.api_key_id);
+  return {
+    apiKeyId: k.api_key_id, provider: k.provider || 'aliyun', apiKeyValue: k.api_key_masked, description: k.description, remark: k.remark || '', workspaceId: k.workspace_id, workspaceName: k.workspace_name,
+    disabled: k.disabled == null ? null : !!k.disabled, authType: k.auth_type, allowAllModels: k.allow_all_models == null ? null : !!k.allow_all_models,
+    accessibleModels: parseJsonArr(k.accessible_models), accessIps: parseJsonArr(k.access_ips), createdBy: k.created_by, gmtCreate: k.gmt_create,
+    firstSeen: k.first_seen, lastSeen: k.last_seen, deletedAt: k.deleted_at, updatedAt: k.updated_at,
+    costCenter: t?.cost_center || '', owner: t?.owner || '', note: t?.note || '',
+  };
+};
 const wsOut = w => ({
-  workspaceId: w.workspace_id, workspaceName: w.name, region: w.region, serviceSite: w.service_site, apiHost: w.api_host, tenantId: w.tenant_id,
+  workspaceId: w.workspace_id, provider: w.provider || 'aliyun', workspaceName: w.name, region: w.region, serviceSite: w.service_site, apiHost: w.api_host, tenantId: w.tenant_id,
   gmtCreate: w.gmt_create, firstSeen: w.first_seen, lastSeen: w.last_seen, deletedAt: w.deleted_at,
 });
+/** API Key ID：阿里云为数字，腾讯云形如 ak-20260325-xxxxxx */
+const KEY_ID_RE = /^([A-Za-z0-9][\w.-]{0,63}|__none__)$/;
 const daysBetween = (a, b) => Math.round((Date.parse(b + 'T00:00:00Z') - Date.parse(a + 'T00:00:00Z')) / 864e5) + 1;
 const lastDayOf = cycle => addDays(addMonths(cycle, 1) + '-01', -1);
 const isDate = s => /^\d{4}-\d{2}-\d{2}$/.test(s || '') && !Number.isNaN(Date.parse(s + 'T00:00:00Z'));
@@ -231,9 +287,10 @@ const isDate = s => /^\d{4}-\d{2}-\d{2}$/.test(s || '') && !Number.isNaN(Date.pa
 function getData(url) {
   const today = todayIn(config.billTz);
   const mode = url.searchParams.get('mode') === 'range' ? 'range' : 'month';
+  const tags = new Map(store.listKeyTags().map(t => [t.api_key_id, t]));
   const out = {
-    today, tz: config.billTz, workspaces: store.listWorkspaces().map(wsOut), apiKeys: store.listApiKeys().map(keyOut),
-    keyActivity: store.keyActivity(today), budgets: store.budgets(),
+    today, tz: config.billTz, workspaces: store.listWorkspaces().map(wsOut), apiKeys: store.listApiKeys().map(k => keyOut(k, tags)),
+    keyActivity: store.keyActivity(today), budgets: store.budgets(), providers: sync.configured(),
   };
   if (mode === 'month') {
     const cycle = url.searchParams.get('cycle') || today.slice(0, 7);
@@ -260,6 +317,7 @@ function getData(url) {
     }
     out.recon = store.msOverview(cycle);
     out.history = store.queryLines('M', addMonths(cycle, -11), cycle, true);
+    out.usage = store.queryUsage(cycle + '-01', last);
   } else {
     const from = url.searchParams.get('from'), to = url.searchParams.get('to');
     if (!isDate(from) || !isDate(to) || from > to) throw new HttpError(400, '日期范围无效');
@@ -273,26 +331,33 @@ function getData(url) {
     out.prevDaily = store.queryLines('D', pFrom, pTo, true);
     const endCycle = to.slice(0, 7);
     out.history = store.queryLines('M', addMonths(endCycle, -11), endCycle, true);
+    out.usage = store.queryUsage(from, to);
   }
   return out;
 }
 
 function statusOut() {
+  const providers = Object.fromEntries(PROVIDER_LIST.map(p => [p, { name: PROVIDERS[p], configured: secretState(p) === 'ok', secretState: secretState(p) }]));
   return {
     version: VERSION, today: todayIn(config.billTz), tz: config.billTz,
-    aliyun: { configured: secretState() === 'ok', secretState: secretState() },
+    aliyun: providers.aliyun, providers, anyConfigured: anyConfigured(), branding: store.branding(),
     sync: sync.status(), data: store.dataRange(),
   };
 }
 
 function adminSettingsOut() {
-  let id = '';
+  let id = '', tid = '';
   try { id = store.getSecret('aliyun.accessKeyId'); } catch { /* undecryptable */ }
+  try { tid = store.getSecret('tencent.secretId'); } catch { /* undecryptable */ }
   return {
-    aliyun: { ...store.aliyunSettings(), accessKeyId: maskId(id), secretState: secretState() },
+    aliyun: { ...store.aliyunSettings(), accessKeyId: maskId(id), secretState: secretState('aliyun') },
+    tencent: { ...store.tencentSettings(), secretId: maskId(tid), secretState: secretState('tencent'), endpointOverride: !!config.tencentEndpoint },
     sync: store.syncSettings(),
     alerts: alerts.out(),
-    options: { msRegions: MS_REGIONS, bssSites: Object.keys(BSS_ENDPOINTS) },
+    branding: store.branding(),
+    backup: { keep: config.backupKeep, hour: config.backupHour, list: listBackups() },
+    metrics: { enabled: !!config.metricsToken },
+    options: { msRegions: MS_REGIONS, bssSites: Object.keys(BSS_ENDPOINTS), tcRegions: TC_REGIONS, tcSites: Object.keys(TC_SITES) },
     security: {
       masterKeySource: master.source, encryption: 'AES-256-GCM', passwordHash: 'scrypt (N=32768, r=8, p=1)',
       sessionIdleMinutes: config.sessionIdleMinutes, sessionMaxHours: config.sessionMaxHours, trustProxy: config.trustProxy,
@@ -321,6 +386,8 @@ async function confirmCurrentPassword(ctx, password, action, msg) {
 
 const AK_ID_RE = /^[A-Za-z0-9]{12,64}$/;
 const AK_SECRET_RE = /^[A-Za-z0-9]{16,64}$/;
+const TC_ID_RE = /^[A-Za-z0-9]{16,128}$/;
+const TC_KEY_RE = /^[A-Za-z0-9]{16,128}$/;
 const int = (v, min, max, d) => { const n = parseInt(v, 10); return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : d; };
 
 async function putSettings(body, ctx) {
@@ -351,8 +418,44 @@ async function putSettings(body, ctx) {
       store.setSecret('aliyun.accessKeySecret', secret);
       changed.push('aliyun.accessKey');
       store.audit(ctx.user.username, ctx.ip, 'aliyun.ak.update', { accessKeyId: maskId(id || store.getSecret('aliyun.accessKeyId')) });
-      sync.run('meta', 'ak-changed');
+      sync.run('meta', 'ak-changed', { provider: 'aliyun' });
     }
+  }
+  if (body.tencent) {
+    const t = body.tencent;
+    const cur = store.tencentSettings();
+    const next = {
+      region: TC_REGIONS.includes(t.region) ? t.region : cur.region,
+      site: TC_SITES[t.site] ? t.site : cur.site,
+      businessCode: typeof t.businessCode === 'string' ? t.businessCode.replace(/[^A-Za-z0-9_,\-]/g, '').slice(0, 100) : cur.businessCode,
+      estimate: t.estimate == null ? cur.estimate : !!t.estimate,
+    };
+    const id = typeof t.secretId === 'string' ? t.secretId.trim() : '';
+    const key = typeof t.secretKey === 'string' ? t.secretKey.trim() : '';
+    if (id || key) {
+      if (id && !TC_ID_RE.test(id)) throw new HttpError(400, 'SecretId 格式不正确');
+      if (key && !TC_KEY_RE.test(key)) throw new HttpError(400, 'SecretKey 格式不正确');
+      if (id && !key) throw new HttpError(400, '更换 SecretId 时必须同时填写 SecretKey');
+      if (!id && key && secretState('tencent') !== 'ok') throw new HttpError(400, '请同时填写 SecretId');
+      if (!t.confirmPassword) throw new HttpError(400, '更换腾讯云 API 密钥需要输入当前登录密码确认');
+      await confirmCurrentPassword(ctx, t.confirmPassword, 'tencent.key.update', '当前登录密码不正确');
+    }
+    store.setSetting('tencent', next);
+    for (const k of Object.keys(next)) if (next[k] !== cur[k]) changed.push(`tencent.${k}`);
+    if (id || key) {
+      if (id) store.setSecret('tencent.secretId', id);
+      store.setSecret('tencent.secretKey', key);
+      changed.push('tencent.secretKey');
+      store.audit(ctx.user.username, ctx.ip, 'tencent.key.update', { secretId: maskId(id || store.getSecret('tencent.secretId')) });
+    }
+    if ((id || key || next.region !== cur.region || next.site !== cur.site) && secretState('tencent') === 'ok') sync.run('meta', 'key-changed', { provider: 'tencent' });
+  }
+  if (body.branding) {
+    const b = body.branding, cur = store.branding();
+    const txt = (v, max, d) => (typeof v === 'string' ? v.replace(/[<>"'`\\\u0000-\u001f]/g, '').trim().slice(0, max) || d : d);
+    const next = { name: txt(b.name, 24, cur.name), subtitle: txt(b.subtitle, 48, '') };
+    store.setSetting('branding', next);
+    for (const k of Object.keys(next)) if (next[k] !== cur[k]) changed.push(`branding.${k}`);
   }
   if (body.sync) {
     const s = body.sync, cur = store.syncSettings();
@@ -370,14 +473,44 @@ async function putSettings(body, ctx) {
   return adminSettingsOut();
 }
 
+async function testTencent(body) {
+  let client;
+  const t = store.tencentSettings();
+  if (body.secretId || body.secretKey) {
+    if (!TC_ID_RE.test(body.secretId || '') || !TC_KEY_RE.test(body.secretKey || '')) throw new HttpError(400, '请填写完整有效的 SecretId 与 SecretKey');
+    client = new TencentClient({ secretId: body.secretId.trim(), secretKey: body.secretKey.trim(), region: t.region, site: t.site, endpoint: config.tencentEndpoint });
+  } else {
+    try { client = sync.client('tencent'); } catch (e) { throw new HttpError(400, e.message); }
+  }
+  const today = todayIn(config.billTz), cycle = today.slice(0, 7);
+  const tests = [
+    ['TokenHub · API Key 列表（DescribeApiKeyList）', async () => { const r = await client.call('tokenhub', 'DescribeApiKeyList', { Platform: 'maas', Limit: 1 }); return `${r.TotalCount ?? 0} 个 API Key`; }],
+    ['TokenHub · 推理服务（DescribeModelEndpointList）', async () => { const r = await client.call('tokenhub', 'DescribeModelEndpointList', { Limit: 1 }); return `${r.TotalCount ?? 0} 个模型接入点`; }],
+    ['TokenHub · 用量排行（DescribeUsageRankList）', async () => { const r = await client.call('tokenhub', 'DescribeUsageRankList', { Dimension: 'apikey', StartTime: `${addDays(today, -6)}T00:00:00+08:00`, EndTime: `${addDays(today, 1)}T00:00:00+08:00`, ShowAll: true }); return `近 7 天 ${r.Total ?? 0} 个 Key 有用量，合计 ${Number(r.TotalStats?.TotalToken || 0).toLocaleString()} Token`; }],
+    ['计费 · 产品费用分布（DescribeBillSummaryByProduct）', async () => {
+      const r = await client.call('billing', 'DescribeBillSummaryByProduct', { BeginTime: cycle, EndTime: cycle });
+      const hit = (r.SummaryOverview || []).filter(x => /tokenhub|大模型|混元|hunyuan/i.test(`${x.BusinessCodeName} ${x.BusinessCode}`));
+      return hit.length ? `本月大模型产品：${hit.map(x => `${x.BusinessCodeName}（${x.BusinessCode}）¥${Number(x.RealTotalCost || 0).toFixed(2)}`).join('；')}` : '可访问（本月暂无 TokenHub 账单）';
+    }],
+    ['计费 · 账单明细（DescribeBillDetail）', async () => { const r = await client.call('billing', 'DescribeBillDetail', { Month: cycle, Offset: 0, Limit: 1 }); return `可访问（本月明细 ${(r.DetailSet || []).length ? '有数据' : '暂无'}）`; }],
+  ];
+  const out = [];
+  for (const [name, fn] of tests) {
+    try { out.push({ name, ok: true, detail: await fn() }); }
+    catch (e) { out.push({ name, ok: false, error: `${e.code || ''} ${e.aliMessage || e.message}`.trim(), hint: explainTencentError(e), requestId: e.requestId || '' }); }
+  }
+  return out;
+}
+
 async function testConnection(body) {
+  if (body.provider === 'tencent') return testTencent(body);
   let client;
   const a = store.aliyunSettings();
   if (body.accessKeyId || body.accessKeySecret) {
     if (!AK_ID_RE.test(body.accessKeyId || '') || !AK_SECRET_RE.test(body.accessKeySecret || '')) throw new HttpError(400, '请填写完整有效的 AccessKey ID 与 Secret');
     client = new AliyunClient({ accessKeyId: body.accessKeyId.trim(), accessKeySecret: body.accessKeySecret.trim(), msRegion: a.msRegion, bssSite: a.bssSite });
   } else {
-    try { client = sync.client(); } catch (e) { throw new HttpError(400, e.message); }
+    try { client = sync.client('aliyun'); } catch (e) { throw new HttpError(400, e.message); }
   }
   const cycle = todayIn(config.billTz).slice(0, 7);
   const tests = [
@@ -485,22 +618,31 @@ route('GET', '/api/data', async (req, res, ctx) => {
   return send(req, res, 200, JSON.stringify(getData(ctx.url)), 'application/json; charset=utf-8', headers);
 });
 route('GET', '/api/changes', async (req, res) => json(req, res, 200, { changes: store.listChanges(2000) }));
+/* 品牌信息：登录页使用，无敏感内容 */
+route('GET', '/api/branding', async (req, res) => json(req, res, 200, store.branding()), { public: true });
 
 route('GET', '/api/admin/settings', async (req, res) => json(req, res, 200, adminSettingsOut()), { admin: true });
 route('PUT', '/api/admin/settings', async (req, res, ctx) => json(req, res, 200, await putSettings(await readJson(req), ctx)), { admin: true });
 route('POST', '/api/admin/test', async (req, res, ctx) => {
   const body = await readJson(req);
-  store.audit(ctx.user.username, ctx.ip, 'aliyun.test', body.accessKeyId ? { accessKeyId: maskId(body.accessKeyId) } : null);
+  if (body.provider === 'tencent') store.audit(ctx.user.username, ctx.ip, 'tencent.test', body.secretId ? { secretId: maskId(body.secretId) } : null);
+  else store.audit(ctx.user.username, ctx.ip, 'aliyun.test', body.accessKeyId ? { accessKeyId: maskId(body.accessKeyId) } : null);
   return json(req, res, 200, { results: await testConnection(body) });
 }, { admin: true });
 route('POST', '/api/admin/sync', async (req, res, ctx) => {
   const b = await readJson(req);
   const kind = b.kind === 'bills' ? 'bills' : 'meta';
-  if (secretState() !== 'ok') throw new HttpError(400, '请先配置阿里云 AccessKey');
+  const conf = sync.configured();
+  if (!conf.length) throw new HttpError(400, '请先在“系统管理”中配置阿里云或腾讯云的访问密钥');
+  let targets;
+  if (PROVIDER_LIST.includes(b.provider)) {
+    if (!conf.includes(b.provider)) throw new HttpError(400, `尚未配置${PROVIDERS[b.provider]}访问密钥`);
+    targets = [b.provider];
+  } else targets = conf;
   const cycles = Array.isArray(b.cycles) ? b.cycles.filter(c => /^\d{4}-\d{2}$/.test(c)).slice(0, 18) : undefined;
-  const r = sync.run(kind, `manual:${ctx.user.username}`, { cycles, force: !!b.force });
-  store.audit(ctx.user.username, ctx.ip, 'sync.trigger', { kind, cycles, force: !!b.force });
-  return json(req, res, 200, r);
+  const runs = targets.map(p => sync.run(kind, `manual:${ctx.user.username}`, { provider: p, cycles, force: !!b.force }));
+  store.audit(ctx.user.username, ctx.ip, 'sync.trigger', { kind, providers: targets, cycles, force: !!b.force });
+  return json(req, res, 200, { runs, runId: runs[0].runId, alreadyRunning: runs.every(r => r.alreadyRunning) });
 }, { admin: true });
 route('PUT', '/api/admin/budgets', async (req, res, ctx) => {
   const b = await readJson(req);
@@ -510,7 +652,7 @@ route('PUT', '/api/admin/budgets', async (req, res, ctx) => {
   const alertPct = int(b.alertPct, 1, 100, 80);
   const keys = {};
   for (const [id, v] of Object.entries(b.keys || {})) {
-    if (!/^(\d{1,20}|__none__)$/.test(id)) continue;
+    if (!KEY_ID_RE.test(id)) continue;
     const m = money(v);
     if (Number.isNaN(m)) throw new HttpError(400, `API Key ${id} 的预算金额无效`);
     if (m != null) keys[id] = m;
@@ -523,59 +665,139 @@ route('PUT', '/api/admin/budgets', async (req, res, ctx) => {
   return json(req, res, 200, next);
 }, { admin: true });
 
-/* 预算告警通知渠道 */
+/* 成本中心 / 负责人 / 备注（本地标签，不回写云厂商） */
+route('PUT', '/api/admin/key-tags', async (req, res, ctx) => {
+  const b = await readJson(req, 256 * 1024);
+  const items = Array.isArray(b.items) ? b.items : [];
+  if (!items.length) throw new HttpError(400, '没有需要保存的标签');
+  if (items.length > 2000) throw new HttpError(400, '一次最多保存 2000 条');
+  const out = {};
+  store.tx(() => {
+    for (const it of items) {
+      const id = String(it.id || '');
+      if (!KEY_ID_RE.test(id) || id === '__none__') throw new HttpError(400, `API Key ID 无效：${id.slice(0, 40)}`);
+      out[id] = store.setKeyTag(id, { costCenter: it.costCenter, owner: it.owner, note: it.note }, ctx.user.username);
+    }
+  });
+  store.audit(ctx.user.username, ctx.ip, 'keytags.update', { count: items.length, keys: Object.keys(out).slice(0, 20) });
+  return json(req, res, 200, { ok: true, tags: out });
+}, { admin: true });
+
+/* ---------------- 告警通知（多渠道） ---------------- */
 route('PUT', '/api/admin/alerts', async (req, res, ctx) => {
-  const b = await readJson(req, 8192);
+  const b = await readJson(req, 64 * 1024);
   const cur = alerts.settings();
-  const type = ALERT_TYPES[b.type] ? b.type : cur.type;
+  const curById = new Map(cur.channels.map(c => [c.id, c]));
+  const list = Array.isArray(b.channels) ? b.channels : cur.channels;
+  if (list.length > MAX_CHANNELS) throw new HttpError(400, `最多配置 ${MAX_CHANNELS} 个通知渠道`);
   const rules = Object.fromEntries(Object.keys(cur.rules).map(k => [k, b.rules?.[k] == null ? cur.rules[k] : !!b.rules[k]]));
-  const webhookIn = typeof b.webhook === 'string' ? b.webhook.trim() : '';
-  const secretIn = typeof b.secret === 'string' ? b.secret.trim() : '';
-  const sec = alerts.secrets();
-  const clearAll = !!b.clearWebhook;
-  let webhook = '';
-  if (webhookIn && !clearAll) {
-    try { webhook = validateWebhook(type, webhookIn, { allowPrivate: config.alertAllowPrivate }); } catch (e) { throw new HttpError(400, e.message); }
-  } else if (sec.webhook && !clearAll && type !== cur.type) {
-    // 不同渠道的地址与密钥不能混用：更换类型必须同时填写新地址
-    throw new HttpError(400, '已更换通知渠道类型，请同时填写对应的 Webhook 地址');
+  const anomaly = {
+    ratio: Math.min(20, Math.max(1.2, Number(b.anomaly?.ratio) || cur.anomaly.ratio)),
+    minAmount: Math.min(1e7, Math.max(0, Number.isFinite(Number(b.anomaly?.minAmount)) ? Number(b.anomaly.minAmount) : cur.anomaly.minAmount)),
+    keys: b.anomaly?.keys == null ? cur.anomaly.keys : !!b.anomaly.keys,
+  };
+  const reportHour = int(b.reportHour, 0, 23, cur.reportHour);
+  const used = new Set(), plan = [], fields = [];
+  for (const raw of list) {
+    const old = raw.id && curById.get(raw.id);
+    const id = old ? old.id : 'c' + crypto.randomBytes(4).toString('hex');
+    if (used.has(id)) throw new HttpError(400, '渠道 ID 重复');
+    used.add(id);
+    const type = ALERT_TYPES[raw.type] ? raw.type : old?.type;
+    if (!type) throw new HttpError(400, '不支持的通知类型');
+    const name = String(raw.name || '').replace(/[<>"'`\\\u0000-\u001f]/g, '').trim().slice(0, 30) || ALERT_TYPES[type].label;
+    const sec = old ? alerts.secretsOf(id) : { webhook: '', secret: '' };
+    const webhookIn = typeof raw.webhook === 'string' ? raw.webhook.trim() : '';
+    const secretIn = typeof raw.secret === 'string' ? raw.secret.trim() : '';
+    if (secretIn.length > 256) throw new HttpError(400, `渠道「${name}」的加签密钥过长`);
+    let webhook = '';
+    if (webhookIn) {
+      try { webhook = validateWebhook(type, webhookIn, { allowPrivate: config.alertAllowPrivate }); } catch (e) { throw new HttpError(400, `渠道「${name}」：${e.message}`); }
+    } else if (sec.webhook && old && type !== old.type) {
+      throw new HttpError(400, `渠道「${name}」已更换通知类型，请同时填写对应的 Webhook 地址`); // 不同渠道的地址与密钥不能混用
+    }
+    if (!webhook && !sec.webhook) throw new HttpError(400, `渠道「${name}」请填写 Webhook 地址`);
+    const events = Object.fromEntries(Object.keys(EVENT_TYPES).map(k => [k, raw.events?.[k] == null ? (old?.events?.[k] ?? false) : !!raw.events[k]]));
+    plan.push({ ch: { id, name, type, enabled: !!raw.enabled, events, atAll: !!raw.atAll, atMobiles: cleanMobiles(raw.atMobiles) }, webhook, secretIn, clearSecret: !!raw.clearSecret, sec, isNew: !old });
   }
-  if (b.enabled && !clearAll && !webhook && !sec.webhook) throw new HttpError(400, '启用通知前请填写 Webhook 地址');
-  if (secretIn.length > 256) throw new HttpError(400, '加签密钥过长');
-  const fields = [];
-  if (clearAll) {
-    store.setSecret('alerts.webhook', ''); store.setSecret('alerts.secret', ''); fields.push('webhook.clear');
-  } else {
-    if (webhook) { store.setSecret('alerts.webhook', webhook); fields.push('webhook'); }
-    if (b.clearSecret) { store.setSecret('alerts.secret', ''); fields.push('secret.clear'); }
-    else if (secretIn) { store.setSecret('alerts.secret', secretIn); fields.push('secret'); }
-    else if (webhook && webhook !== sec.webhook && sec.secret) { store.setSecret('alerts.secret', ''); fields.push('secret.reset'); } // 换了机器人，旧密钥不再适用
+  // 校验全部通过后再落库，避免部分保存
+  for (const p of plan) {
+    const id = p.ch.id;
+    if (p.webhook) { store.setSecret(`alerts.ch.${id}.webhook`, p.webhook); fields.push(`${p.ch.name}.webhook`); }
+    if (p.clearSecret) { store.setSecret(`alerts.ch.${id}.secret`, ''); fields.push(`${p.ch.name}.secret.clear`); }
+    else if (p.secretIn) { store.setSecret(`alerts.ch.${id}.secret`, p.secretIn); fields.push(`${p.ch.name}.secret`); }
+    else if (p.webhook && p.webhook !== p.sec.webhook && p.sec.secret) { store.setSecret(`alerts.ch.${id}.secret`, ''); fields.push(`${p.ch.name}.secret.reset`); } // 换了机器人，旧密钥不再适用
   }
-  const next = { enabled: !!b.enabled && !clearAll, type, rules };
+  for (const old of cur.channels) {
+    if (used.has(old.id)) continue;
+    store.setSecret(`alerts.ch.${old.id}.webhook`, ''); store.setSecret(`alerts.ch.${old.id}.secret`, '');
+    fields.push(`${old.name}.removed`);
+  }
+  const next = { channels: plan.map(p => p.ch), rules, anomaly, reportHour };
   store.setSetting('alerts', next);
-  store.audit(ctx.user.username, ctx.ip, 'alert.update', { ...next, fields });
-  const check = next.enabled ? await alerts.check('config') : null;
+  store.audit(ctx.user.username, ctx.ip, 'alert.update', { channels: next.channels.map(c => ({ name: c.name, type: c.type, enabled: c.enabled, events: Object.keys(c.events).filter(k => c.events[k]) })), rules, anomaly, reportHour, fields });
+  const check = next.channels.some(c => c.enabled) ? await alerts.check('config') : null;
   return json(req, res, 200, { ...alerts.out(), check });
 }, { admin: true });
 route('POST', '/api/admin/alerts/test', async (req, res, ctx) => {
   const b = await readJson(req, 8192);
-  const saved = alerts.settings(), sec = alerts.secrets();
-  const type = ALERT_TYPES[b.type] ? b.type : saved.type;
+  const saved = alerts.settings().channels.find(c => c.id === b.channelId);
+  const type = ALERT_TYPES[b.type] ? b.type : saved?.type;
+  if (!type) throw new HttpError(400, '请选择通知类型');
+  const sec = saved ? alerts.secretsOf(saved.id) : { webhook: '', secret: '' };
   const webhookIn = typeof b.webhook === 'string' ? b.webhook.trim() : '';
   if (!webhookIn && !sec.webhook) throw new HttpError(400, '请先填写 Webhook 地址');
-  if (!webhookIn && type !== saved.type) throw new HttpError(400, '已更换通知渠道类型，请填写对应的 Webhook 地址后再测试');
+  if (!webhookIn && saved && type !== saved.type) throw new HttpError(400, '已更换通知类型，请填写对应的 Webhook 地址后再测试');
   let webhook;
   try { webhook = validateWebhook(type, webhookIn || sec.webhook, { allowPrivate: config.alertAllowPrivate }); }
   catch (e) { throw new HttpError(400, e.message); }
   const secretIn = typeof b.secret === 'string' ? b.secret.trim().slice(0, 256) : '';
   const secret = secretIn || (webhook === sec.webhook ? sec.secret : '');
-  try { await alerts.test(type, { webhook, secret }); }
+  const ch = { id: saved?.id || 'test', name: saved?.name || ALERT_TYPES[type].label, type, atAll: !!b.atAll, atMobiles: cleanMobiles(b.atMobiles) };
+  try { await alerts.test(ch, { webhook, secret }); }
   catch (e) {
     store.audit(ctx.user.username, ctx.ip, 'alert.test.fail', { type, error: String(e.message).slice(0, 200) });
     throw new HttpError(502, '发送失败：' + e.message);
   }
-  store.audit(ctx.user.username, ctx.ip, 'alert.test', { type });
+  store.audit(ctx.user.username, ctx.ip, 'alert.test', { type, channel: ch.name });
   return json(req, res, 200, { ok: true });
+}, { admin: true });
+/* 报表预览 / 立即发送（不影响定时发送记录） */
+route('POST', '/api/admin/alerts/report', async (req, res, ctx) => {
+  const b = await readJson(req, 4096);
+  const kind = ['daily', 'weekly', 'monthly'].includes(b.kind) ? b.kind : 'daily';
+  const r = alerts.report(kind);
+  if (b.send) {
+    const ch = alerts.settings().channels.find(c => c.id === b.channelId);
+    if (!ch) throw new HttpError(400, '请选择已保存的通知渠道');
+    const sec = alerts.secretsOf(ch.id);
+    if (!sec.webhook) throw new HttpError(400, '该渠道尚未配置 Webhook 地址');
+    try { await alerts.send(ch, sec, { title: r.title + '（手动发送）', level: r.level, lines: r.lines }); }
+    catch (e) { throw new HttpError(502, '发送失败：' + e.message); }
+    store.audit(ctx.user.username, ctx.ip, 'alert.report.send', { kind, channel: ch.name });
+  }
+  return json(req, res, 200, { title: r.title, lines: r.lines, empty: !!r.empty, sent: !!b.send });
+}, { admin: true });
+
+/* ---------------- 数据备份 ---------------- */
+route('GET', '/api/admin/backups', async (req, res) => json(req, res, 200, { keep: config.backupKeep, hour: config.backupHour, list: listBackups() }), { admin: true });
+route('POST', '/api/admin/backups', async (req, res, ctx) => {
+  const r = createBackup(true);
+  store.audit(ctx.user.username, ctx.ip, 'backup.create', r);
+  return json(req, res, 200, { ...r, list: listBackups() });
+}, { admin: true });
+/* 下载备份须再次验证登录密码（备份包含加密后的密钥与密码哈希） */
+route('POST', '/api/admin/backups/download', async (req, res, ctx) => {
+  const b = await readJson(req, 4096);
+  const name = String(b.name || '');
+  if (!BACKUP_RE.test(name)) throw new HttpError(400, '备份文件名无效');
+  const file = path.join(BACKUP_DIR, name);
+  if (!fs.existsSync(file)) throw new HttpError(404, '备份文件不存在');
+  await confirmCurrentPassword(ctx, b.password, 'backup.download', '当前登录密码不正确');
+  store.audit(ctx.user.username, ctx.ip, 'backup.download', { name });
+  const st = fs.statSync(file);
+  res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': st.size, 'Content-Disposition': `attachment; filename="${name}"`, 'Cache-Control': 'no-store' });
+  fs.createReadStream(file).pipe(res);
 }, { admin: true });
 route('GET', '/api/admin/runs', async (req, res) => json(req, res, 200, { runs: store.listRuns(200) }), { admin: true });
 route('GET', '/api/admin/calls', async (req, res) => json(req, res, 200, { calls: callLog }), { admin: true });
@@ -632,6 +854,36 @@ route('DELETE', '/api/admin/users/:id', async (req, res, ctx) => {
   return json(req, res, 200, { ok: true });
 }, { admin: true });
 
+/* Prometheus 文本格式指标（不含任何密钥与 Key 描述） */
+function metricsText() {
+  const st = sync.status(), today = todayIn(config.billTz), cycle = today.slice(0, 7);
+  const L = [], g = (name, help, rows) => { L.push(`# HELP ${name} ${help}`, `# TYPE ${name} gauge`); for (const [labels, v] of rows) L.push(`${name}${labels} ${Number.isFinite(v) ? v : 0}`); };
+  const lb = o => '{' + Object.entries(o).map(([k, v]) => `${k}="${String(v).replace(/["\\\n]/g, '')}"`).join(',') + '}';
+  g('tokentally_info', '版本信息', [[lb({ version: VERSION }), 1]]);
+  g('tokentally_provider_configured', '云厂商访问密钥是否已配置', PROVIDER_LIST.map(p => [lb({ provider: p }), secretState(p) === 'ok' ? 1 : 0]));
+  const sy = [], ok = [], run = [];
+  for (const p of PROVIDER_LIST) for (const k of ['meta', 'bills']) {
+    const x = st.providers[p][k];
+    sy.push([lb({ provider: p, kind: k }), x.last?.status === 'error' ? 0 : 1]);
+    ok.push([lb({ provider: p, kind: k }), x.lastSuccessAt ? Math.floor(x.lastSuccessAt / 1000) : 0]);
+    run.push([lb({ provider: p, kind: k }), x.running ? 1 : 0]);
+  }
+  g('tokentally_sync_last_ok', '最近一次同步是否成功（1 成功/部分成功，0 失败）', sy);
+  g('tokentally_sync_last_success_timestamp_seconds', '最近一次成功同步的 Unix 时间', ok);
+  g('tokentally_sync_running', '同步任务是否运行中', run);
+  const month = store.monthByKey(cycle), byProv = new Map();
+  for (const r of month) byProv.set(r.provider, (byProv.get(r.provider) || 0) + (r.cost || 0));
+  g('tokentally_cost_month_to_date', '本账期应付金额（元）', [...byProv.entries()].map(([p, v]) => [lb({ provider: p, cycle }), +v.toFixed(4)]));
+  const b = store.budgets(), total = [...byProv.values()].reduce((s, v) => s + v, 0);
+  if (b.monthly) g('tokentally_budget_usage_ratio', '月度总预算使用率', [[lb({ cycle }), +(total / b.monthly).toFixed(4)]]);
+  const keys = store.listApiKeys();
+  g('tokentally_api_keys', 'API Key 数量', PROVIDER_LIST.map(p => [lb({ provider: p, state: 'active' }), keys.filter(k => k.provider === p && !k.deleted_at).length]));
+  const al = alerts.out();
+  g('tokentally_alert_channel_error', '告警渠道最近一次发送是否失败', al.channels.map(c => [lb({ channel: c.name, type: c.type }), c.lastError && (!c.lastSentAt || c.lastErrorAt > c.lastSentAt) ? 1 : 0]));
+  g('tokentally_sessions_active', '有效登录会话数', [['', store.countSessions()]]);
+  return L.join('\n') + '\n';
+}
+
 /* ===================================================================
  * 请求处理
  * =================================================================== */
@@ -643,6 +895,17 @@ async function handle(req, res) {
   try { url = new URL(req.url, 'http://localhost'); } catch { return send(req, res, 400, 'Bad Request', 'text/plain'); }
   const p = url.pathname;
   if (p === '/healthz') return send(req, res, 200, 'ok', 'text/plain', { 'Cache-Control': 'no-store' });
+  if (p === '/readyz') {
+    try { store.q('SELECT 1').get(); return send(req, res, 200, 'ready', 'text/plain', { 'Cache-Control': 'no-store' }); }
+    catch { return send(req, res, 503, 'database unavailable', 'text/plain', { 'Cache-Control': 'no-store' }); }
+  }
+  if (p === '/metrics') {
+    if (!config.metricsToken) return send(req, res, 404, 'Not Found', 'text/plain; charset=utf-8');
+    if (rateLimited(ip, 120, metricHits)) return send(req, res, 429, 'Too Many Requests', 'text/plain');
+    const auth = String(req.headers.authorization || '');
+    if (!safeEqual(auth, `Bearer ${config.metricsToken}`)) return send(req, res, 401, 'Unauthorized', 'text/plain', { 'WWW-Authenticate': 'Bearer' });
+    return send(req, res, 200, metricsText(), 'text/plain; version=0.0.4; charset=utf-8', { 'Cache-Control': 'no-store' });
+  }
   if (!['GET', 'HEAD', 'POST', 'PUT', 'DELETE'].includes(req.method)) return send(req, res, 405, 'Method Not Allowed', 'text/plain', { Allow: 'GET, HEAD, POST, PUT, DELETE' });
   if (rateLimited(ip)) return json(req, res, 429, { error: '请求过于频繁' });
 
@@ -689,7 +952,7 @@ const server = http.createServer((req, res) => {
 server.requestTimeout = 60_000;
 server.headersTimeout = 20_000;
 server.keepAliveTimeout = 5_000;
-server.listen(config.port, config.host, () => log(`百炼费用分析服务 v${VERSION} 已启动：http://${config.host}:${config.port}  数据目录：${config.dataDir}  账单时区：${config.billTz}`));
+server.listen(config.port, config.host, () => log(`TokenTally 大模型费用分析服务 v${VERSION} 已启动：http://${config.host}:${config.port}  数据目录：${config.dataDir}  账单时区：${config.billTz}`));
 
 const shutdown = sig => {
   log(`收到 ${sig}，正在退出…`);

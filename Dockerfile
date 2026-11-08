@@ -1,4 +1,4 @@
-# 百炼 API Key 费用分析 —— 零第三方依赖（node:http + node:sqlite + node:crypto）
+# TokenTally 大模型 API Key 费用分析（阿里云百炼 + 腾讯云 TokenHub）—— 零第三方依赖（node:http + node:sqlite + node:crypto）
 # 生产环境建议把基础镜像固定到具体版本或 digest，例如 node:24.11.1-alpine3.22
 FROM node:24-alpine
 

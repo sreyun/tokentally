@@ -14,6 +14,8 @@ export function openDay(date, keyId) {
   const prevLines = pool.filter(l => l.date === prevDay && ofKey(l));
   const a = aggAll(lines), pa = aggAll(prevLines);
   const t = totalTokens(a), pt = totalTokens(pa);
+  // 腾讯云 Key：当日请求数（TokenHub 用量统计）
+  const du = keyId ? state.usage.get(keyId)?.days.get(date) : null;
   $('#drawerTitle').textContent = `${date}（周${WEEK[weekday(date)]}）${keyId ? ' · ' + keyShort(keyId) : ''}`;
   $('#drawerTags').innerHTML = '<span class="pill neutral">当日明细</span>';
   $('#drawerActions').innerHTML = `<button class="btn sm" data-dact="detail" title="切换到“日期”口径并查看该日逐条账单">${icon('list')}该日账单明细</button>`;
@@ -27,7 +29,7 @@ export function openDay(date, keyId) {
   $('#drawerBody').innerHTML = `
     <div class="kpi-wrap" style="margin:0"><div class="kpi-row n4">
       ${tile('wallet', `当日费用 · ${METRICS[ui.f.metric]}`, money(a.cost), deltaPill(a.cost, pa.cost), '较前一日', `前一日 ${money(pa.cost)}`)}
-      ${tile('token', 'Token', compact(t), deltaPill(t, pt, { neutral: true }), '较前一日', `输入 ${compact(a.tIn)} · 输出 ${compact(a.tOut)}`)}
+      ${tile('token', 'Token', compact(t), deltaPill(t, pt, { neutral: true }), '较前一日', du && du.requests ? `请求 ${intFmt(du.requests)} 次 · 单次 ${intFmt(du.tokens / du.requests)} Token` : `输入 ${compact(a.tIn)} · 输出 ${compact(a.tOut)}`)}
       ${tile('unit', '每百万 Token', t ? money(a.cost / t * 1e6) : '—', t && pt ? deltaPill(a.cost / t, pa.cost / pt) : '', '较前一日', '费用 ÷ Token × 10⁶')}
       ${tile('cache', '缓存命中率', a.tIn ? pct(a.tCache, a.tIn) : '—', a.tIn && pa.tIn ? deltaPill(a.tCache / a.tIn, pa.tCache / pa.tIn, { pp: true, goodWhenUp: true }) : '', '较前一日', `${a.keys.size} 个 Key · ${a.models.size} 个模型`)}
     </div></div>

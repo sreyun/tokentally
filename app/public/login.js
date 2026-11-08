@@ -11,6 +11,13 @@
   const pw = document.getElementById('password');
   const toggle = document.getElementById('togglePw');
   const caps = document.getElementById('caps');
+  // 品牌名称（管理员可在“系统管理 → 品牌与备份”中修改）
+  fetch('/api/branding', { credentials: 'same-origin' }).then(r => (r.ok ? r.json() : null)).then(b => {
+    if (!b || !b.name) return;
+    document.title = '登录 · ' + b.name;
+    const h = document.getElementById('loginBrand');
+    if (h) h.textContent = b.name;
+  }).catch(() => { /* ignore */ });
   try {
     const m = sessionStorage.getItem('bc.loginMsg');
     if (m) { err.textContent = m.slice(0, 120); sessionStorage.removeItem('bc.loginMsg'); }

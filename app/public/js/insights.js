@@ -124,6 +124,12 @@ export function computeInsights() {
   const newModels = sortedAggs(aggregate(lines, l => l.model)).filter(a => a.cost > 0 && !prevModels.has(a.key));
   if (newModels.length && prevLines.length) out.push({ level: 'info', icon: 'model', rank: 8, title: `本期新增使用 ${newModels.length} 个模型`, html: newModels.slice(0, 4).map(a => `${b(a.key)} ${esc(money(a.cost))}`).join('、') + (newModels.length > 4 ? ' 等' : '') + '。', go: '#/models', goLabel: '模型分析' });
 
+  // 10. 腾讯云费用口径：目录价估算 / 未匹配到用量
+  const est = sum(lines.filter(l => l.alloc === 2), metricVal);
+  if (est > 0.005) out.push({ level: 'warn', icon: 'info', rank: 2, title: '部分腾讯云费用为目录价估算', html: `估算金额 ${b(money(est))}，未含折扣、代金券与阶梯价。为腾讯云 CAM 子用户授予“计费只读”权限后，下次同步将自动改用真实账单。`, go: state.me?.role === 'admin' ? '#/admin/tencent' : null, goLabel: '腾讯云接入' });
+  const unTc = sum(lines.filter(l => l.provider === 'tencent' && !l.apiKeyId), metricVal);
+  if (unTc > 0.01) out.push({ level: 'info', icon: 'info', rank: 7, title: `腾讯云有 ${money(unTc)} 未归属到 API Key`, html: '这部分账单在 TokenHub 用量中找不到对应模型（如控制台体验、非 API Key 调用或用量统计尚未覆盖），计入“无 API Key”。' });
+
   return out.sort((a, c) => a.rank - c.rank).slice(0, 6);
 }
 /** 有维度筛选时，整体预算不适用 */

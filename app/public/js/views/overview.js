@@ -3,13 +3,26 @@ import {
   $, esc, state, ui, app, money, moneyShort, compact, intFmt, pct, sum, uniq, metricVal, METRICS, NONE_KEY, DIMS, keyShort, wsName,
   filterLines, aggregate, aggAll, sortedAggs, totalTokens, topModels, deltaPill, tipRows, icon, help, segCtl, forecastOf, budgetOf,
   budgetBar, activeFilterCount, channelLabel, addDays, daysBetween, WEEK, weekday, isCurrentMonth, lastDayOf as lastDayOfCycle,
+  multiCloud, hasTags, PROVIDERS,
 } from '../core.js';
 import { sparkline, columnChart, lineChart, rankList, divergingList, segbar, legendList, topParts, legendHtml, bindActivate } from '../charts.js';
 import { computeInsights, cacheSavings } from '../insights.js';
 import { computeFindings, SEVERITY } from './governance.js';
 
+/** 可选的分组维度：云厂商（多云时）、成本中心（设置了标签时） */
+function dimOpts(base) {
+  const o = { ...base };
+  if (multiCloud()) o.provider = '云厂商';
+  if (hasTags()) o.cc = '成本中心';
+  return o;
+}
+function fixSeg(key, opts) { if (!opts[ui[key]]) ui[key] = Object.keys(opts)[0]; return opts; }
+
 export function render(v) {
   const p = state.data.period;
+  const trendOpts = fixSeg('trendBy', dimOpts({ key: 'Key', model: '模型', ws: '业务空间' }));
+  const compOpts = fixSeg('compBy', dimOpts({ ws: '业务空间', dir: 'Token 类型', channel: '渠道' }));
+  const varOpts = fixSeg('varBy', dimOpts({ key: 'Key', model: '模型', ws: '空间' }));
   const lines = filterLines(), prevLines = filterLines(state.prev), daily = filterLines(state.daily);
   const cur = aggAll(lines), prev = aggAll(prevLines);
   const days = uniq(daily.map(l => l.date)).sort();
@@ -58,7 +71,7 @@ export function render(v) {
   <div class="bi">
     <section class="panel c8">
       <div class="panel-h"><h3>费用趋势</h3>${help('每日：按日账单堆叠；累计：本期与上期按天累计对比（当月含月末预测）；月度：近 12 个账期的账期账单（取决于同步回溯月数）。')}
-        <div class="actions">${ui.trendMode !== 'cum' ? segCtl('trendBy', { key: 'Key', model: '模型', ws: '业务空间' }) : ''}${segCtl('trendMode', { daily: '每日', cum: '累计', monthly: '月度' })}</div></div>
+        <div class="actions">${ui.trendMode !== 'cum' ? segCtl('trendBy', trendOpts) : ''}${segCtl('trendMode', { daily: '每日', cum: '累计', monthly: '月度' })}</div></div>
       <div class="legend" id="trLegend"></div><div class="chart" id="trChart"></div>
     </section>
     <section class="panel c4 ins-panel">
@@ -76,11 +89,11 @@ export function render(v) {
     </section>
 
     <section class="panel c4">
-      <div class="panel-h"><h3>费用构成</h3><div class="actions">${segCtl('compBy', { ws: '业务空间', dir: 'Token 类型', channel: '渠道' })}</div></div>
+      <div class="panel-h"><h3>费用构成</h3><div class="actions">${segCtl('compBy', compOpts)}</div></div>
       <div id="comp"></div>
     </section>
     <section class="panel c4">
-      <div class="panel-h"><h3>变动归因</h3>${help(`本期与上期（${state.compareRange || ''}）相比，各维度费用增减额，按绝对值排序。`)}<div class="actions">${segCtl('varBy', { key: 'Key', model: '模型', ws: '空间' })}</div></div>
+      <div class="panel-h"><h3>变动归因</h3>${help(`本期与上期（${state.compareRange || ''}）相比，各维度费用增减额，按绝对值排序。`)}<div class="actions">${segCtl('varBy', varOpts)}</div></div>
       <div id="variance"></div>
     </section>
     <section class="panel c4">
@@ -96,7 +109,7 @@ export function render(v) {
   $('#insights').innerHTML = ins.length ? ins.map(x => `<li class="ins ${x.level}"><span class="ins-ico">${icon(x.icon)}</span><div><div class="ins-t">${esc(x.title)}</div><div class="ins-d">${x.html}</div>${x.go ? `<button class="link" data-go="${esc(x.go)}">${esc(x.goLabel || '查看')} →</button>` : ''}</div></li>`).join('') : '<li class="nodata">暂无需要关注的发现</li>';
 
   rankList($('#rkKeys'), sortedAggs(byKey).map(a => ({
-    id: a.key, label: keyShort(a.key), sub: a.key === NONE_KEY ? '' : wsName(state.apiKeys.get(a.key)?.wsKey || [...a.wss][0] || ''),
+    id: a.key, label: keyShort(a.key), sub: a.key === NONE_KEY ? '' : [multiCloud() ? PROVIDERS[state.apiKeys.get(a.key)?.provider || 'aliyun'] : '', state.apiKeys.get(a.key)?.costCenter || wsName(state.apiKeys.get(a.key)?.wsKey || [...a.wss][0] || '')].filter(Boolean).join(' · '),
     value: a.cost, prev: pByKey.get(a.key)?.cost ?? 0, color: DIMS.key.color(a.key),
     tip: tipRows(DIMS.key.short(a.key), [['费用', money(a.cost)], ['占比', pct(a.cost, cur.cost)], ['上期', money(pByKey.get(a.key)?.cost || 0)], ['Token', compact(totalTokens(a))], ['主要模型', topModels(a, 2).join('、')]]),
   })), { total: cur.cost, showDelta: true, onClick: it => (it.id === NONE_KEY ? app.setFilter({ key: NONE_KEY }, '#/detail') : app.go(`#/key/${it.id}`)) });
@@ -107,7 +120,10 @@ export function render(v) {
 
   // 构成
   let parts;
-  if (ui.compBy === 'ws') parts = topParts(aggregate(lines, DIMS.ws.of), 'ws');
+  if (ui.compBy === 'provider' || ui.compBy === 'cc') {
+    const dm = DIMS[ui.compBy];
+    parts = sortedAggs(aggregate(lines, dm.of)).filter(a => a.cost > 0).map(a => ({ id: a.key, label: dm.short(a.key), value: a.cost, color: dm.color(a.key), f: ui.compBy }));
+  } else if (ui.compBy === 'ws') parts = topParts(aggregate(lines, DIMS.ws.of), 'ws');
   else if (ui.compBy === 'channel') parts = sortedAggs(aggregate(lines, l => l.channel)).filter(a => a.cost > 0).map((a, i) => ({ id: a.key, label: channelLabel(a.key), value: a.cost, color: i < 7 ? `var(--s${i + 1})` : 'var(--other)', f: 'channel' }));
   else {
     const m = aggregate(lines, l => (l.ioi.dir === 'in' ? (l.ioi.cache === 'hit' ? 'hit' : l.ioi.cache === 'create' ? 'create' : 'in') : l.ioi.dir));
@@ -116,7 +132,7 @@ export function render(v) {
   }
   const comp = $('#comp');
   comp.innerHTML = segbar(parts) + legendList(parts, sum(parts, x => x.value), ui.compBy !== 'dir');
-  if (ui.compBy !== 'dir') bindActivate(comp, '.li.clickable', li => app.setFilter(ui.compBy === 'ws' ? { ws: li.dataset.pid || '__nows' } : { channel: li.dataset.pid }));
+  if (ui.compBy !== 'dir') bindActivate(comp, '.li.clickable', li => app.setFilter(ui.compBy === 'ws' ? { ws: li.dataset.pid || '__nows' } : ui.compBy === 'provider' ? { provider: li.dataset.pid } : ui.compBy === 'cc' ? { cc: li.dataset.pid || '__nocc__' } : { channel: li.dataset.pid }));
 
   // 归因
   const dim = DIMS[ui.varBy];
@@ -124,7 +140,7 @@ export function render(v) {
   divergingList($('#variance'), uniq([...vc.keys(), ...vp.keys()]).map(id => {
     const c = vc.get(id)?.cost || 0, pv = vp.get(id)?.cost || 0;
     return { id, label: dim.short(id), cur: c, prev: pv, delta: c - pv };
-  }), { limit: 6, onClick: it => (ui.varBy === 'key' ? (it.id !== NONE_KEY && app.go(`#/key/${it.id}`)) : ui.varBy === 'model' ? app.openModel(it.id) : app.setFilter({ ws: it.id || '__nows' })) });
+  }), { limit: 6, onClick: it => (ui.varBy === 'key' ? (it.id !== NONE_KEY && app.go(`#/key/${it.id}`)) : ui.varBy === 'model' ? app.openModel(it.id) : ui.varBy === 'provider' ? app.setFilter({ provider: it.id }) : ui.varBy === 'cc' ? app.setFilter({ cc: it.id || '__nocc__' }) : app.setFilter({ ws: it.id || '__nows' })) });
 
   // 治理摘要
   const f = computeFindings();

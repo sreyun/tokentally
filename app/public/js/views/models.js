@@ -1,7 +1,7 @@
 /* 模型分析：模型费用、Token 结构、单位成本、计费维度、Key × 模型矩阵、模型详情抽屉 */
 import {
   $, esc, state, ui, app, money, moneyShort, compact, intFmt, pct, sum, uniq, metricVal, METRICS, NONE_KEY, DIMS, keyShort,
-  filterLines, aggregate, aggAll, sortedAggs, totalTokens, unitsText, deltaPill, tipRows, icon, help, segCtl, ioInfo, num, periodTag, WEEK, weekday, copyBtn,
+  filterLines, aggregate, aggAll, sortedAggs, totalTokens, unitsText, deltaPill, tipRows, icon, help, segCtl, ioInfo, num, periodTag, WEEK, weekday, copyBtn, PROVIDERS, provTag, multiCloud,
 } from '../core.js';
 import { columnChart, rankList, stackRank, segbar, legendHtml } from '../charts.js';
 import { table, dataBar } from '../table.js';
@@ -27,12 +27,14 @@ export function billDimsHtml(lines) {
 
 function modelRows(lines, prevLines, daily) {
   const by = aggregate(lines, l => l.model), pby = aggregate(prevLines, l => l.model);
+  const provs = new Map();
+  for (const l of lines) { if (!provs.has(l.model)) provs.set(l.model, new Set()); provs.get(l.model).add(l.provider); }
   const total = sum([...by.values()], a => a.cost);
   return [...by.values()].map(a => {
     const t = totalTokens(a);
     return {
       model: a.key, cost: a.cost, prev: pby.get(a.key)?.cost || 0, share: total ? a.cost / total : 0, gross: a.gross, tIn: a.tIn, tCache: a.tCache, tOut: a.tOut, tEmb: a.tEmb, tokens: t,
-      hit: a.tIn ? a.tCache / a.tIn : null, ioRatio: a.tIn ? a.tOut / a.tIn : null, perM: t ? a.cost / t * 1e6 : null, keys: a.keys.size, keyList: [...a.keys].map(k => keyShort(k)).join('、'),
+      hit: a.tIn ? a.tCache / a.tIn : null, ioRatio: a.tIn ? a.tOut / a.tIn : null, perM: t ? a.cost / t * 1e6 : null, keys: a.keys.size, keyList: [...a.keys].map(k => keyShort(k)).join('、'), providers: [...(provs.get(a.key) || [])],
       wss: a.wss.size, items: a.items.size, units: unitsText(a), days: uniq(daily.filter(l => l.model === a.key && metricVal(l) > 0).map(l => l.date)).length,
     };
   });
@@ -67,7 +69,7 @@ export function render(v) {
   const t = table('models', $('#tblM', v), {
     sort: 'cost', pageSize: 0, caption: '模型明细', onRowClick: r => openModel(r.model),
     columns: [
-      { key: 'model', label: '模型', fmt: x => `<span class="sw" style="background:${DIMS.model.color(x)}"></span><span class="mono">${esc(x)}</span>` },
+      { key: 'model', label: '模型', fmt: (x, r) => `<span class="sw" style="background:${DIMS.model.color(x)}"></span><span class="mono">${esc(x)}</span>${multiCloud() ? r.providers.map(p => provTag(p)).join('') : ''}`, csv: r => r.model },
       { key: 'cost', label: `费用（${METRICS[ui.f.metric]}）`, align: 'r', fmt: x => dataBar(x, max), csv: r => r.cost.toFixed(6) },
       { key: 'chg', label: state.compareLabel, align: 'r', fmt: (x, r) => deltaPill(r.cost, r.prev), sortVal: r => r.cost - r.prev, csv: r => (r.cost - r.prev).toFixed(6) },
       { key: 'share', label: '占比', align: 'r', fmt: x => (x * 100).toFixed(1) + '%' },
