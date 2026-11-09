@@ -212,7 +212,7 @@ export class SyncService {
     const s = this.store.syncSettings();
     const cur = todayIn(this.tz).slice(0, 7);
     const back = Math.min(18, Math.max(1, s.backfillMonths || 3));
-    return (opts.cycles?.length ? opts.cycles : Array.from({ length: back }, (_, i) => addMonths(cur, -i))).filter(x => /^\d{4}-\d{2}$/.test(x) && x <= cur);
+    return (opts.cycles?.length ? opts.cycles : Array.from({ length: back }, (_, i) => addMonths(cur, -i))).filter(x => /^\d{4}-(0[1-9]|1[0-2])$/.test(x) && x <= cur);
   }
 
   async syncBills(c, opts = {}) {
@@ -239,8 +239,11 @@ export class SyncService {
           this.store.replaceBillPeriod('aliyun', 'D', day, cycle, code, items.map(normalizeBillItem), final);
           return items.length;
         }), Math.min(6, Math.max(1, s.concurrency || 3)), (d, t) => P(`${cycle}：拉取按日账单 ${d}/${t}`, d, t));
-        for (const r of res) { if (r.ok) daily += r.v; else failedDays++; }
-        if (failedDays) warnings.push(`${cycle} 有 ${failedDays} 天的日账单拉取失败：${res.find(r => !r.ok).e.code || res.find(r => !r.ok).e.message}`);
+        // 按产品代码分别统计：多个产品代码时，前一个代码的失败不能让后一个代码的告警读取不存在的失败项
+        const bad = res.filter(r => !r.ok);
+        for (const r of res) if (r.ok) daily += r.v;
+        failedDays += bad.length;
+        if (bad.length) warnings.push(`${cycle}${codes.length > 1 ? `（${code}）` : ''} 有 ${bad.length} 天的日账单拉取失败：${bad[0].e?.code || bad[0].e?.message || '未知错误'}`);
       }
       try {
         P(`${cycle}：百炼账单接口对账…`);

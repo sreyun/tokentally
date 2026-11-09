@@ -67,6 +67,8 @@ location / {
 }
 ```
 
+> 客户端 IP 取 `X-Forwarded-For` **从右往左**第 N 个地址（N = 可信代理层数）：最左侧的地址可由客户端随意填写，不能用于登录限流与 IP 白名单。只有一层代理时 `TRUST_PROXY=true` 即可；多层代理（如 SLB → Nginx → 本服务）时设为层数，例如 `TRUST_PROXY=2`。
+
 建议同时配置 `ALLOW_CIDRS` 限制访问来源（如办公网出口 IP）。健康检查 `/healthz`、`/readyz` 不受白名单限制，`/metrics` 仍受白名单与令牌双重保护（请把 Prometheus 所在地址加入白名单）。
 
 ## 4. 云厂商接入

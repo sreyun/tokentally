@@ -222,7 +222,7 @@ flowchart LR
 | `APP_MASTER_KEY` | — | 加密主密钥，**必填**，≥32 字符 |
 | `ADMIN_USERNAME` / `ADMIN_PASSWORD` | admin / 随机 | 仅在没有任何用户时创建 |
 | `HTTP_PORT` / `BIND_ADDR` | 8080 / 0.0.0.0 | 对外端口与绑定地址 |
-| `TRUST_PROXY` / `COOKIE_SECURE` | false / auto | 反向代理与 Cookie Secure |
+| `TRUST_PROXY` / `COOKIE_SECURE` | false / auto | 反向代理（true 或可信代理层数，客户端 IP 取 X-Forwarded-For 右起第 N 个）与 Cookie Secure |
 | `DOMAIN` | — | `https` profile（Caddy 自动证书）使用的域名 |
 | `ALLOW_CIDRS` | — | IP 白名单（健康检查不受限） |
 | `SESSION_IDLE_MINUTES` / `SESSION_MAX_HOURS` | 120 / 12 | 会话超时 |

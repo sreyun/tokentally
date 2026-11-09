@@ -8,6 +8,13 @@ import { tokenStatsHtml, drawDailyTokens, drawDailyRequests, periodDays, reqHelp
 import { columnChart, rankList, stackRank, segbar, legendHtml, bindLegend } from '../charts.js';
 import { table, dataBar } from '../table.js';
 
+/** 计费项明细的分组键（模型 × 计费项 × 单价 × 用量单位 × 单价单位）与按组汇总的用量（一次遍历） */
+export const itemKey = l => `${l.model}\u0001${l.io}\u0001${l.listPrice}\u0001${l.usageUnit}\u0001${l.listPriceUnit}`;
+export function itemUsage(lines) {
+  const m = new Map();
+  for (const l of lines) { const k = itemKey(l); m.set(k, (m.get(k) || 0) + (l.usage || 0)); }
+  return m;
+}
 const TOKEN_PARTS = [{ label: '输入（非缓存）', color: 'var(--s1)' }, { label: '缓存命中', color: 'var(--s3)' }, { label: '输出', color: 'var(--s2)' }, { label: '向量', color: 'var(--s7)' }];
 
 /** 计费维度：Token 类型、时段、输入缓存、思考模式、上下文档位 */
@@ -34,6 +41,9 @@ function modelRows(lines, prevLines, daily) {
   const provs = new Map();
   for (const l of lines) { if (!provs.has(l.model)) provs.set(l.model, new Set()); provs.get(l.model).add(l.provider); }
   const total = sum([...by.values()], a => a.cost);
+  // 使用天数：一次遍历按模型收集有费用的日期（避免每个模型都扫描一遍全部日账单）
+  const daySets = new Map();
+  for (const l of daily) if (metricVal(l) > 0) { let s = daySets.get(l.model); if (!s) daySets.set(l.model, s = new Set()); s.add(l.date); }
   return [...by.values()].map(a => {
     const t = totalTokens(a);
     return {
@@ -41,7 +51,7 @@ function modelRows(lines, prevLines, daily) {
       hit: a.tIn ? a.tCache / a.tIn : null, ioRatio: a.tIn ? a.tOut / a.tIn : null, perM: t ? a.cost / t * 1e6 : null, keys: a.keys.size, keyList: [...a.keys].map(k => keyShort(k)).join('、'), providers: [...(provs.get(a.key) || [])],
       ...(um => ({ requests: um ? um.requests : null, failRate: um && um.requests ? um.fails / um.requests : null, tokPer: um && um.requests ? um.tokens / um.requests : null, costPer: um && um.requests ? a.cost / um.requests : null, uTokens: um ? um.tokens : 0 }))(ub.get(normModel(a.key))),
       dayTok: t / calDays,
-      wss: a.wss.size, items: a.items.size, units: unitsText(a), days: uniq(daily.filter(l => l.model === a.key && metricVal(l) > 0).map(l => l.date)).length,
+      wss: a.wss.size, items: a.items.size, units: unitsText(a), days: daySets.get(a.key)?.size || 0,
     };
   });
 }
@@ -117,7 +127,8 @@ export function render(v) {
   dailyByModel($('#mdDaily', v), $('#mdLegend', v), daily);
   keyModelMatrix($('#mx', v), lines, { cellScope: k => ({ global: true, key: k }) });
 
-  const byItem = aggregate(lines, l => `${l.model}\u0001${l.io}\u0001${l.listPrice}\u0001${l.usageUnit}\u0001${l.listPriceUnit}`);
+  const byItem = aggregate(lines, itemKey);
+  const usageOf = itemUsage(lines);
   const t2 = table('items', $('#tblI', v), {
     sort: 'cost', pageSize: 50, caption: '模型计费项明细', onRowClick: r => app.setFilter({ model: r.model, item: r.io }, '#/detail'),
     columns: [
@@ -133,7 +144,7 @@ export function render(v) {
     footer: rs => ['合计', '', '', '', intFmt(sum(rs, r => r.tokens)), money(sum(rs, r => r.gross)), money(sum(rs, r => r.cost)), ''],
   }).setRows([...byItem.values()].map(a => {
     const [model, io, price, unit, priceUnit] = a.key.split('\u0001');
-    return { model, io, label: ioInfo(io).label, price, priceUnit, unit, usage: sum(lines.filter(l => `${l.model}\u0001${l.io}\u0001${l.listPrice}\u0001${l.usageUnit}\u0001${l.listPriceUnit}` === a.key), l => l.usage || 0), tokens: totalTokens(a), cost: a.cost, gross: a.gross, keys: a.keys.size };
+    return { model, io, label: ioInfo(io).label, price, priceUnit, unit, usage: usageOf.get(a.key) || 0, tokens: totalTokens(a), cost: a.cost, gross: a.gross, keys: a.keys.size };
   }));
   $('#csvI', v).onclick = () => t2.csv(`模型计费项_${periodTag()}.csv`);
 }

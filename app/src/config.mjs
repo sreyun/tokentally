@@ -11,8 +11,12 @@ export const config = {
   port: int(env.PORT, 8080, 1, 65535),
   host: env.HOST || '0.0.0.0',
   dataDir: path.resolve(env.DATA_DIR || './data'),
-  /** 位于反向代理（如 Caddy/Nginx）之后时设为 true，才会信任 X-Forwarded-For / X-Forwarded-Proto */
-  trustProxy: bool(env.TRUST_PROXY),
+  /**
+   * 位于反向代理（如 Caddy/Nginx）之后时设为 true（或可信代理层数，如 SLB + Nginx 为 2），才会信任 X-Forwarded-For / X-Forwarded-Proto。
+   * 客户端 IP 取 X-Forwarded-For 从右往左第 N 个地址（N = 可信代理层数）：最左侧的地址可由客户端伪造，不能用于限流与 IP 白名单
+   */
+  trustProxy: /^\d+$/.test((env.TRUST_PROXY || '').trim()) ? Number(env.TRUST_PROXY.trim()) > 0 : bool(env.TRUST_PROXY),
+  proxyHops: /^\d+$/.test((env.TRUST_PROXY || '').trim()) ? Math.min(10, Math.max(1, Number(env.TRUST_PROXY.trim()))) : 1,
   /** auto：HTTPS 请求时自动加 Secure；true/false 强制 */
   cookieSecure: (env.COOKIE_SECURE || 'auto').toLowerCase(),
   sessionIdleMinutes: int(env.SESSION_IDLE_MINUTES, 120, 5, 24 * 60),

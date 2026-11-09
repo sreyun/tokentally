@@ -291,6 +291,7 @@ export function applyData(d) {
     state.usage.set(u.apiKeyId, k);
   }
   state.budgets = { monthly: null, alertPct: 80, keys: {}, ...(d.budgets || {}) };
+  state.changes = null; // 变更记录缓存随数据刷新失效：同步检测到的新变更要在 Key / 业务空间详情中可见
   state.compareLabel = d.period.mode === 'month' ? (usePrevMtd ? '较上月同期' : '较上月') : '较上一周期';
   state.compareRange = usePrevMtd ? d.period.prevMtdLabel : d.period.prevLabel;
   state.loadedAt = Date.now();

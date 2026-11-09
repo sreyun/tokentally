@@ -18,7 +18,7 @@ import { seedDemo, clearDemo } from './demo.mjs';
 import { PromClient, validateCalls, discover, fetchCalls, buildUsageRows, buildQuery, DEFAULT_CALLS, MAPPING_FIELDS, PROM_AUTH } from './prom.mjs';
 import { loadMasterKey, hashPassword, verifyPassword, burnPasswordCheck, checkPasswordPolicy, randomPassword, maskId, sha256 } from './crypto.mjs';
 
-const VERSION = '1.5.0';
+const VERSION = '1.5.1';
 const log = (...a) => console.log(new Date().toISOString(), ...a);
 
 {
@@ -168,9 +168,16 @@ const allowList = (() => {
   return bl;
 })();
 
+/**
+ * 客户端 IP：信任反向代理时取 X-Forwarded-For 从右往左第 proxyHops 个地址（由最近的可信代理追加）。
+ * 最左侧的地址可由客户端任意填写（Nginx $proxy_add_x_forwarded_for 只在末尾追加），取它会让登录限流、IP 白名单与审计 IP 被伪造绕过
+ */
 function clientIp(req) {
   let ip = req.socket.remoteAddress || '';
-  if (config.trustProxy && req.headers['x-forwarded-for']) ip = String(req.headers['x-forwarded-for']).split(',')[0].trim();
+  if (config.trustProxy && req.headers['x-forwarded-for']) {
+    const list = String(req.headers['x-forwarded-for']).split(',').map(s => s.trim()).filter(Boolean);
+    if (list.length) ip = list[Math.max(0, list.length - config.proxyHops)];
+  }
   return ip.replace(/^::ffff:/, '');
 }
 const isHttps = req => !!req.socket.encrypted || (config.trustProxy && String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim() === 'https');
@@ -206,11 +213,14 @@ function sendFile(req, res, name) {
   res.end(req.method === 'HEAD' ? undefined : body);
 }
 
+/** 同域其他应用可能写入非法百分号编码的 Cookie（如 a=100%）：解码失败时保留原值，不能让整个请求 500 */
 function parseCookies(req) {
   const out = {};
   for (const part of String(req.headers.cookie || '').split(';')) {
     const i = part.indexOf('=');
-    if (i > 0) out[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1).trim());
+    if (i <= 0) continue;
+    const v = part.slice(i + 1).trim();
+    try { out[part.slice(0, i).trim()] = decodeURIComponent(v); } catch { out[part.slice(0, i).trim()] = v; }
   }
   return out;
 }
@@ -384,7 +394,7 @@ function adminSettingsOut() {
     options: { msRegions: MS_REGIONS, bssSites: Object.keys(BSS_ENDPOINTS), tcRegions: TC_REGIONS, tcSites: Object.keys(TC_SITES) },
     security: {
       masterKeySource: master.source, encryption: 'AES-256-GCM', passwordHash: 'scrypt (N=32768, r=8, p=1)',
-      sessionIdleMinutes: config.sessionIdleMinutes, sessionMaxHours: config.sessionMaxHours, trustProxy: config.trustProxy,
+      sessionIdleMinutes: config.sessionIdleMinutes, sessionMaxHours: config.sessionMaxHours, trustProxy: config.trustProxy, proxyHops: config.proxyHops,
       cookieSecure: config.cookieSecure, allowCidrs: config.allowCidrs, loginMaxFailures: config.login.maxFailuresPerUser, lockMinutes: config.login.lockMinutes,
     },
   };
@@ -728,7 +738,7 @@ route('POST', '/api/admin/sync', async (req, res, ctx) => {
     if (!conf.includes(b.provider)) throw new HttpError(400, `尚未配置${PROVIDERS[b.provider]}访问密钥`);
     targets = [b.provider];
   } else targets = conf;
-  const cycles = Array.isArray(b.cycles) ? b.cycles.filter(c => /^\d{4}-\d{2}$/.test(c)).slice(0, 18) : undefined;
+  const cycles = Array.isArray(b.cycles) ? b.cycles.filter(c => typeof c === 'string' && /^\d{4}-(0[1-9]|1[0-2])$/.test(c)).slice(0, 18) : undefined;
   const runs = targets.map(p => sync.run(kind, `manual:${ctx.user.username}`, { provider: p, cycles, force: !!b.force }));
   store.audit(ctx.user.username, ctx.ip, 'sync.trigger', { kind, providers: targets, cycles, force: !!b.force });
   return json(req, res, 200, { runs, runId: runs[0].runId, alreadyRunning: runs.every(r => r.alreadyRunning) });
@@ -771,6 +781,13 @@ route('POST', '/api/admin/aliyun-calls/sync', async (req, res, ctx) => {
   if (!sync.callsConfig()) throw new HttpError(400, '请先保存并启用调用次数配置');
   store.audit(ctx.user.username, ctx.ip, 'aliyun.calls.sync', null);
   try { return json(req, res, 200, await sync.syncAliyunCalls()); } catch (e) { throw new HttpError(502, e.message); }
+}, { admin: true });
+/* 预算管理页：已保存的预算 + 上月按 Key 的应付金额（与页面当前选择的统计周期无关） */
+route('GET', '/api/admin/budgets', async (req, res) => {
+  const lastCycle = addMonths(todayIn(config.billTz).slice(0, 7), -1);
+  const lastMonth = {};
+  for (const r of store.monthByKey(lastCycle)) lastMonth[r.id || '__none__'] = (lastMonth[r.id || '__none__'] || 0) + (r.cost || 0);
+  return json(req, res, 200, { budgets: store.budgets(), lastCycle, lastMonth });
 }, { admin: true });
 route('PUT', '/api/admin/budgets', async (req, res, ctx) => {
   const b = await readJson(req);

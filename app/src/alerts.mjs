@@ -355,11 +355,18 @@ export class AlertService {
   }
 
   /* ---------- API Key 变更 ---------- */
+  /**
+   * 返回 { items, scannedTo }：scannedTo 为本次扫描到的最大变更 ID。
+   * 游标必须推进到 scannedTo（而不是最后一条匹配项）：changesSince 每次最多返回 200 条，
+   * 若这 200 条全是修改 / 业务空间变更，游标停在原地会让之后的新增 / 删除永远不再通知
+   */
   evaluateChanges(sinceId) {
     const CH = { create: '新增', delete: '删除', restore: '恢复' };
-    return this.store.changesSince(sinceId).filter(c => c.entity === 'api_key' && CH[c.change]).map(c => ({
+    const rows = this.store.changesSince(sinceId);
+    const items = rows.filter(c => c.entity === 'api_key' && CH[c.change]).map(c => ({
       code: `chg:${c.id}`, id: c.id, level: c.change === 'delete' ? 'warn' : 'info', text: `${CH[c.change]} API Key「${clean(c.name) || '无描述'}」(${c.entity_id})`,
     }));
+    return { items, scannedTo: rows.length ? Math.max(...rows.map(c => c.id)) : null };
   }
 
   /* ---------- 报表 ---------- */
@@ -454,8 +461,13 @@ export class AlertService {
         if (ch.events.sync) alertMsg('sync', '数据同步告警', get('sync', () => this.evaluateSync()), '#/admin/sync');
         if (ch.events.keyChange) {
           if (st.lastChangeId[ch.id] == null) st.lastChangeId[ch.id] = this.store.maxChangeId(); // 首次启用不补发历史变更
-          const items = this.evaluateChanges(st.lastChangeId[ch.id]);
-          if (items.length) { msgs.push({ event: 'keyChange', title: `API Key 变更通知（${items.length} 项）`, level: items.some(i => i.level === 'warn') ? 'warn' : 'info', lines: items.map(i => i.text), changeTo: Math.max(...items.map(i => i.id)), path: '#/changes' }); }
+          const { items, scannedTo } = this.evaluateChanges(st.lastChangeId[ch.id]);
+          const MAX_LINES = 30; // 一次同步新增上百个 Key 时消息不能无限长（企业微信 4096 字节、钉钉 20KB 上限）
+          if (items.length) {
+            const lines = items.slice(0, MAX_LINES).map(i => i.text);
+            if (items.length > MAX_LINES) lines.push(`…另有 ${items.length - MAX_LINES} 项，请在“变更记录”中查看`);
+            msgs.push({ event: 'keyChange', title: `API Key 变更通知（${items.length} 项）`, level: items.some(i => i.level === 'warn') ? 'warn' : 'info', lines, changeTo: scannedTo, path: '#/changes' });
+          } else if (scannedTo != null) st.lastChangeId[ch.id] = scannedTo; // 没有需要通知的变更：直接推进游标
         } else delete st.lastChangeId[ch.id];
         if (afterHour) {
           for (const kind of ['daily', 'weekly', 'monthly']) {

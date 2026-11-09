@@ -19,7 +19,7 @@ const TC_POLICY = {
 };
 
 export async function render(v, tab) {
-  if (!ADMIN_TABS[tab]) tab = 'aliyun';
+  if (!Object.hasOwn(ADMIN_TABS, tab)) tab = 'aliyun';
   v.innerHTML = `<div class="row" style="margin-bottom:14px"><div class="seg scroll" role="tablist" aria-label="系统管理">${Object.entries(ADMIN_TABS).map(([k, l]) => `<button type="button" role="tab" data-go="#/admin/${k}" aria-pressed="${tab === k}" aria-selected="${tab === k}">${l}</button>`).join('')}</div></div><div id="adm"><div class="nodata">加载中…</div></div>`;
   const el = $('#adm', v);
   try { await ({ aliyun, tencent, sync, budgets, alerts, users, system, security, calls })[tab](el); }
@@ -406,13 +406,25 @@ function runSummary(r) {
 
 /* ---------------- 预算管理 ---------------- */
 async function budgets(el) {
-  const b = state.budgets;
-  const { alerts: al } = await http('GET', '/api/admin/settings');
-  const lastCycle = addMonths(state.today.slice(0, 7), -1);
-  const lastMonth = new Map();
-  state.history.filter(l => l.date === lastCycle).forEach(l => lastMonth.set(l.apiKeyId || NONE_KEY, (lastMonth.get(l.apiKeyId || NONE_KEY) || 0) + l.pretax));
+  /*
+   * 必须等账单与 Key 数据加载完成后再渲染：直接打开 / 刷新本页时，数据请求可能晚于本页返回，
+   * 此时 Key 列表为空、预算为默认值，若直接保存会覆盖掉已保存的全部预算。预算本身从服务端重新读取（最新值）。
+   */
+  const [{ alerts: al }, bd] = await Promise.all([http('GET', '/api/admin/settings'), http('GET', '/api/admin/budgets'), app.whenData()]);
+  if (!state.data) throw new Error('账单与 API Key 数据尚未加载成功。为避免覆盖已保存的预算，请刷新页面后再编辑。');
+  const b = bd.budgets;
+  state.budgets = { monthly: null, alertPct: 80, keys: {}, ...b };
+  const lastCycle = bd.lastCycle;
+  // 上月费用由服务端按账期账单汇总，与页面当前选择的统计周期无关
+  const lastMonth = new Map(Object.entries(bd.lastMonth || {}));
   const keys = [...state.apiKeys.values()].filter(k => k.source !== 'deleted' || b.keys?.[k.apiKeyId] != null);
   const rows = keys.map(k => ({ id: k.apiKeyId, provider: k.provider || 'aliyun', desc: keyShort(k.apiKeyId), wsKey: k.wsKey || NO_WS, ws: wsName(k.wsKey), cc: k.costCenter || '', owner: k.owner || '', last: lastMonth.get(k.apiKeyId) || 0, c30: state.keyActivity.get(k.apiKeyId)?.c30 || 0, budget: b.keys?.[k.apiKeyId] ?? '' }));
+  // 已设置预算、但当前数据中没有的 Key（如只在账单中出现过、本期无账单）：保留为一行，避免保存时被静默删除
+  const shown = new Set(rows.map(r => r.id));
+  for (const [id, v] of Object.entries(b.keys || {})) {
+    if (shown.has(id)) continue;
+    rows.push({ id, provider: state.apiKeys.get(id)?.provider || 'aliyun', desc: keyShort(id), wsKey: NO_WS, ws: id === NONE_KEY ? '—' : wsName(''), cc: '', owner: '', last: lastMonth.get(id) || 0, c30: state.keyActivity.get(id)?.c30 || 0, budget: v });
+  }
   // 联动筛选：业务空间 / 成本中心 / 云厂商 / 关键字，选项随其余条件收窄；批量操作只作用于筛选出的 Key
   const bf = { ws: '', cc: '', provider: '', q: '' };
   const tagged = rows.some(r => r.cc || r.owner), multi = new Set(rows.map(r => r.provider)).size > 1;
@@ -815,7 +827,7 @@ async function security(el) {
         <div><span>登录失败锁定</span><b>连续 ${sec.loginMaxFailures} 次锁定 ${sec.lockMinutes} 分钟</b></div>
         <div><span>会话</span><b>空闲 ${sec.sessionIdleMinutes} 分钟 / 最长 ${sec.sessionMaxHours} 小时</b></div>
         <div><span>Cookie</span><b>HttpOnly · SameSite=Strict · Secure=${esc(sec.cookieSecure)}</b></div>
-        <div><span>反向代理</span><b>${sec.trustProxy ? '信任 X-Forwarded-*' : '不信任（直连）'}</b></div>
+        <div><span>反向代理</span><b>${sec.trustProxy ? `信任 X-Forwarded-*（${sec.proxyHops || 1} 层可信代理，客户端 IP 取 X-Forwarded-For 右起第 ${sec.proxyHops || 1} 个地址）` : '不信任（直连）'}</b></div>
         <div><span>IP 白名单</span><b class="mono">${esc(sec.allowCidrs.join(', ') || '未启用')}</b></div>
         <div><span>其他</span><b>CSP · CSRF 令牌 · 防点击劫持 · 请求限流 · 敏感操作二次验证 · 审计日志</b></div>
       </div></section>

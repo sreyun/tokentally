@@ -50,6 +50,9 @@ const PRESETS = [
   { name: '业务空间 × 计费时段', rows: 'ws', cols: 'time' },
 ];
 const avail = k => !DIM[k]?.when || DIM[k].when();
+/** 数据源兼容：按日维度（日期 / 自然周 / 星期）与账期维度（近 12 月）不能交叉——账期账单没有日期，会得到无效的周 / 星期与无法下钻的日期 */
+const srcOf = k => DIM[k]?.src || null;
+const compatible = (a, b) => !srcOf(a) || !srcOf(b) || srcOf(a) === srcOf(b);
 
 export function render(v) {
   const pv = ui.pv || (ui.pv = { rows: 'ws', cols: 'model', measure: 'cost', show: 'value', heat: true, ...LS.get('bc.pivot', {}) });
@@ -57,6 +60,7 @@ export function render(v) {
   if (!avail(pv.cols) || !DIM[pv.cols]) pv.cols = 'model';
   if (pv.rows === pv.cols && pv.rows !== 'none') pv.cols = 'none';
   if (pv.rows === 'none') pv.rows = 'ws';
+  if (!compatible(pv.rows, pv.cols)) pv.cols = 'none';
   const rd = DIM[pv.rows], cd = DIM[pv.cols], ms = MEASURE[pv.measure] || MEASURE.cost;
   const src = rd.src === 'history' || cd.src === 'history' ? state.history : rd.src === 'daily' || cd.src === 'daily' ? state.daily : state.lines;
   const lines = filterLines(src);
@@ -84,7 +88,7 @@ export function render(v) {
       <div class="row" style="margin-bottom:12px;gap:10px 16px">
         <label class="field" style="flex-direction:row;align-items:center;gap:6px"><span>行</span><select class="inp" data-pv="rows">${Object.entries(DIM).filter(([k]) => k !== 'none' && avail(k)).map(([k, d]) => opt(k, d.label, pv.rows)).join('')}</select></label>
         <button class="btn ghost icon sm" id="swap" title="行列互换" aria-label="行列互换"><svg class="ico" viewBox="0 0 24 24"><path d="M7 16V4M3 8l4-4 4 4M17 8v12M21 16l-4 4-4-4"/></svg></button>
-        <label class="field" style="flex-direction:row;align-items:center;gap:6px"><span>列</span><select class="inp" data-pv="cols">${Object.entries(DIM).filter(([k]) => k !== pv.rows && avail(k)).map(([k, d]) => opt(k, d.label, pv.cols)).join('')}</select></label>
+        <label class="field" style="flex-direction:row;align-items:center;gap:6px"><span>列</span><select class="inp" data-pv="cols">${Object.entries(DIM).filter(([k]) => k !== pv.rows && avail(k) && compatible(pv.rows, k)).map(([k, d]) => opt(k, d.label, pv.cols)).join('')}</select></label>
         <label class="field" style="flex-direction:row;align-items:center;gap:6px"><span>指标</span><select class="inp" data-pv="measure">${Object.entries(MEASURE).map(([k, m]) => opt(k, m.label(), pv.measure)).join('')}</select></label>
         <div class="seg sm" role="group" aria-label="显示方式">${Object.entries(SHOW).map(([k, l]) => `<button type="button" data-pvshow="${k}" aria-pressed="${pv.show === k}">${l}</button>`).join('')}</div>
         <label class="chk"><input type="checkbox" data-pv="heat" ${pv.heat ? 'checked' : ''}> 色阶</label>

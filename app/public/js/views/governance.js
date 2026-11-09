@@ -18,7 +18,17 @@ const RULES = {
 };
 const ipOpen = k => !(k.accessIps || []).length || (k.accessIps || []).some(ip => ip === '0.0.0.0/0' || ip === '::/0');
 
+/* 治理检查只依赖本期数据与预算（与筛选无关），但导航徽标每次重绘都会调用：按数据数组 + 预算缓存结果 */
+const findMemo = new WeakMap();
 export function computeFindings() {
+  const sig = JSON.stringify(state.budgets) + '|' + state.today;
+  const hit = findMemo.get(state.lines);
+  if (hit && hit.sig === sig) return hit.out;
+  const out = computeFindingsRaw();
+  findMemo.set(state.lines, { sig, out });
+  return out;
+}
+function computeFindingsRaw() {
   const out = [];
   const cost = new Map(), daily = new Map();
   for (const l of state.lines) cost.set(l.apiKeyId || NONE_KEY, (cost.get(l.apiKeyId || NONE_KEY) || 0) + l.pretax);

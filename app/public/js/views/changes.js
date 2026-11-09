@@ -6,12 +6,18 @@ const FIELD = { remark: '备注', description: '描述', workspace_id: '业务�
 const CHG = { create: ['新增', 'good'], update: ['修改', 'warn'], delete: ['删除', 'bad'], restore: ['恢复', 'good'] };
 const fmtJson = s => { try { const o = JSON.parse(s || 'null'); return o ? Object.entries(o).map(([k, x]) => `${FIELD[k] || k}：${x == null || x === '' ? '（空）' : x}`).join('；') : ''; } catch { return ''; } };
 
+let seq = 0;
 export async function render(v) {
-  v.innerHTML = '<div class="nodata">加载中…</div>';
-  try {
-    state.changes = (await http('GET', '/api/changes')).changes;
-  } catch (e) { v.innerHTML = `<div class="notice err">${icon('warn')}<div><b>加载失败</b><span class="why">${esc(e.message)}</span></div></div>`; return; }
-  const all = state.changes;
+  // 异步加载期间用户可能已切换到其他页面（#view 被复用）：只有最近一次、且仍在本页时才写入，避免覆盖其他页面的内容
+  const my = ++seq;
+  v.innerHTML = '<div class="nodata" data-chg-loading>加载中…</div>';
+  const marker = v.querySelector('[data-chg-loading]');
+  const stale = () => my !== seq || !marker.isConnected;
+  let all;
+  try { all = (await http('GET', '/api/changes')).changes; }
+  catch (e) { if (!stale()) v.innerHTML = `<div class="notice err">${icon('warn')}<div><b>加载失败</b><span class="why">${esc(e.message)}</span></div></div>`; return; }
+  state.changes = all;
+  if (stale()) return;
   const f = ui.chgEntity || '';
   const list = f ? all.filter(c => c.entity === f) : all;
   const n = k => all.filter(c => c.change === k).length;

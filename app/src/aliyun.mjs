@@ -182,6 +182,7 @@ export class AliyunClient {
   /** BssOpenApi DescribeInstanceBill 分页（NextToken / MaxResults ≤ 300） */
   async describeInstanceBill(query) {
     const out = [];
+    const seen = new Set();
     let token = '';
     for (let i = 0; i < 2000; i++) {
       const r = await this.call('bss', 'DescribeInstanceBill', { ...query, MaxResults: 300, NextToken: token || undefined });
@@ -189,7 +190,9 @@ export class AliyunClient {
       const items = Array.isArray(d.Items) ? d.Items : (d.Items?.Item || []);
       out.push(...items);
       token = d.NextToken || '';
-      if (!token || !items.length) break;
+      // 接口异常返回重复的 NextToken 时停止，避免同一页被反复拉取（重复计费行 + 长时间占用）
+      if (!token || !items.length || seen.has(token)) break;
+      seen.add(token);
     }
     return out;
   }

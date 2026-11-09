@@ -49,7 +49,8 @@ function parseHash(h = location.hash) {
   const [name, ...rest] = (splitHash(h).path || 'overview').split('/');
   let arg = rest.join('/');
   try { arg = decodeURIComponent(arg); } catch { /* 保留原样 */ }
-  const r = ROUTES[name] ? { name, arg: ROUTES[name].arg ? arg : '' } : { name: 'overview', arg: '' };
+  // hasOwn：#/constructor、#/toString 等原型属性名不能被当成页面
+  const r = Object.hasOwn(ROUTES, name) ? { name, arg: ROUTES[name].arg ? arg : '' } : { name: 'overview', arg: '' };
   if (ROUTES[r.name].admin && state.me && !isAdmin()) return { name: 'overview', arg: '' };
   return r;
 }
@@ -174,6 +175,9 @@ app.refreshStatus = async (background = false) => { try { state.status = await h
 
 /* ---------------- 数据 ---------------- */
 let loadSeq = 0;
+/** 等待首次数据加载结束（成功或失败）：管理页等先于数据渲染的页面需要完整的 Key 列表时使用 */
+let dataWaiters = [];
+app.whenData = () => (state.data ? Promise.resolve() : new Promise(r => dataWaiters.push(r)));
 async function loadData({ silent = false, background = false } = {}) {
   const seq = ++loadSeq;
   state.loading = true;
@@ -188,6 +192,7 @@ async function loadData({ silent = false, background = false } = {}) {
   catch (e) { if (seq === loadSeq) errs.push({ level: 'err', title: '数据加载失败', why: e.message }); }
   if (seq !== loadSeq) return; // 已有更新的请求（如用户连续切换账期），丢弃过期响应
   if (d) applyData(d);
+  for (const f of dataWaiters.splice(0)) f();
   state.loading = false;
   $('#topbar').classList.remove('loading');
   $('#content').classList.remove('dim');
@@ -239,7 +244,7 @@ function renderTitle(r) {
   let title = r.label;
   if (route.name === 'key') title = route.arg === NONE_KEY ? '非 API Key 调用' : (state.data ? keyShort(route.arg) : 'API Key 详情');
   if (route.name === 'group') { const g = Groups.parseGroupArg(route.arg); title = g ? `${DIM_LABEL[g.dim]} · ${state.data ? dimName(g.dim, g.id) : g.id}` : '详情'; }
-  if (route.name === 'admin') title = `系统管理 · ${Admin.ADMIN_TABS[route.arg] || '阿里云接入'}`;
+  if (route.name === 'admin') title = `系统管理 · ${Object.hasOwn(Admin.ADMIN_TABS, route.arg) ? Admin.ADMIN_TABS[route.arg] : '阿里云接入'}`;
   $('#pageTitle').textContent = title;
   $('#pageSub').textContent = r.sub;
   document.title = `${title} · ${brandName()}`;

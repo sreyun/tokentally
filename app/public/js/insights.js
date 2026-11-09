@@ -43,7 +43,7 @@ export function computeInsights() {
       level: d > 0 && (ratio == null || ratio > 20) ? 'warn' : d > 0 ? 'info' : 'good', icon: d >= 0 ? 'up' : 'down', rank: 1,
       title: prev.cost ? `费用${state.compareLabel}${d >= 0 ? '上升' : '下降'} ${Math.abs(ratio).toFixed(1)}%` : '本期新增费用',
       html: `本期 ${b(money(cur.cost))}，上期 ${b(money(prev.cost))}，变动 ${b((d >= 0 ? '+' : '−') + money(Math.abs(d)))}。${driverText}`,
-      go: drivers[0] && drivers[0].id !== NONE_KEY ? `#/key/${drivers[0].id}` : null, goLabel: '查看主要 Key',
+      go: drivers[0] && drivers[0].id !== NONE_KEY ? `#/key/${encodeURIComponent(drivers[0].id)}` : null, goLabel: '查看主要 Key',
     });
   }
 
@@ -78,7 +78,7 @@ export function computeInsights() {
   const ranked = sortedAggs(byKey).filter(a => a.cost > 0);
   if (ranked.length >= 3 && cur.cost > 0) {
     const s1 = ranked[0].cost / cur.cost, s3 = sum(ranked.slice(0, 3), a => a.cost) / cur.cost;
-    if (s1 >= 0.5) out.push({ level: 'warn', icon: 'layers', rank: 4, title: '费用高度集中', html: `${b(keyShort(ranked[0].key))} 占 ${b(pct(ranked[0].cost, cur.cost))}，前 3 个 Key 合计占 ${b((s3 * 100).toFixed(1) + '%')}。建议对该 Key 设置独立预算与告警。`, go: ranked[0].key !== NONE_KEY ? `#/key/${ranked[0].key}` : null, goLabel: '查看该 Key' });
+    if (s1 >= 0.5) out.push({ level: 'warn', icon: 'layers', rank: 4, title: '费用高度集中', html: `${b(keyShort(ranked[0].key))} 占 ${b(pct(ranked[0].cost, cur.cost))}，前 3 个 Key 合计占 ${b((s3 * 100).toFixed(1) + '%')}。建议对该 Key 设置独立预算与告警。`, go: ranked[0].key !== NONE_KEY ? `#/key/${encodeURIComponent(ranked[0].key)}` : null, goLabel: '查看该 Key' });
   }
 
   // 5. 异常日（均值 + 2σ 且 ≥ 1.5 倍日均）

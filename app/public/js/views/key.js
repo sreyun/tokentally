@@ -7,7 +7,7 @@ import {
 } from '../core.js';
 import { columnChart, rankList, segbar, legendList, legendHtml, bindLegend, bindActivate } from '../charts.js';
 import { table, dataBar } from '../table.js';
-import { billDimsHtml } from './models.js';
+import { billDimsHtml, itemKey, itemUsage } from './models.js';
 import { editTags } from './keys.js';
 import { tokenStatsHtml, drawDailyTokens, drawDailyRequests, reqHelp } from '../stats.js';
 
@@ -45,9 +45,9 @@ export function render(v, id) {
     <div class="row" style="justify-content:space-between;margin-bottom:6px">
       <button class="back" style="margin:0" data-back="#/keys">${icon('chevL')}返回</button>
       <div class="pager-nav" role="group" aria-label="切换 API Key">
-        <button class="btn sm" ${prevId ? `data-go="#/key/${esc(prevId)}" data-nav="prev" title="上一个（[）：${esc(keyShort(prevId))}"` : 'disabled'}>${icon('chevL')}上一个</button>
+        <button class="btn sm" ${prevId ? `data-go="#/key/${esc(encodeURIComponent(prevId))}" data-nav="prev" title="上一个（[）：${esc(keyShort(prevId))}"` : 'disabled'}>${icon('chevL')}上一个</button>
         <span class="muted">${pos + 1} / ${order.length}</span>
-        <button class="btn sm" ${nextId ? `data-go="#/key/${esc(nextId)}" data-nav="next" title="下一个（]）：${esc(keyShort(nextId))}"` : 'disabled'}>下一个${icon('chevR')}</button>
+        <button class="btn sm" ${nextId ? `data-go="#/key/${esc(encodeURIComponent(nextId))}" data-nav="next" title="下一个（]）：${esc(keyShort(nextId))}"` : 'disabled'}>下一个${icon('chevR')}</button>
       </div>
     </div>
     <div class="entity-h">
@@ -161,7 +161,8 @@ export function render(v, id) {
   $('#csvM', v).onclick = () => tm.csv(`Key_${id}_模型明细_${periodTag()}.csv`);
 
   // 计费项
-  const byItem = aggregate(lines, l => `${l.model}\u0001${l.io}\u0001${l.listPrice}\u0001${l.usageUnit}\u0001${l.listPriceUnit}`);
+  const byItem = aggregate(lines, itemKey);
+  const usageOf = itemUsage(lines);
   const ti = table('keyItems', $('#kItemTbl', v), {
     sort: 'cost', pageSize: 50, caption: '计费项明细', onRowClick: r => app.setFilter({ key: id, model: r.model, item: r.io }, '#/detail', true),
     columns: [
@@ -177,7 +178,7 @@ export function render(v, id) {
     footer: rs => ['合计', '', '', '', intFmt(sum(rs, r => r.tokens)), money(sum(rs, r => r.gross)), money(sum(rs, r => r.cost)), ''],
   }).setRows([...byItem.values()].map(x => {
     const [model, io, price, unit, priceUnit] = x.key.split('\u0001');
-    return { model, io, label: ioInfo(io).label, price, priceUnit, unit, usage: sum(lines.filter(l => `${l.model}\u0001${l.io}\u0001${l.listPrice}\u0001${l.usageUnit}\u0001${l.listPriceUnit}` === x.key), l => l.usage || 0), tokens: totalTokens(x), gross: x.gross, cost: x.cost, share: a.cost ? x.cost / a.cost : 0 };
+    return { model, io, label: ioInfo(io).label, price, priceUnit, unit, usage: usageOf.get(x.key) || 0, tokens: totalTokens(x), gross: x.gross, cost: x.cost, share: a.cost ? x.cost / a.cost : 0 };
   }));
   $('#csvI', v).onclick = () => ti.csv(`Key_${id}_计费项_${periodTag()}.csv`);
 

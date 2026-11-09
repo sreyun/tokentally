@@ -288,7 +288,8 @@ export function renderDetail(v, arg) {
   const totalAll = sum(state.lines, metricVal);
   const orderSet = new Set([...allBy.keys(), ...[...state.apiKeys.values()].map(k => keyDimVal[dim](k))]);
   if (dim === 'ws') for (const w of state.workspaces.values()) if (!w.deletedAt) orderSet.add(w.workspaceId);
-  if (dim === 'cc' || dim === 'owner') { if (!hasTags()) orderSet.clear(); orderSet.add(id); }
+  if ((dim === 'cc' || dim === 'owner') && !hasTags()) orderSet.clear();
+  orderSet.add(id); // 当前分组总在列表中（如已删除且无 Key 的业务空间），否则“上一个 / 下一个”显示 0 / N
   const order = [...orderSet].sort((x, y) => (allBy.get(y)?.cost || 0) - (allBy.get(x)?.cost || 0) || dimName(dim, x).localeCompare(dimName(dim, y), 'zh-CN'));
   const pos = order.indexOf(id), prevId = pos > 0 ? order[pos - 1] : null, nextId = pos >= 0 && pos < order.length - 1 ? order[pos + 1] : null;
   // 用量（请求次数）
