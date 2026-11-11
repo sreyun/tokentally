@@ -11,15 +11,36 @@ import crypto from 'node:crypto';
 import { config } from './config.mjs';
 import { Store, PROVIDERS } from './db.mjs';
 import { SyncService, todayIn, addDays, addMonths, isCycleFinal, hourIn, PROVIDER_LIST } from './sync.mjs';
-import { AlertService, ALERT_TYPES, EVENT_TYPES, MAX_CHANNELS, validateWebhook, cleanMobiles } from './alerts.mjs';
+import { AlertService, ALERT_TYPES, EVENT_TYPES, MAX_CHANNELS, validateWebhook, cleanMobiles, isPrivateIp } from './alerts.mjs';
 import { selfTest, AliyunClient, explainAliyunError, callLog, MS_REGIONS, BSS_ENDPOINTS } from './aliyun.mjs';
 import { tc3SelfTest, TencentClient, explainTencentError, TC_REGIONS, TC_SITES } from './tencent.mjs';
 import { seedDemo, clearDemo, demoStale } from './demo.mjs';
 import { PromClient, validateCalls, discover, fetchCalls, buildUsageRows, buildQuery, DEFAULT_CALLS, MAPPING_FIELDS, PROM_AUTH } from './prom.mjs';
 import { loadMasterKey, hashPassword, verifyPassword, burnPasswordCheck, checkPasswordPolicy, randomPassword, maskId, sha256 } from './crypto.mjs';
 
-const VERSION = '1.5.2';
-const log = (...a) => console.log(new Date().toISOString(), ...a);
+const VERSION = '1.5.3';
+
+/* ===================================================================
+ * 系统日志：所有运行日志同时输出到控制台并写入数据库（system_log，保留 SYSTEM_LOG_DAYS 天），
+ * 在“系统管理 → 系统日志”中按级别 / 分类 / 关键字查看。数据库就绪前的日志先缓存，就绪后补写
+ * =================================================================== */
+const LOG_LEVEL = msg => (/失败|异常|错误|崩溃|中断|无法|拒绝|超时/.test(msg) ? 'error' : /警告|提示|注意|partial|部分成功|忽略/.test(msg) ? 'warn' : 'info');
+const LOG_CATEGORY = msg => (/^同步|调用次数|^排队的同步|账单同步/.test(msg) ? 'sync'
+  : /告警|报表/.test(msg) ? 'alert' : /备份/.test(msg) ? 'backup' : /^配置|环境变量|主密钥|密钥|TENCENT_ENDPOINT|代理|客户端 IP/.test(msg) ? 'config'
+    : /演示/.test(msg) ? 'demo' : /请求处理异常|未处理|未捕获/.test(msg) ? 'runtime' : /启动|退出|收到 SIG|已创建管理员/.test(msg) ? 'service' : 'system');
+let logSink = null;
+const pendingLogs = [];
+function writeLog(level, msg, { keep = true } = {}) {
+  const ts = Date.now();
+  (level === 'error' ? console.error : console.log)(new Date(ts).toISOString(), msg);
+  if (!keep) return; // 含敏感内容（如首次生成的管理员密码）只输出到控制台
+  const e = { ts, level, category: LOG_CATEGORY(msg), message: String(msg).slice(0, 4000) };
+  if (logSink) { try { logSink(e); } catch { /* 数据库不可用时只保留控制台输出 */ } } else if (pendingLogs.length < 500) pendingLogs.push(e);
+}
+const log = (...a) => {
+  const msg = a.map(x => (typeof x === 'string' ? x : x instanceof Error ? x.stack || x.message : (() => { try { return JSON.stringify(x); } catch { return String(x); } })())).join(' ');
+  writeLog(LOG_LEVEL(msg), msg);
+};
 
 /* 配置校验：时区与 IP 白名单错误会导致所有接口 500 或安全限制失效，启动时直接报错；其他被忽略的配置给出警告 */
 if (!config.billTzValid) { console.error(`BILL_TZ=${config.billTz} 不是有效的 IANA 时区（如 Asia/Shanghai），服务未启动`); process.exit(1); }
@@ -42,6 +63,9 @@ for (const w of config.warnings) log('配置警告：' + w);
 fs.mkdirSync(config.dataDir, { recursive: true });
 const master = loadMasterKey(config.dataDir, config.masterKey);
 const store = new Store(path.join(config.dataDir, 'bailian-cost.db'), master.key);
+store.systemLogDays = config.systemLogDays;
+logSink = e => store.addSystemLog(e);
+for (const e of pendingLogs.splice(0)) { try { store.addSystemLog(e); } catch { /* ignore */ } }
 /* 运维：账号被锁定（如唯一的管理员被他人反复输错密码锁定）时，在服务器上执行 node src/server.mjs --unlock-user=<用户名> 解除 */
 {
   const arg = process.argv.find(a => a.startsWith('--unlock-user='));
@@ -73,9 +97,10 @@ if (store.countUsers() === 0) {
   store.audit('system', '', 'user.bootstrap', { username: config.adminUsername });
   log(`已创建管理员账号：${config.adminUsername}`);
   if (generated) {
-    log('==================================================================');
-    log(`初始管理员密码（仅显示一次，首次登录后必须修改）：${pw}`);
-    log('==================================================================');
+    writeLog('warn', '==================================================================', { keep: false });
+    writeLog('warn', `初始管理员密码（仅显示一次，首次登录后必须修改）：${pw}`, { keep: false });
+    writeLog('warn', '==================================================================', { keep: false });
+    log('已生成初始管理员密码（只在容器日志中显示一次，首次登录后必须修改）');
   }
 }
 if (config.bootstrapAkId && config.bootstrapAkSecret && secretState() === 'none') {
@@ -220,18 +245,62 @@ const trustedProxies = (() => {
   for (const c of list) { const [a, p] = c.split('/'); const t = net.isIPv6(a) ? 'ipv6' : 'ipv4'; if (p) bl.addSubnet(a, Number(p), t); else bl.addAddress(a, t); }
   return bl;
 })();
-function fromProxy(req) {
-  if (!config.trustProxy) return false;
-  const a = String(req.socket.remoteAddress || '').replace(/^::ffff:/, '');
-  return net.isIP(a) ? trustedProxies.check(a, net.isIPv6(a) ? 'ipv6' : 'ipv4') : false;
+/*
+ * 客户端 IP 来源：“系统管理 → 安全与审计”中的设置优先（无需改 .env、重启），未设置时跟随环境变量 TRUST_PROXY。
+ *  - direct：使用 TCP 连接地址（直接访问本服务时）
+ *  - xff：X-Forwarded-For 从右往左第 N 个地址（N = 可信代理层数，如 SLB → Nginx → 本服务为 2）
+ *  - realip：代理设置的 X-Real-IP（Nginx / OpenResty 常用 proxy_set_header X-Real-IP $remote_addr）
+ * 转发头只在连接来自可信代理（TRUSTED_PROXIES）时采用
+ */
+const IP_SOURCES = { env: '跟随环境变量 TRUST_PROXY', direct: '直连：使用连接地址', xff: 'X-Forwarded-For（按可信代理层数）', realip: 'X-Real-IP' };
+let netCfg = { ipSource: 'env', hops: 1, ...(store.getSetting('network', null) || {}) };
+function ipMode() {
+  if (['direct', 'xff', 'realip'].includes(netCfg.ipSource)) return { source: netCfg.ipSource, hops: netCfg.hops || 1, from: 'ui' };
+  return { source: config.trustProxy ? 'xff' : 'direct', hops: config.proxyHops, from: 'env' };
 }
+const peerOf = req => String(req.socket.remoteAddress || '').replace(/^::ffff:/, '');
+function peerTrusted(req) { const a = peerOf(req); return net.isIP(a) ? trustedProxies.check(a, net.isIPv6(a) ? 'ipv6' : 'ipv4') : false; }
+function fromProxy(req) { return ipMode().source !== 'direct' && peerTrusted(req); }
+const normIp = s => String(s || '').trim().replace(/^\[|\]$/g, '').replace(/^::ffff:/i, '');
+const firstIp = v => { for (const s of String(v || '').split(',')) { const t = normIp(s); if (net.isIP(t)) return t; } return ''; };
+const xffList = req => String(req.headers['x-forwarded-for'] || '').split(',').map(normIp).filter(Boolean);
 function clientIp(req) {
-  let ip = req.socket.remoteAddress || '';
-  if (fromProxy(req) && req.headers['x-forwarded-for']) {
-    const list = String(req.headers['x-forwarded-for']).split(',').map(s => s.trim()).filter(Boolean);
-    if (list.length) ip = list[Math.max(0, list.length - config.proxyHops)];
+  const peer = peerOf(req);
+  if (!fromProxy(req)) return peer;
+  const m = ipMode(), real = firstIp(req.headers['x-real-ip']);
+  if (m.source === 'realip' && real) return real;
+  const list = xffList(req);
+  if (list.length) { const ip = list[Math.max(0, list.length - m.hops)]; if (net.isIP(ip)) return ip; }
+  return real || peer; // 代理只传递了 X-Real-IP 时也能识别
+}
+/** 客户端 IP 诊断：服务端实际收到的连接地址与转发头、当前解析结果，以及推荐的设置 */
+function ipDiagnose(req) {
+  const peer = peerOf(req), trusted = peerTrusted(req), list = xffList(req), real = firstIp(req.headers['x-real-ip']), m = ipMode();
+  const isPub = ip => !!net.isIP(ip) && !isPrivateIp(ip);
+  const candidates = list.map((ip, i) => ({ hops: list.length - i, ip, public: isPub(ip) })).reverse(); // 右起：第 1 个是最近一层代理追加的地址
+  let suggest;
+  if (!list.length && !real) {
+    suggest = isPub(peer) ? { source: 'direct', ip: peer, text: '请求直接到达本服务，使用连接地址即可' }
+      : { source: m.source, ip: peer, text: `连接地址 ${peer} 是内网地址，但请求中没有 X-Forwarded-For / X-Real-IP：请在反向代理中加入 proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;（或 X-Real-IP $remote_addr;）` };
+  } else if (!trusted) {
+    suggest = { source: m.source, ip: peerOf(req), text: `连接地址 ${peer} 不在可信代理范围内，不会采用转发头。如果它就是你的反向代理，请把它加入环境变量 TRUSTED_PROXIES` };
+  } else {
+    const pub = candidates.find(c => c.public);
+    if (pub) suggest = { source: 'xff', hops: pub.hops, ip: pub.ip, text: `建议使用 X-Forwarded-For，可信代理层数 ${pub.hops}（解析为 ${pub.ip}）` };
+    else if (isPub(real)) suggest = { source: 'realip', ip: real, text: `建议使用 X-Real-IP（解析为 ${real}）` };
+    else suggest = { source: m.source, hops: m.hops, ip: list.at(-1) || real, text: '转发头中都是内网地址：如果你正在内网访问，这是正常的；否则请检查代理链是否把真实客户端地址传递下来' };
   }
-  return ip.replace(/^::ffff:/, '');
+  return {
+    peer, trusted, xff: list, xRealIp: real, forwardedProto: String(req.headers['x-forwarded-proto'] || ''), forwardedHost: String(req.headers['x-forwarded-host'] || ''), host: String(req.headers.host || ''),
+    resolved: clientIp(req), mode: m, sources: IP_SOURCES, saved: netCfg, candidates, suggest, envTrustProxy: config.trustProxy, envHops: config.proxyHops,
+    trustedProxies: config.trustedProxies.length ? config.trustedProxies : ['127.0.0.0/8', '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '100.64.0.0/10', '::1/128', 'fc00::/7'],
+  };
+}
+/** 管理员提示：解析出的客户端 IP 是内网地址，而转发头里有公网地址（代理层数 / 来源设置不对） */
+function ipHint(req) {
+  const d = ipDiagnose(req);
+  if (!net.isIP(d.resolved) || !isPrivateIp(d.resolved) || !d.suggest?.ip || isPrivateIp(d.suggest.ip) || d.suggest.ip === d.resolved) return null;
+  return { resolved: d.resolved, suggest: d.suggest.text };
 }
 const isHttps = req => !!req.socket.encrypted || (fromProxy(req) && String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim() === 'https');
 const cookieSecure = req => (config.cookieSecure === 'true' ? true : config.cookieSecure === 'false' ? false : isHttps(req));
@@ -533,7 +602,7 @@ function adminSettingsOut() {
     options: { msRegions: MS_REGIONS, bssSites: Object.keys(BSS_ENDPOINTS), tcRegions: TC_REGIONS, tcSites: Object.keys(TC_SITES) },
     security: {
       masterKeySource: master.source, encryption: 'AES-256-GCM', passwordHash: 'scrypt (N=32768, r=8, p=1)',
-      sessionIdleMinutes: config.sessionIdleMinutes, sessionMaxHours: config.sessionMaxHours, trustProxy: config.trustProxy, proxyHops: config.proxyHops,
+      sessionIdleMinutes: config.sessionIdleMinutes, sessionMaxHours: config.sessionMaxHours, trustProxy: ipMode().source !== 'direct', proxyHops: ipMode().hops, ipSource: ipMode().source, ipSourceFrom: ipMode().from,
       cookieSecure: config.cookieSecure, allowCidrs: config.allowCidrs, loginMaxFailures: config.login.maxFailuresPerUser, lockMinutes: config.login.lockMinutes,
     },
   };
@@ -918,7 +987,7 @@ route('POST', '/api/me/password', async (req, res, ctx) => {
   return json(req, res, 200, { ok: true });
 }, { allowMustChange: true });
 
-route('GET', '/api/status', async (req, res) => json(req, res, 200, statusOut()));
+route('GET', '/api/status', async (req, res, ctx) => json(req, res, 200, { ...statusOut(), ...(ctx.user.role === 'admin' ? { ipHint: ipHint(req) } : {}) }));
 /* 分析数据：按“数据版本 + 日期 + 查询参数”生成 ETag，数据未变化时返回 304，避免轮询刷新时重复下载 */
 /* 同一 ETag 的响应体（JSON + gzip）缓存在内存中：多个用户 / 标签页、轮询刷新时不再重复查询与压缩（LRU，最多 8 份） */
 /* 缓存按总字节数限制（而不只是条数）：长日期范围的响应可能很大，8 份同时留在内存中会超出容器内存 */
@@ -1200,6 +1269,29 @@ route('POST', '/api/admin/backups/download', async (req, res, ctx) => {
   rs.pipe(res);
 }, { admin: true });
 route('GET', '/api/admin/runs', async (req, res) => json(req, res, 200, { runs: store.listRuns(200) }), { admin: true });
+/* 系统日志：服务启停、同步、告警、备份、配置警告与运行异常 */
+route('GET', '/api/admin/logs', async (req, res, ctx) => {
+  const q = ctx.url.searchParams;
+  const level = ['info', 'warn', 'error'].includes(q.get('level')) ? q.get('level') : '';
+  const category = /^[a-z]{1,16}$/.test(q.get('category') || '') ? q.get('category') : '';
+  const logs = store.listSystemLogs({ level, category, q: String(q.get('q') || '').slice(0, 100), before: Number(q.get('before')) || 0, limit: int(q.get('limit'), 1, 2000, 500) });
+  return json(req, res, 200, { logs, stats24h: store.systemLogStats(Date.now() - 864e5), retentionDays: config.systemLogDays });
+}, { admin: true });
+/* 客户端 IP：诊断当前请求，以及在页面上设置 IP 来源（敏感设置，需要当前登录密码确认） */
+route('GET', '/api/admin/ip-check', async (req, res) => json(req, res, 200, ipDiagnose(req)), { admin: true });
+route('PUT', '/api/admin/network', async (req, res, ctx) => {
+  const b = await readJson(req, 4096);
+  if (!Object.hasOwn(IP_SOURCES, b.ipSource)) throw new HttpError(400, '客户端 IP 来源无效');
+  const next = { ipSource: b.ipSource, hops: int(b.hops, 1, 10, 1) };
+  if (!b.confirmPassword) throw new HttpError(400, '修改客户端 IP 来源需要输入当前登录密码确认');
+  await confirmCurrentPassword(ctx, b.confirmPassword, 'network.update', '当前登录密码不正确');
+  const before = { ...netCfg };
+  store.setSetting('network', next);
+  netCfg = next;
+  store.audit(ctx.user.username, ctx.ip, 'network.update', { from: before, to: next });
+  log(`客户端 IP 来源已修改为：${IP_SOURCES[next.ipSource]}${next.ipSource === 'xff' ? `（可信代理 ${next.hops} 层）` : ''}（${ctx.user.username}）`);
+  return json(req, res, 200, ipDiagnose(req));
+}, { admin: true });
 route('GET', '/api/admin/calls', async (req, res) => json(req, res, 200, { calls: callLog }), { admin: true });
 route('GET', '/api/admin/audit', async (req, res) => json(req, res, 200, { audit: store.listAudit(1000) }), { admin: true });
 route('GET', '/api/admin/users', async (req, res) => json(req, res, 200, { users: store.listUsers().map(userOut) }), { admin: true });
@@ -1310,8 +1402,14 @@ function metricsText() {
 /* ===================================================================
  * 请求处理
  * =================================================================== */
+let proxyWarned = false;
 async function handle(req, res) {
   const ip = clientIp(req);
+  // 经反向代理访问、却仍按直连识别 IP：登录记录 / 审计 / 白名单 / 限流都会使用代理地址，记录一次提示
+  if (!proxyWarned && ipMode().source === 'direct' && peerTrusted(req) && (req.headers['x-forwarded-for'] || req.headers['x-real-ip'])) {
+    proxyWarned = true;
+    log(`提示：请求经反向代理（${peerOf(req)}）转发，但客户端 IP 来源为“直连”，登录记录与审计中的 IP 将显示为代理地址。请在“系统管理 → 安全与审计 → 客户端 IP 识别”中设置`);
+  }
   securityHeaders(req, res);
   let url;
   try { url = new URL(req.url, 'http://localhost'); } catch { return send(req, res, 400, 'Bad Request', 'text/plain'); }

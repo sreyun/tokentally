@@ -222,7 +222,7 @@ flowchart LR
 | `APP_MASTER_KEY` | — | 加密主密钥，**必填**，≥32 字符 |
 | `ADMIN_USERNAME` / `ADMIN_PASSWORD` | admin / 随机 | 仅在没有任何用户时创建 |
 | `HTTP_PORT` / `BIND_ADDR` | 8080 / 0.0.0.0 | 对外端口与绑定地址 |
-| `TRUST_PROXY` / `COOKIE_SECURE` | false / auto | 反向代理（true 或可信代理层数，客户端 IP 取 X-Forwarded-For 右起第 N 个）与 Cookie Secure |
+| `TRUST_PROXY` / `COOKIE_SECURE` | false / auto | 反向代理（true 或可信代理层数，客户端 IP 取 X-Forwarded-For 右起第 N 个；也可在“安全与审计 → 客户端 IP 识别”中设置，页面设置优先）与 Cookie Secure |
 | `DOMAIN` | — | `https` profile（Caddy 自动证书）使用的域名 |
 | `ALLOW_CIDRS` | — | IP 白名单（健康检查不受限；格式错误时拒绝启动） |
 | `RATE_LIMIT_PER_MIN` | 600 | 每个 IP 每分钟的接口请求上限（静态资源不计入） |
@@ -231,6 +231,7 @@ flowchart LR
 | `LOGIN_MAX_FAILURES` / `LOGIN_LOCK_MINUTES` / `LOGIN_MAX_PER_IP` | 5 / 15 / 20 | 登录防暴力破解 |
 | `BILL_TZ` | Asia/Shanghai | 账单自然日时区：须与阿里云出账时区一致（中国站为北京时间，一般不要修改；无效时区拒绝启动；腾讯云固定按北京时间） |
 | `MAX_DATA_LINES` | 100000 | 日期范围查询返回的按日账单行上限（本期 + 对比期） |
+| `SYSTEM_LOG_DAYS` | 30 | 系统日志保留天数（系统管理 → 系统日志） |
 | `ALIBABA_CLOUD_ACCESS_KEY_ID` / `_SECRET` | — | 可选：首次启动导入阿里云密钥后加密存库 |
 | `TENCENTCLOUD_SECRET_ID` / `_KEY` | — | 可选：首次启动导入腾讯云密钥后加密存库 |
 | `PUBLIC_URL` | — | 告警消息中的跳转链接 |

@@ -60,6 +60,8 @@ export const config = {
   badCidrs,
   /** 每个 IP 每分钟的接口请求上限（静态资源不计入） */
   rateLimitPerMin: int(env.RATE_LIMIT_PER_MIN, 600, 60, 100_000),
+  /** 系统日志保留天数 */
+  systemLogDays: int(env.SYSTEM_LOG_DAYS, 30, 1, 365),
   /** 可选：首次启动时导入的 AccessKey（导入后加密存库，之后以管理页面配置为准） */
   bootstrapAkId: env.ALIBABA_CLOUD_ACCESS_KEY_ID || '',
   bootstrapAkSecret: env.ALIBABA_CLOUD_ACCESS_KEY_SECRET || '',

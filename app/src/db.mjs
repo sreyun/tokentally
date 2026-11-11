@@ -202,6 +202,30 @@ export class Store {
         CREATE INDEX IF NOT EXISTS idx_change_entity ON change_log(entity_id);
         PRAGMA user_version = 4;`);
     }
+    if (v < 5) {
+      // v5：系统日志（运行日志：服务启停、同步、告警、备份、配置警告、异常），在“系统管理 → 系统日志”中查看
+      this.db.exec(`CREATE TABLE IF NOT EXISTS system_log (id INTEGER PRIMARY KEY, ts INTEGER NOT NULL, level TEXT NOT NULL, category TEXT NOT NULL, message TEXT NOT NULL);
+        CREATE INDEX IF NOT EXISTS idx_syslog_ts ON system_log(ts);
+        PRAGMA user_version = 5;`);
+    }
+  }
+
+  /* ---------------- 系统日志 ---------------- */
+  addSystemLog({ ts, level, category, message }) {
+    this.q('INSERT INTO system_log(ts, level, category, message) VALUES(?,?,?,?)').run(ts, level, category, message);
+  }
+  /** 按级别 / 分类 / 关键字查询（倒序），before 为上一页最后一条的 ID */
+  listSystemLogs({ level = '', category = '', q = '', before = 0, limit = 500 } = {}) {
+    const where = [], args = [];
+    if (level === 'warn') where.push("level IN ('warn', 'error')");
+    else if (level) { where.push('level = ?'); args.push(level); }
+    if (category) { where.push('category = ?'); args.push(category); }
+    if (q) { where.push("message LIKE ? ESCAPE '\\'"); args.push('%' + String(q).replace(/[\\%_]/g, c => '\\' + c) + '%'); }
+    if (before > 0) { where.push('id < ?'); args.push(before); }
+    return this.db.prepare(`SELECT id, ts, level, category, message FROM system_log ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY id DESC LIMIT ?`).all(...args, Math.min(2000, Math.max(1, limit)));
+  }
+  systemLogStats(since) {
+    return this.q('SELECT level, COUNT(*) AS n FROM system_log WHERE ts >= ? GROUP BY level').all(since);
   }
 
   /* ---------------- settings ---------------- */
@@ -294,6 +318,9 @@ export class Store {
     const yearAgo = Date.now() - 365 * 864e5;
     this.q('DELETE FROM audit_log WHERE ts < ?').run(yearAgo);
     this.q('DELETE FROM sync_runs WHERE started_at < ?').run(Date.now() - 90 * 864e5);
+    // 系统日志保留 SYSTEM_LOG_DAYS 天（默认 30），且最多 20 万条
+    this.q('DELETE FROM system_log WHERE ts < ?').run(Date.now() - (this.systemLogDays || 30) * 864e5);
+    this.q('DELETE FROM system_log WHERE id <= (SELECT id FROM system_log ORDER BY id DESC LIMIT 1 OFFSET 200000)').run();
     this.optimize();
   }
 

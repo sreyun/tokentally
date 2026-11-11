@@ -29,7 +29,7 @@ const ROUTES = {
   detail: { label: '账单明细', icon: 'list', sub: '逐条账单，与云厂商费用中心账单对应（腾讯云 Key 级费用按用量分摊）', view: Detail, filters: true },
   governance: { label: 'Key 治理', icon: 'shield', sub: '描述、归属、闲置、权限、费用异常与预算检查', view: Gov },
   changes: { label: '变更记录', icon: 'history', sub: '与云厂商同步时检测到的 API Key / 业务空间变化', view: Changes, noData: true, noPeriod: true },
-  admin: { label: '系统管理', icon: 'settings', sub: '云厂商接入、数据同步、预算与告警、用户、品牌与备份、安全审计', view: Admin, admin: true, noData: true, noPeriod: true, arg: true },
+  admin: { label: '系统管理', icon: 'settings', sub: '云厂商接入、数据同步、预算与告警、用户、品牌与备份、安全审计、系统日志', view: Admin, admin: true, noData: true, noPeriod: true, arg: true },
 };
 const NAV = [{ sec: '成本分析' }, 'overview', 'keys', 'models', 'workspaces', 'pivot', 'detail', { sec: '治理' }, 'governance', 'changes', { sec: '系统', admin: true }, 'admin'];
 let route = { name: 'overview', arg: '' };
@@ -502,6 +502,9 @@ function renderNotices(r, extra) {
   const demoHidden = (() => { try { return sessionStorage.getItem('bc.demoHide') === '1'; } catch { return false; } })();
   if (s?.demo && !demoHidden) list.push({ dismiss: 'demo', level: 'info', title: '演示模式 · 当前为随机生成的演示数据', why: isAdmin() ? '在“系统管理 → 阿里云接入 / 腾讯云接入”中配置真实访问密钥后，演示数据会被自动清除并开始同步真实账单。' : '演示数据仅用于体验功能，金额与 Key 均为虚构。', go: isAdmin() ? '#/admin/aliyun' : null });
   else if (s && !s.anyConfigured && !s.demo) list.push({ level: 'warn', title: '尚未配置云厂商访问密钥', why: isAdmin() ? '请在“系统管理”中配置阿里云 RAM AccessKey（百炼只读 + 费用中心只读）或腾讯云 CAM API 密钥（TokenHub 只读 + 计费只读），保存后系统会自动同步数据。' : '请联系管理员完成配置。', go: isAdmin() ? '#/admin/aliyun' : null });
+  // 客户端 IP 识别为代理的内网地址（经反向代理访问但 IP 来源 / 代理层数设置不对）
+  const ipHidden = (() => { try { return sessionStorage.getItem('bc.ipHintHide') === '1'; } catch { return false; } })();
+  if (isAdmin() && s?.ipHint && !ipHidden) list.push({ dismiss: 'iphint', level: 'warn', title: `登录记录中的客户端 IP 将显示为代理地址（${s.ipHint.resolved}）`, why: s.ipHint.suggest + '。请在“系统管理 → 安全与审计 → 客户端 IP 识别”中设置。', go: '#/admin/security' });
   for (const p of Object.keys(PROVIDERS)) if (s?.providers?.[p]?.secretState === 'undecryptable') list.push({ level: 'warn', title: `已保存的${PROVIDERS[p]}访问密钥无法解密`, why: '主密钥（APP_MASTER_KEY）已变化，请重新填写访问密钥。', go: isAdmin() ? `#/admin/${p}` : null });
   const d = state.data;
   if (d && !r.noData && route.name !== 'governance' && route.name !== 'key' && !state.lines.length && s?.anyConfigured) {
@@ -615,6 +618,7 @@ document.addEventListener('click', async e => {
   if (e.target.closest('#btnMore')) { ui.moreFilters = !ui.moreFilters; render(); return; }
   const act = e.target.closest('[data-act]');
   if (act?.dataset.act === 'pwd') { closePop(); openPwd(false); }
+  if (act?.dataset.act === 'dismiss-iphint') { try { sessionStorage.setItem('bc.ipHintHide', '1'); } catch { /* ignore */ } render([], { layoutOnly: true }); return; }
   if (act?.dataset.act === 'dismiss-demo') { try { sessionStorage.setItem('bc.demoHide', '1'); } catch { /* ignore */ } render([], { layoutOnly: true }); return; }
   if (act?.dataset.act === 'logout') { closePop(); await logout(); return; }
   if (act?.dataset.act === 'retry-load') { loadData(); return; }

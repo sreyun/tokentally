@@ -2,7 +2,7 @@
 import { $, esc, state, ui, app, http, toast, money, fmtTime, ago, p2, addMonths, opt, icon, help, keyShort, wsName, NONE_KEY, NO_WS, NO_CC, sum, PROVIDERS, provTag, modal } from '../core.js';
 import { table } from '../table.js';
 
-export const ADMIN_TABS = { aliyun: '阿里云接入', tencent: '腾讯云接入', sync: '数据同步', budgets: '预算管理', alerts: '告警通知', users: '用户管理', system: '品牌与备份', security: '安全与审计', calls: '接口日志' };
+export const ADMIN_TABS = { aliyun: '阿里云接入', tencent: '腾讯云接入', sync: '数据同步', budgets: '预算管理', alerts: '告警通知', users: '用户管理', system: '品牌与备份', security: '安全与审计', logs: '系统日志', calls: '接口日志' };
 const POLICY = {
   Version: '1',
   Statement: [
@@ -22,7 +22,7 @@ export async function render(v, tab) {
   if (!Object.hasOwn(ADMIN_TABS, tab)) tab = 'aliyun';
   v.innerHTML = `<div class="row" style="margin-bottom:14px"><div class="seg scroll" role="tablist" aria-label="系统管理">${Object.entries(ADMIN_TABS).map(([k, l]) => `<button type="button" role="tab" data-go="#/admin/${k}" aria-pressed="${tab === k}" aria-selected="${tab === k}">${l}</button>`).join('')}</div></div><div id="adm"><div class="nodata">加载中…</div></div>`;
   const el = $('#adm', v);
-  try { await ({ aliyun, tencent, sync, budgets, alerts, users, system, security, calls })[tab](el); }
+  try { await ({ aliyun, tencent, sync, budgets, alerts, users, system, security, logs, calls })[tab](el); }
   catch (e) { el.innerHTML = `<div class="notice err">${icon('warn')}<div><b>加载失败</b><span class="why">${esc(e.message)}</span></div></div>`; }
 }
 
@@ -858,7 +858,7 @@ async function system(el) {
 
 /* ---------------- 安全与审计 ---------------- */
 async function security(el) {
-  const [s, { audit }] = await Promise.all([http('GET', '/api/admin/settings'), http('GET', '/api/admin/audit')]);
+  const [s, { audit }, ipd] = await Promise.all([http('GET', '/api/admin/settings'), http('GET', '/api/admin/audit'), http('GET', '/api/admin/ip-check')]);
   const sec = s.security;
   el.innerHTML = `
     <section class="panel"><div class="panel-h"><h3>安全策略</h3><span class="sub">部分策略通过环境变量配置（见 .env），修改后重启容器生效</span></div>
@@ -869,10 +869,11 @@ async function security(el) {
         <div><span>登录失败锁定</span><b>连续 ${sec.loginMaxFailures} 次锁定 ${sec.lockMinutes} 分钟</b></div>
         <div><span>会话</span><b>空闲 ${sec.sessionIdleMinutes} 分钟 / 最长 ${sec.sessionMaxHours} 小时</b></div>
         <div><span>Cookie</span><b>HttpOnly · SameSite=Strict · Secure=${esc(sec.cookieSecure)}</b></div>
-        <div><span>反向代理</span><b>${sec.trustProxy ? `信任 X-Forwarded-*（${sec.proxyHops || 1} 层可信代理，客户端 IP 取 X-Forwarded-For 右起第 ${sec.proxyHops || 1} 个地址）` : '不信任（直连）'}</b></div>
+        <div><span>客户端 IP 来源</span><b>${sec.ipSource === 'xff' ? `X-Forwarded-For 右起第 ${sec.proxyHops || 1} 个地址（${sec.proxyHops || 1} 层可信代理）` : sec.ipSource === 'realip' ? 'X-Real-IP' : '直连（使用连接地址）'}${sec.ipSourceFrom === 'ui' ? ' · 页面设置' : ' · 环境变量 TRUST_PROXY'}</b></div>
         <div><span>IP 白名单</span><b class="mono">${esc(sec.allowCidrs.join(', ') || '未启用')}</b></div>
         <div><span>其他</span><b>CSP · CSRF 令牌 · 防点击劫持 · 请求限流 · 敏感操作二次验证 · 审计日志</b></div>
       </div></section>
+    <div id="ipBox"></div>
     <section class="panel"><div class="panel-h"><h3>审计日志</h3><span class="sub">登录、配置变更、预算、标签、告警、备份、用户管理、同步触发等（最近 1000 条）</span><div class="actions"><button class="btn sm" id="csv">${icon('download')}导出</button></div></div><div id="aTbl"></div></section>`;
   const ACT = {
     'login.success': '登录成功', 'login.fail': '登录失败', logout: '退出登录', 'password.change': '修改密码', 'password.change.fail': '修改密码失败', 'password.change.lock': '改密错误过多强制退出',
@@ -881,7 +882,10 @@ async function security(el) {
     'tencent.key.update': '更新腾讯云密钥', 'tencent.key.update.fail': '更新腾讯云密钥验证失败', 'tencent.key.bootstrap': '导入腾讯云密钥', 'tencent.test': '测试腾讯云连接',
     'sync.trigger': '触发同步', 'budgets.update': '修改预算', 'keytags.update': '修改成本中心 / 负责人', 'alert.update': '修改告警设置', 'alert.test': '发送测试消息', 'alert.test.fail': '测试消息失败',
     'alert.sent': '告警 / 报表已发送', 'alert.report.send': '手动发送报表', 'backup.create': '创建备份', 'backup.download': '下载备份', 'backup.download.fail': '下载备份验证失败', 'demo.clear': '清除演示数据',
+    'network.update': '修改客户端 IP 来源', 'network.update.fail': '修改客户端 IP 来源验证失败', 'network.update.lock': '修改客户端 IP 来源多次验证失败', 'user.unlock.cli': '命令行解除锁定',
+    'user.promote.fail': '设为管理员验证失败', 'user.reset.fail': '重置密码验证失败', 'user.create.fail': '创建管理员验证失败', 'backup.download.lock': '下载备份多次验证失败',
   };
+  ipPanel($('#ipBox', el), ipd, () => refresh(el, () => security(el)));
   const t = table('audit', $('#aTbl', el), {
     sort: 'id', pageSize: 50, stickyFirst: false, caption: '审计日志',
     columns: [
@@ -893,6 +897,105 @@ async function security(el) {
     ],
   }).setRows(audit);
   $('#csv', el).onclick = () => t.csv('审计日志.csv');
+}
+
+/* ---------------- 客户端 IP 识别 ----------------
+ * 显示服务端实际收到的连接地址与转发头、当前解析结果与推荐设置；IP 来源可在页面上修改（需要当前登录密码）
+ */
+function ipPanel(box, d, reload) {
+  const label = d.mode.source === 'xff' ? `X-Forwarded-For，可信代理 ${d.mode.hops} 层` : d.mode.source === 'realip' ? 'X-Real-IP' : '直连（使用连接地址）';
+  const priv = ip => /^(10\.|127\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.|::1$|f[cd])/i.test(ip || '');
+  const bad = priv(d.resolved) && d.suggest?.ip && !priv(d.suggest.ip) && d.suggest.ip !== d.resolved;
+  box.innerHTML = `<section class="panel"><div class="panel-h"><h3>客户端 IP 识别</h3>${help('登录记录、审计日志、IP 白名单与登录限流使用的客户端地址。经反向代理（Nginx / OpenResty / SLB）访问时，需要按代理链设置 IP 来源，否则记录的是代理的内网地址。设置保存后立即生效，无需重启。')}
+      <span class="sub">当前请求解析为 <b class="mono ${bad ? 'warn-text' : ''}">${esc(d.resolved)}</b></span></div>
+    <div class="kv" style="margin-bottom:12px">
+      <div><span>连接来源地址</span><b class="mono">${esc(d.peer)}</b><span class="hint ${d.trusted ? '' : 'warn-text'}">${d.trusted ? '在可信代理范围内' : '不在可信代理范围内（不采用转发头）'}</span></div>
+      <div><span>X-Forwarded-For</span><b class="mono">${esc(d.xff.join(', ') || '（无）')}</b></div>
+      <div><span>X-Real-IP</span><b class="mono">${esc(d.xRealIp || '（无）')}</b></div>
+      <div><span>当前 IP 来源</span><b>${esc(label)}</b><span class="hint">${d.mode.from === 'ui' ? '页面设置' : `环境变量 TRUST_PROXY=${d.envTrustProxy ? (d.envHops > 1 ? d.envHops : 'true') : 'false'}`}</span></div>
+    </div>
+    ${d.candidates.length ? `<div class="tbl-wrap" style="margin-bottom:12px"><table class="dt compact"><thead><tr><th>X-Forwarded-For（从右往左）</th><th>地址</th><th>类型</th></tr></thead><tbody>${d.candidates.map(c => `<tr><td>可信代理 ${c.hops} 层时取此地址</td><td class="mono">${esc(c.ip)}</td><td>${c.public ? '<span class="pill good">公网</span>' : '<span class="pill neutral">内网</span>'}</td></tr>`).join('')}</tbody></table></div>` : ''}
+    <div class="notice ${bad ? 'warn' : 'info'}" style="margin-bottom:12px">${icon(bad ? 'warn' : 'info')}<div><b>${bad ? '当前设置识别到的是代理的内网地址' : '检测结果'}</b><span class="why">${esc(d.suggest?.text || '')}</span>${d.suggest && ['xff', 'realip', 'direct'].includes(d.suggest.source) && (d.suggest.source !== d.mode.source || (d.suggest.hops || 1) !== (d.mode.hops || 1)) ? '<button class="link" type="button" data-ip-apply>按建议填写 →</button>' : ''}</div></div>
+    <form id="ipForm" class="form-grid" autocomplete="off">
+      <label class="field"><span>客户端 IP 来源</span><select class="inp" name="ipSource">${Object.entries(d.sources).map(([k, l]) => opt(k, l, d.saved.ipSource || 'env')).join('')}</select></label>
+      <label class="field" data-hops><span>可信代理层数</span><input class="inp" type="number" name="hops" min="1" max="10" value="${esc(d.saved.hops || d.mode.hops || 1)}"></label>
+      <label class="field full"><span>当前登录密码</span><input class="inp" type="password" name="confirmPassword" autocomplete="current-password" maxlength="256"><small class="hint">修改客户端 IP 来源属于安全设置，需要再次验证身份</small></label>
+      <div class="row full"><button class="btn primary" type="submit">保存</button><button class="btn" type="button" data-ip-recheck>${icon('sync')}重新检测</button></div>
+    </form>
+    <p class="hint" style="margin:10px 0 0">只有连接来自可信代理（${esc(d.trustedProxies.join('、'))}，可用环境变量 TRUSTED_PROXIES 修改）时才采用转发头。可信代理层数 = 请求经过的代理数量，例如 SLB → OpenResty → 本服务为 2。</p>
+  </section>`;
+  const form = $('#ipForm', box);
+  const syncUi = () => { $('[data-hops]', form).hidden = form.elements.ipSource.value !== 'xff'; };
+  syncUi();
+  form.elements.ipSource.addEventListener('change', syncUi);
+  form.addEventListener('input', () => markDirty(form));
+  $('[data-ip-apply]', box)?.addEventListener('click', () => {
+    form.elements.ipSource.value = d.suggest.source; if (d.suggest.hops) form.elements.hops.value = d.suggest.hops;
+    syncUi(); markDirty(form); form.elements.confirmPassword.focus();
+  });
+  $('[data-ip-recheck]', box).onclick = async () => { try { ipPanel(box, await http('GET', '/api/admin/ip-check'), reload); } catch (ex) { toast(ex.message, 'err', 4000); } };
+  form.onsubmit = async e => {
+    e.preventDefault();
+    const fd = Object.fromEntries(new FormData(form));
+    if (!fd.confirmPassword) { form.elements.confirmPassword.focus(); return toast('请输入当前登录密码', 'err'); }
+    const btn = form.querySelector('[type=submit]'); btn.disabled = true;
+    try {
+      const r = await http('PUT', '/api/admin/network', { ipSource: fd.ipSource, hops: Number(fd.hops) || 1, confirmPassword: fd.confirmPassword });
+      markClean(form);
+      toast(`已保存，当前请求解析为 ${r.resolved}`, '', 4000);
+      await reload();
+    } catch (ex) { form.elements.confirmPassword.value = ''; toast('保存失败：' + ex.message, 'err', 4000); } finally { btn.disabled = false; }
+  };
+}
+
+/* ---------------- 系统日志 ---------------- */
+const LOG_CAT = { service: '服务', sync: '同步', alert: '告警', backup: '备份', config: '配置', runtime: '运行异常', demo: '演示', system: '系统' };
+const LOG_LV = { error: ['错误', 'bad'], warn: ['警告', 'warn'], info: ['信息', 'neutral'] };
+async function logs(el) {
+  const st = { level: '', category: '', q: '' };
+  el.innerHTML = `<section class="panel"><div class="panel-h"><h3>系统日志</h3><span class="sub" id="lgSub"></span>
+      <div class="actions"><div class="seg sm" role="group" aria-label="级别">${[['', '全部'], ['warn', '警告及错误'], ['error', '仅错误']].map(([k, l]) => `<button type="button" data-lv="${k}" aria-pressed="${k === ''}">${l}</button>`).join('')}</div>
+        <select class="inp sm" id="lgCat" aria-label="分类">${opt('', '全部分类', '')}${Object.entries(LOG_CAT).map(([k, l]) => opt(k, l, '')).join('')}</select>
+        <input class="inp sm" id="lgQ" type="search" placeholder="搜索日志内容" aria-label="搜索日志内容" style="width:180px">
+        <label class="chk"><input type="checkbox" id="lgAuto"> 自动刷新</label>
+        <button class="btn sm" id="lgRefresh">${icon('sync')}刷新</button><button class="btn sm" id="lgCsv">${icon('download')}导出</button></div></div>
+    <div id="lgTbl"></div>
+    <div class="row" style="justify-content:center;margin-top:10px"><button class="btn sm" id="lgMore" hidden>加载更早的日志</button></div></section>`;
+  let rows = [], t = null, seq = 0;
+  const load = async (more = false) => {
+    const my = ++seq;
+    const p = new URLSearchParams({ limit: '500' });
+    if (st.level) p.set('level', st.level);
+    if (st.category) p.set('category', st.category);
+    if (st.q) p.set('q', st.q);
+    if (more && rows.length) p.set('before', String(rows[rows.length - 1].id));
+    const r = await http('GET', '/api/admin/logs?' + p);
+    if (my !== seq || !el.isConnected) return;
+    rows = more ? rows.concat(r.logs) : r.logs;
+    const c = Object.fromEntries((r.stats24h || []).map(x => [x.level, x.n]));
+    $('#lgSub', el).innerHTML = `近 24 小时：<span class="${c.error ? 'bad-text' : ''}">错误 ${c.error || 0}</span> · <span class="${c.warn ? 'warn-text' : ''}">警告 ${c.warn || 0}</span> · 信息 ${c.info || 0} · 保留 ${r.retentionDays} 天`;
+    t = table('syslog', $('#lgTbl', el), {
+      sort: 'id', pageSize: 100, stickyFirst: false, empty: '暂无日志', caption: '系统日志',
+      columns: [
+        { key: 'id', label: '时间', fmt: (x, r2) => `${fmtTime(r2.ts)}:${p2(new Date(r2.ts).getSeconds())}`, csv: r2 => new Date(r2.ts).toISOString() },
+        { key: 'level', label: '级别', fmt: x => `<span class="pill ${LOG_LV[x]?.[1] || 'neutral'}">${LOG_LV[x]?.[0] || esc(x)}</span>`, csv: r2 => LOG_LV[r2.level]?.[0] || r2.level },
+        { key: 'category', label: '分类', fmt: x => esc(LOG_CAT[x] || x), csv: r2 => LOG_CAT[r2.category] || r2.category },
+        { key: 'message', label: '内容', cls: 'wrap-cell mono', sortable: false },
+      ],
+    }).setRows(rows);
+    $('#lgMore', el).hidden = r.logs.length < 500;
+  };
+  const reload = () => load().catch(ex => toast('日志加载失败：' + ex.message, 'err', 4000));
+  el.querySelectorAll('[data-lv]').forEach(b => b.onclick = () => { st.level = b.dataset.lv; el.querySelectorAll('[data-lv]').forEach(x => x.setAttribute('aria-pressed', String(x === b))); reload(); });
+  $('#lgCat', el).onchange = e => { st.category = e.target.value; reload(); };
+  let qt;
+  $('#lgQ', el).oninput = e => { clearTimeout(qt); qt = setTimeout(() => { st.q = e.target.value.trim(); reload(); }, 300); };
+  $('#lgRefresh', el).onclick = reload;
+  $('#lgMore', el).onclick = () => load(true).catch(ex => toast(ex.message, 'err', 4000));
+  $('#lgCsv', el).onclick = () => t?.csv(`系统日志_${new Date().toISOString().slice(0, 10)}.csv`);
+  // 自动刷新：每 10 秒，离开本页后停止
+  const timer = setInterval(() => { if (!el.isConnected) { clearInterval(timer); return; } if ($('#lgAuto', el).checked && !document.hidden) reload(); }, 10_000);
+  await load();
 }
 
 /* ---------------- 接口日志 ---------------- */
