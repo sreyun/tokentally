@@ -19,7 +19,7 @@ import { PromClient, validateCalls, discover, fetchCalls, buildUsageRows, buildQ
 import { configureIpLoc, ipLoc, ipLocInfo } from './iploc.mjs';
 import { loadMasterKey, hashPassword, verifyPassword, burnPasswordCheck, checkPasswordPolicy, randomPassword, maskId, sha256 } from './crypto.mjs';
 
-const VERSION = '1.6.0';
+const VERSION = '1.6.1';
 
 /* ===================================================================
  * 系统日志：所有运行日志同时输出到控制台并写入数据库（system_log，保留 SYSTEM_LOG_DAYS 天），
@@ -1499,12 +1499,24 @@ server.on('error', e => {
 });
 
 let exiting = false;
-const shutdown = (sig, code = 0) => {
+/**
+ * 退出：停止接收新请求，等待进行中的请求与告警推送结束后再关闭数据库。
+ * 告警推送不能被中途打断：已送达飞书 / 钉钉 / 企业微信的消息必须先记录为“已发送”，否则重启后会再推送一次。
+ * 总时限 9 秒（docker stop 默认 10 秒后强制结束）；单条推送最长 15 秒，超时仍未完成时强制退出
+ */
+const shutdown = async (sig, code = 0) => {
   if (exiting) return;
   exiting = true;
   log(`收到 ${sig}，正在退出…`);
-  server.close(() => { try { store.db.close(); } catch { /* ignore */ } process.exit(code); });
-  setTimeout(() => process.exit(code), 5000).unref();
+  setTimeout(() => process.exit(code), 9000).unref();
+  alerts.stop();
+  const closed = new Promise(r => server.close(r));
+  server.closeIdleConnections?.();
+  const timeout = new Promise(r => setTimeout(r, 8500).unref());
+  const drained = alerts.drain(8000).then(ok => { if (!ok) log('告警推送未在 8 秒内完成，强制退出：正在发送的那一条可能在重启后重复推送'); });
+  await Promise.race([Promise.all([closed, drained]), timeout]);
+  try { store.db.close(); } catch { /* ignore */ }
+  process.exit(code);
 };
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));

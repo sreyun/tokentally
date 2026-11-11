@@ -480,6 +480,7 @@ export class AlertService {
   /** 串行执行；某渠道失败时该渠道的条目保持未发送，下次检查时重试 */
   check(trigger = 'sync') {
     const run = async () => {
+      if (this.stopping) return { skipped: 'stopping' };
       const s = this.settings();
       const chans = s.channels.filter(c => c.enabled);
       if (!chans.length) {
@@ -537,16 +538,9 @@ export class AlertService {
           }
         }
         for (const m of msgs) {
+          if (this.stopping) break; // 服务正在退出：不再开始新的推送，剩余消息在重启后发送
           try {
             await this.send(ch, sec, { ...m, today });
-            const now = Date.now();
-            for (const c of m.codes || []) sentMap(c)[c] = now;
-            if (m.report) st.reports[ch.id][m.report.kind] = m.report.period;
-            if (m.changeTo) st.lastChangeId[ch.id] = m.changeTo;
-            st.channels[ch.id] = { ...(st.channels[ch.id] || {}), lastSentAt: now, lastError: null, lastErrorAt: null };
-            st.history = [{ at: now, ch: ch.id, chName: ch.name, event: m.event, level: m.level, title: m.title, items: m.lines.filter(l => l && !l.startsWith('#')).slice(0, 8).map(strip) }, ...(st.history || [])].slice(0, 30);
-            this.store.audit('system', '', 'alert.sent', { trigger, channel: ch.name, event: m.event, items: m.codes?.length ?? m.lines.length });
-            sent++;
           } catch (e) {
             const msg = String(e.message || e).slice(0, 300);
             st.channels[ch.id] = { ...(st.channels[ch.id] || {}), lastError: msg, lastErrorAt: Date.now() };
@@ -555,7 +549,18 @@ export class AlertService {
             if (e.content) continue; // 内容被拒绝：不影响该渠道的其他消息
             break; // 网络 / 鉴权问题：该渠道后续消息下次再试
           }
+          const now = Date.now();
+          for (const c of m.codes || []) sentMap(c)[c] = now;
+          if (m.report) st.reports[ch.id][m.report.kind] = m.report.period;
+          if (m.changeTo) st.lastChangeId[ch.id] = m.changeTo;
+          st.channels[ch.id] = { ...(st.channels[ch.id] || {}), lastSentAt: now, lastError: null, lastErrorAt: null };
+          st.history = [{ at: now, ch: ch.id, chName: ch.name, event: m.event, level: m.level, title: m.title, items: m.lines.filter(l => l && !l.startsWith('#')).slice(0, 8).map(strip) }, ...(st.history || [])].slice(0, 30);
+          // 每条送达后立即记录：此前整批发完才保存，进程在批量推送中途退出（升级重启）时，已送达的消息重启后会再推送一次
+          this.saveState(st);
+          this.store.audit('system', '', 'alert.sent', { trigger, channel: ch.name, event: m.event, items: m.codes?.length ?? m.lines.length });
+          sent++;
         }
+        if (this.stopping) break;
       }
       // 清理已删除渠道的状态；停用（或地址缺失）的渠道清除变更游标：重新启用时与首次启用一样不补发停用期间的历史变更
       const ids = new Set(s.channels.map(c => c.id));
@@ -569,6 +574,15 @@ export class AlertService {
     };
     this.busy = (this.busy || Promise.resolve()).then(run, run).catch(e => { this.log('告警评估失败：' + e.message); return { error: e.message }; });
     return this.busy;
+  }
+  /** 服务退出：不再开始新的检查与推送（正在发送的那一条会完成并记录） */
+  stop() { this.stopping = true; }
+  /** 等待正在进行的检查 / 推送结束，最多 ms 毫秒；返回是否已结束 */
+  drain(ms = 8000) {
+    const cur = this.busy;
+    if (!cur) return Promise.resolve(true);
+    let t;
+    return Promise.race([cur.then(() => true, () => true), new Promise(r => { t = setTimeout(() => r(false), ms); t.unref?.(); })]).finally(() => clearTimeout(t));
   }
 
   async send(ch, { webhook, secret }, { title, level, lines, today = todayIn(this.tz), mention = false, path = '' }) {
