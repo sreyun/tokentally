@@ -2,7 +2,7 @@
 import {
   $, esc, state, ui, app, money, moneyShort, compact, intFmt, pct, sum, uniq, metricVal, METRICS, NONE_KEY, DIMS, keyShort,
   filterLines, aggregate, aggAll, sortedAggs, totalTokens, unitsText, deltaPill, tipRows, icon, help, segCtl, ioInfo, num, periodTag, WEEK, weekday, copyBtn, PROVIDERS, provTag, multiCloud, usageFiltered, usageAgg, normModel, REQ_SRC,
-  scopeLines, scopeUsage, scopeLabel, scopeFilter, dimVal, dimName, groupHash, NO_WS, callsOn, hasTags,
+  scopeLines, scopeUsage, scopeLabel, scopeFilter, dimVal, dimName, groupHash, NO_WS, callsOn, hasTags, perCall, perCallCovered, coveredCost, failRateOf, scopeColors,
 } from '../core.js';
 import { tokenStatsHtml, drawDailyTokens, drawDailyRequests, periodDays, reqHelp } from '../stats.js';
 import { columnChart, rankList, stackRank, segbar, legendHtml, bindLegend } from '../charts.js';
@@ -42,14 +42,22 @@ function modelRows(lines, prevLines, daily) {
   for (const l of lines) { if (!provs.has(l.model)) provs.set(l.model, new Set()); provs.get(l.model).add(l.provider); }
   const total = sum([...by.values()], a => a.cost);
   // 使用天数：一次遍历按模型收集有费用的日期（避免每个模型都扫描一遍全部日账单）
-  const daySets = new Map();
-  for (const l of daily) if (metricVal(l) > 0) { let s = daySets.get(l.model); if (!s) daySets.set(l.model, s = new Set()); s.add(l.date); }
+  const daySets = new Map(), dailyOf = new Map();
+  for (const l of daily) {
+    if (metricVal(l) > 0) { let s = daySets.get(l.model); if (!s) daySets.set(l.model, s = new Set()); s.add(l.date); }
+    const nm = normModel(l.model); let arr = dailyOf.get(nm); if (!arr) dailyOf.set(nm, arr = []); arr.push(l);
+  }
   return [...by.values()].map(a => {
     const t = totalTokens(a);
+    // 与模型详情抽屉一致：该模型的费用全部来自有调用次数数据源的云厂商时才显示请求数与单次指标
+    // （同名模型多云在售、阿里云未接入调用次数时，请求数只覆盖部分费用）；单次费用只用有调用数据的日期的费用
+    const callsOk = [...(provs.get(a.key) || [])].every(callsOn);
+    const um = callsOk ? ub.get(normModel(a.key)) : null;
+    const pc = perCallCovered(um, dailyOf.get(normModel(a.key)));
     return {
       model: a.key, cost: a.cost, prev: pby.get(a.key)?.cost || 0, share: total ? a.cost / total : 0, gross: a.gross, tIn: a.tIn, tCache: a.tCache, tOut: a.tOut, tEmb: a.tEmb, tokens: t,
       hit: a.tIn ? a.tCache / a.tIn : null, ioRatio: a.tIn ? a.tOut / a.tIn : null, perM: t ? a.cost / t * 1e6 : null, keys: a.keys.size, keyList: [...a.keys].map(k => keyShort(k)).join('、'), providers: [...(provs.get(a.key) || [])],
-      ...(um => ({ requests: um ? um.requests : null, failRate: um && um.requests ? um.fails / um.requests : null, tokPer: um && um.requests ? um.tokens / um.requests : null, costPer: um && um.requests ? a.cost / um.requests : null, uTokens: um ? um.tokens : 0 }))(ub.get(normModel(a.key))),
+      requests: um ? um.requests : null, failRate: failRateOf(um), tokPer: pc?.tokPer ?? null, costPer: pc?.costPer ?? null, uTokens: um ? um.tokens : 0,
       dayTok: t / calDays,
       wss: a.wss.size, items: a.items.size, units: unitsText(a), days: daySets.get(a.key)?.size || 0,
     };
@@ -104,7 +112,7 @@ export function render(v) {
         { key: 'requests', label: '请求数', title: REQ_SRC, align: 'r', fmt: x => (x == null ? '<span class="muted">—</span>' : intFmt(x)), sortVal: r => r.requests ?? -1 },
         { key: 'failRate', label: '失败率', align: 'r', fmt: x => (x == null ? '<span class="muted">—</span>' : `<span class="${x >= 0.05 ? 'bad-text' : x >= 0.01 ? 'warn-text' : ''}">${(x * 100).toFixed(2)}%</span>`), sortVal: r => r.failRate ?? -1, csv: r => (r.failRate == null ? '' : (r.failRate * 100).toFixed(2) + '%') },
         { key: 'tokPer', label: '单次均 Token', title: '单次平均 Token = 总 Token ÷ 请求数', align: 'r', fmt: x => (x == null ? '<span class="muted">—</span>' : intFmt(x)), sortVal: r => r.tokPer ?? -1, csv: r => (r.tokPer == null ? '' : Math.round(r.tokPer)) },
-        { key: 'costPer', label: '单次均费用', title: '单次平均费用 = 本期费用 ÷ 请求数', align: 'r', fmt: x => (x == null ? '<span class="muted">—</span>' : money(x, x < 0.01 ? 4 : 3)), sortVal: r => r.costPer ?? -1, csv: r => (r.costPer == null ? '' : r.costPer.toFixed(6)) },
+        { key: 'costPer', label: '单次均费用', title: '单次平均费用 = 有调用数据的日期的费用 ÷ 请求数', align: 'r', fmt: x => (x == null ? '<span class="muted">—</span>' : money(x, x < 0.01 ? 4 : 3)), sortVal: r => r.costPer ?? -1, csv: r => (r.costPer == null ? '' : r.costPer.toFixed(6)) },
       ] : []),
       { key: 'keys', label: 'Key 数', align: 'r', fmt: (x, r) => `<span title="${esc(r.keyList)}">${x}</span>` },
       { key: 'days', label: '使用天数', align: 'r' },
@@ -152,8 +160,9 @@ export function render(v) {
 function dailyByModel(el, lg, daily) {
   const days = uniq(daily.map(l => l.date)).sort();
   const ranked = sortedAggs(aggregate(daily, l => l.model)).map(a => a.key);
-  const colored = ranked.filter(m => DIMS.model.color(m) !== 'var(--other)'), others = ranked.filter(m => !colored.includes(m));
-  const series = colored.map(m => ({ id: m, label: m, color: DIMS.model.color(m) }));
+  const cmap = scopeColors(ranked, DIMS.model.color);
+  const colored = ranked.filter(m => cmap.has(m)), others = ranked.filter(m => !cmap.has(m));
+  const series = colored.map(m => ({ id: m, label: m, color: cmap.get(m) }));
   if (others.length) series.push({ id: '__other', label: `其他 ${others.length} 个`, color: 'var(--other)' });
   const cell = new Map();
   daily.forEach(l => { const k = l.date + '|' + (colored.includes(l.model) ? l.model : '__other'); cell.set(k, (cell.get(k) || 0) + metricVal(l)); });
@@ -175,8 +184,10 @@ export function keyModelMatrix(el, lines, { cellScope = k => ({ key: k }), headS
   const byModel = aggregate(lines, l => l.model);
   let models = sortedAggs(byModel, a => (useTok ? totalTokens(a) : a.cost)).map(a => a.key);
   const extra = models.slice(12); models = models.slice(0, 12);
-  const keys = sortedAggs(aggregate(lines, DIMS.key.of)).map(a => a.key);
-  if (!keys.length) { el.innerHTML = '<div class="nodata">暂无数据</div>'; return; }
+  const allKeys = sortedAggs(aggregate(lines, DIMS.key.of)).map(a => a.key);
+  if (!allKeys.length) { el.innerHTML = '<div class="nodata">暂无数据</div>'; return; }
+  // 只渲染费用最高的 100 个 Key：上千个 Key 全部渲染（每个单元格带提示）会阻塞页面数秒
+  const KEY_LIMIT = 100, keys = allKeys.slice(0, KEY_LIMIT);
   const cell = new Map(); let max = 0;
   for (const l of lines) { const mk = models.includes(l.model) ? l.model : '__other'; const k = (l.apiKeyId || NONE_KEY) + '|' + mk; cell.set(k, (cell.get(k) || 0) + val(l)); }
   for (const x of cell.values()) max = Math.max(max, x);
@@ -189,12 +200,13 @@ export function keyModelMatrix(el, lines, { cellScope = k => ({ key: k }), headS
       let rs = 0;
       const tds = cols.map(c => {
         const x = cell.get(k + '|' + c) || 0; rs += x; const s = shade(x);
+        if (!x) return '<td class="r"><span class="muted">·</span></td>'; // 空单元格不生成提示
         const tip = esc(tipRows(`${keyShort(k)} × ${c === '__other' ? '其他模型' : c}`, [[useTok ? 'Token' : '费用', useTok ? intFmt(x) : money(x)]]) + (x > 0 && c !== '__other' ? '<div class="tip-hint">点击查看该 Key 的该模型详情</div>' : ''));
-        const inner = x > 0 ? esc(fmt(x)) : '<span class="muted">·</span>';
+        const inner = esc(fmt(x));
         return `<td class="r ${s ? 'cell-heat' : ''} ${s >= 4 ? 'dk' : ''}" style="${s ? `background:var(--q${s})` : ''}" data-tip="${tip}">${x > 0 && c !== '__other' ? `<button type="button" class="cell-btn" data-model="${esc(c)}" data-scope="${sc(cellScope(k))}" aria-label="${esc(`${keyShort(k)} × ${c}`)}">${inner}</button>` : inner}</td>`;
       }).join('');
       return `<tr class="${k !== NONE_KEY ? 'clickable' : ''}" data-key="${esc(k)}" ${k !== NONE_KEY ? 'tabindex="0"' : ''}><td class="sticky"><span class="sw" style="background:${DIMS.key.color(k)}"></span>${esc(keyShort(k))}</td>${tds}<td class="r"><b>${esc(fmt(rs))}</b></td></tr>`;
-    }).join('')}</tbody></table></div>`;
+    }).join('')}</tbody></table></div>${allKeys.length > KEY_LIMIT ? `<div class="panel-foot">仅显示费用最高的 ${KEY_LIMIT} 个 Key（共 ${allKeys.length} 个），其余可在“成本分摊”中按 API Key × 模型查看与导出</div>` : ''}`;
   const go = tr => { if (tr && tr.dataset.key !== NONE_KEY) app.go(`#/key/${encodeURIComponent(tr.dataset.key)}`); };
   el.onclick = e => { if (e.target.closest('button')) return; go(e.target.closest('tr[data-key]')); };
   el.onkeydown = e => { if (e.key === 'Enter' && e.target.matches('tr[data-key]')) go(e.target); };
@@ -215,7 +227,7 @@ export function openModel(model, scope = null) {
   // 只有该模型的账单全部来自有调用次数数据源的云厂商时才显示请求数（否则单次平均会被低估）
   const callsOk = lines.length > 0 && lines.every(l => callsOn(l.provider));
   const us = mRows.length && callsOk ? usageAgg(mRows, () => 'm').get('m') : null;
-  const usByKey = usageAgg(mRows, u => u.apiKeyId);
+  const usByKey = usageAgg(mRows.filter(u => callsOn(u.provider)), u => u.apiKeyId); // 没有调用次数数据源的云厂商（如已关闭）不显示残留的请求数
   const sLabel = scopeLabel(scope);
   const keyScoped = scope && typeof scope === 'object' && scope.key != null;
   $('#drawerTitle').textContent = model;
@@ -252,8 +264,9 @@ export function openModel(model, scope = null) {
   if (!keyScoped) {
     const days = uniq(daily.map(l => l.date)).sort();
     const ranked = sortedAggs(aggregate(daily, DIMS.key.of)).map(x => x.key);
-    const colored = ranked.filter(k => DIMS.key.color(k) !== 'var(--other)'), others = ranked.filter(k => !colored.includes(k));
-    const series = colored.map(k => ({ id: k, label: keyShort(k), color: DIMS.key.color(k) }));
+    const kmap = scopeColors(ranked, DIMS.key.color);
+    const colored = ranked.filter(k => kmap.has(k)), others = ranked.filter(k => !kmap.has(k));
+    const series = colored.map(k => ({ id: k, label: keyShort(k), color: kmap.get(k) }));
     if (others.length) series.push({ id: '__other', label: `其他 ${others.length} 个 Key`, color: 'var(--other)' });
     const cell = new Map(); daily.forEach(l => { const id = DIMS.key.of(l); const k = l.date + '|' + (colored.includes(id) ? id : '__other'); cell.set(k, (cell.get(k) || 0) + metricVal(l)); });
     $('#dmLegend').innerHTML = series.length > 1 ? legendHtml(series.map(s => ({ ...s, id: s.id === NONE_KEY ? null : s.id })), '点击进入 Key 详情') : '';

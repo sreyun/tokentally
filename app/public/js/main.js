@@ -72,6 +72,12 @@ function stateQuery(name) {
 const buildHash = (name, arg) => { const q = stateQuery(name); return `#/${name}${arg ? '/' + argPath(name, arg) : ''}${q ? '?' + q : ''}`; };
 const withState = hash => { if (String(hash).includes('?')) return hash; const r = parseHash(hash); return buildHash(r.name, r.arg); };
 const periodKey = p => (p.mode === 'month' ? 'm' + p.cycle : `r${p.from}~${p.to}`);
+/** 日期范围最多 400 天（与服务端一致）；严格校验日期（2026-02-31 无效） */
+const MAX_RANGE_DAYS = 400;
+const validDay = s => { if (!/^\d{4}-\d{2}-\d{2}$/.test(s || '')) return false; const t = Date.parse(s + 'T00:00:00Z'); return !Number.isNaN(t) && new Date(t).toISOString().slice(0, 10) === s; };
+const spanDays = (a, b) => Math.round((Date.parse(b + 'T00:00:00Z') - Date.parse(a + 'T00:00:00Z')) / 864e5) + 1;
+const rangeError = (from, to) => (!validDay(from) || !validDay(to) ? '请选择有效的日期' : from > to ? '开始日期不能晚于结束日期'
+  : spanDays(from, to) > MAX_RANGE_DAYS ? `日期范围不能超过 ${MAX_RANGE_DAYS} 天` : '');
 /** 读取地址中的周期与筛选；返回是否需要重新加载数据（周期变化） */
 function applyQuery() {
   const { query } = splitHash();
@@ -83,7 +89,8 @@ function applyQuery() {
   const c = sp.get('cycle'), pr = sp.get('preset'), fr = sp.get('from'), to = sp.get('to');
   if (c && /^\d{4}-(0[1-9]|1[0-2])$/.test(c) && c <= state.today.slice(0, 7)) { p.mode = 'month'; p.cycle = c; }
   else if (pr && RANGE_PRESETS.includes(pr)) { p.mode = 'range'; applyPreset(pr); }
-  else if (fr && to && D.test(fr) && D.test(to) && fr <= to && fr <= state.today) { p.mode = 'range'; p.preset = 'custom'; p.from = fr; p.to = to > state.today ? state.today : to; }
+  else if (fr && to && D.test(fr) && D.test(to) && fr <= state.today && !rangeError(fr, to > state.today ? state.today : to)) { p.mode = 'range'; p.preset = 'custom'; p.from = fr; p.to = to > state.today ? state.today : to; }
+  else if (fr || to) toast(`地址中的日期范围无效（${rangeError(fr, to) || '晚于今天'}），已保留当前周期`, 'err', 4000);
   if (JSON.stringify(p) !== snap) savePeriod();
   return periodKey(p) !== before;
 }
@@ -123,6 +130,8 @@ function commitUrl(replace = false) {
   location.hash = full;
 }
 window.addEventListener('hashchange', () => {
+  // 浏览器前进 / 后退（非应用内跳转）离开有未保存修改的页面时同样需要确认；取消则回到原地址
+  if (app.dirty && !pushNav && !confirm('当前页面有未保存的修改，确定离开吗？')) { history.pushState(history.state, '', lastHash); return; }
   scrollMem.set(lastHash, window.scrollY);
   const now = location.hash || '#/overview';
   if (pushNav) navStack.push(now);
@@ -160,6 +169,7 @@ app.openModel = (m, scope) => Models.openModel(m, scope);
 app.openDay = (d, scope) => Day.openDay(d, scope);
 /** 切换统计周期：url='push'（下钻，可后退）| 'replace'（顶栏切换）| false（随后由 app.go 写入地址） */
 app.setPeriod = (p, { url = 'push' } = {}) => {
+  draft = null;
   Object.assign(ui.period, p); savePeriod(); renderPeriod();
   if (url) commitPeriodUrl(url === 'replace');
   loadData();
@@ -174,24 +184,35 @@ app.reload = () => loadData({ silent: true });
 app.refreshStatus = async (background = false) => { try { state.status = await http('GET', '/api/status', undefined, { background }); } catch { /* ignore */ } renderSyncBtn(); renderSideFoot(); };
 
 /* ---------------- 数据 ---------------- */
-let loadSeq = 0;
+let loadSeq = 0, lastGoodPeriod = null, lastGoodToday = null;
 /** 等待首次数据加载结束（成功或失败）：管理页等先于数据渲染的页面需要完整的 Key 列表时使用 */
 let dataWaiters = [];
-app.whenData = () => (state.data ? Promise.resolve() : new Promise(r => dataWaiters.push(r)));
+// 首次加载已失败（且没有正在进行的加载）时立即返回，由调用方显示错误，不能一直等待
+app.whenData = () => (state.data || (state.loadError && !state.loading) ? Promise.resolve() : new Promise(r => dataWaiters.push(r)));
 async function loadData({ silent = false, background = false } = {}) {
   const seq = ++loadSeq;
   state.loading = true;
+  state.loadError = null;
   $('#topbar').classList.add('loading');
   if (state.data && !silent) $('#content').classList.add('dim');
   if (!state.data && !ROUTES[parseHash().name]?.noData) renderSkeleton(); // 管理页等不依赖账单数据的页面已渲染，不覆盖
   const p = ui.period;
-  const q = p.mode === 'month' ? `mode=month&cycle=${encodeURIComponent(p.cycle)}` : `mode=range&from=${p.from}&to=${p.to}`;
+  const q = p.mode === 'month' ? `mode=month&cycle=${encodeURIComponent(p.cycle)}` : `mode=range&from=${encodeURIComponent(p.from)}&to=${encodeURIComponent(p.to)}`;
   const errs = [];
-  let d = null;
+  let d = null, failed = null;
   try { d = await http('GET', '/api/data?' + q, undefined, { background }); }
-  catch (e) { if (seq === loadSeq) errs.push({ level: 'err', title: '数据加载失败', why: e.message }); }
+  catch (e) { failed = e; if (seq === loadSeq) errs.push({ level: 'err', title: '数据加载失败', why: e.message }); }
   if (seq !== loadSeq) return; // 已有更新的请求（如用户连续切换账期），丢弃过期响应
-  if (d) applyData(d);
+  if (d) { applyData(d); lastGoodPeriod = JSON.parse(JSON.stringify(ui.period)); lastGoodToday = state.today; }
+  else if (failed) {
+    state.loadError = failed.message;
+    // 新周期加载失败：周期选择回到当前显示的数据所属的周期，不能让“新周期”的标签配着旧数据（导出、分享链接也会错）
+    if (state.data && lastGoodPeriod && periodKey(lastGoodPeriod) !== periodKey(ui.period)) {
+      Object.assign(ui.period, lastGoodPeriod); if (lastGoodToday) state.today = lastGoodToday; // 跨天后的重新加载失败：日期一并回退，下次轮询会再次滚动
+      savePeriod(); renderPeriod(); commitPeriodUrl(true);
+      errs[0].why += '（已恢复为上一个统计周期）';
+    }
+  }
   for (const f of dataWaiters.splice(0)) f();
   state.loading = false;
   $('#topbar').classList.remove('loading');
@@ -204,7 +225,11 @@ async function loadData({ silent = false, background = false } = {}) {
 
 /* ---------------- 渲染 ---------------- */
 let refocus = null;
-function render(extraNotices = []) {
+/**
+ * layoutOnly：只因布局变化（折叠侧栏、窗口尺寸、关闭提示条）而重绘时，系统管理页与有未保存修改的页面不重绘视图，
+ * 否则表单中未保存的输入会被清空
+ */
+function render(extraNotices = [], { layoutOnly = false } = {}) {
   route = parseHash();
   const r = ROUTES[route.name];
   renderNav(); renderTitle(r); renderPeriod(); renderSyncBtn(); renderUser(); renderSideFoot();
@@ -214,8 +239,14 @@ function render(extraNotices = []) {
   renderFilters(r);
   if (refocus) { const el = $(`[data-f="${refocus}"]`); refocus = null; el?.focus({ preventScroll: true }); }
   renderNotices(r, extraNotices);
+  if (layoutOnly && (route.name === 'admin' || app.dirty)) return;
   const v = $('#view');
-  if (!r.noData && !state.data) { renderSkeleton(); return; }
+  if (!r.noData && !state.data) {
+    // 首次加载失败：给出重试入口（并允许改回默认周期），而不是一直显示加载骨架
+    if (state.loadError && !state.loading) v.innerHTML = `<div class="empty"><b>数据加载失败</b><div class="hint">${esc(state.loadError)}</div><div class="row" style="justify-content:center;margin-top:10px"><button class="btn primary" data-act="retry-load">${icon('sync')}重试</button><button class="btn" data-act="reset-period">改为本月并重试</button></div></div>`;
+    else renderSkeleton();
+    return;
+  }
   try {
     if (route.name === 'admin') r.view.render(v, route.arg || 'aliyun');
     else if (r.arg) r.view.render(v, route.arg);
@@ -260,7 +291,8 @@ function renderSideFoot() {
 }
 
 /* ---------------- 周期 ---------------- */
-function savePeriod() { LS.set('bc.period', ui.period); }
+/** 保存周期；current 记录所选账期当时是否为本月：下次打开（跨月后）仍回到“本月”，而不是停留在旧月份 */
+function savePeriod() { LS.set('bc.period', { ...ui.period, current: ui.period.mode === 'month' && !!state.today && ui.period.cycle === state.today.slice(0, 7) }); }
 function renderPeriod() {
   const p = ui.period;
   $$('#modeSeg button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.mode === p.mode)));
@@ -278,13 +310,16 @@ function renderPeriod() {
   $('#finalBadge').innerHTML = p.mode !== 'month' ? '' : !s ? '<span class="pill neutral period-badge">未同步</span>' : s.final ? '<span class="pill good period-badge" title="次月 3 日后阿里云已出账，为终版账单">已出账</span>' : '<span class="pill warn period-badge" title="账单持续入账中，数据随同步更新">未出账</span>';
   $('#btnNext').disabled = p.cycle >= cur;
   $('#preset').value = p.preset;
-  $('#from').value = p.from; $('#to').value = p.to;
+  // 未点“应用”的自定义日期只保存在草稿中：不写入当前周期，不进入地址，也不会被轮询刷新悄悄加载
+  const from = draft?.from ?? p.from, to = draft?.to ?? p.to;
+  $('#from').value = from; $('#to').value = to;
   $('#from').max = $('#to').max = state.today || '';
   $('#btnApply').hidden = p.preset !== 'custom';
-  const bad = !!(p.from && p.to && p.from > p.to);
-  $('#from').classList.toggle('invalid', bad); $('#to').classList.toggle('invalid', bad);
-  $('#from').title = bad ? '开始日期不能晚于结束日期' : '开始日期';
+  const err = from && to ? rangeError(from, to) : '';
+  $('#from').classList.toggle('invalid', !!err); $('#to').classList.toggle('invalid', !!err);
+  $('#from').title = err || '开始日期';
 }
+let draft = null;
 function applyPreset(preset) {
   const t = state.today, p = ui.period;
   p.preset = preset;
@@ -295,7 +330,7 @@ function applyPreset(preset) {
   else if (preset === 'lastmonth') { const c = addMonths(t.slice(0, 7), -1); p.from = c + '-01'; p.to = lastDayOf(c); }
 }
 /** 顶栏切换周期：改写当前地址（不新增浏览记录）并重新加载 */
-function periodApplied() { savePeriod(); renderPeriod(); commitPeriodUrl(true); loadData(); }
+function periodApplied() { draft = null; savePeriod(); renderPeriod(); commitPeriodUrl(true); loadData(); }
 $('#modeSeg').addEventListener('click', e => {
   const b = e.target.closest('[data-mode]'); if (!b || ui.period.mode === b.dataset.mode) return;
   ui.period.mode = b.dataset.mode;
@@ -306,16 +341,22 @@ $('#cycleSel').addEventListener('change', e => { ui.period.cycle = e.target.valu
 $('#btnPrev').onclick = () => app.setPeriod({ cycle: addMonths(ui.period.cycle, -1) }, { url: 'replace' });
 $('#btnNext').onclick = () => { const n = addMonths(ui.period.cycle, 1); if (n <= state.today.slice(0, 7)) app.setPeriod({ cycle: n }, { url: 'replace' }); };
 $('#preset').addEventListener('change', e => {
-  if (e.target.value === 'custom') { ui.period.preset = 'custom'; savePeriod(); renderPeriod(); $('#from').focus(); return; }
+  if (e.target.value === 'custom') { ui.period.preset = 'custom'; draft = { from: ui.period.from, to: ui.period.to }; savePeriod(); renderPeriod(); $('#from').focus(); return; }
   applyPreset(e.target.value); periodApplied();
 });
 ['from', 'to'].forEach(id => {
-  $('#' + id).addEventListener('change', e => { ui.period[id] = e.target.value; ui.period.preset = 'custom'; savePeriod(); renderPeriod(); });
-  $('#' + id).addEventListener('keydown', e => { if (e.key === 'Enter') { ui.period[id] = e.target.value; $('#btnApply').click(); } });
+  $('#' + id).addEventListener('change', e => {
+    draft = { from: $('#from').value, to: $('#to').value, [id]: e.target.value };
+    if (ui.period.preset !== 'custom') { ui.period.preset = 'custom'; savePeriod(); }
+    renderPeriod();
+  });
+  $('#' + id).addEventListener('keydown', e => { if (e.key === 'Enter') { draft = { from: $('#from').value, to: $('#to').value, [id]: e.target.value }; $('#btnApply').click(); } });
 });
 $('#btnApply').onclick = () => {
-  const p = ui.period;
-  if (!p.from || !p.to || p.from > p.to) return toast('请选择有效的日期范围', 'err');
+  const from = draft?.from ?? ui.period.from, to = draft?.to ?? ui.period.to;
+  const err = rangeError(from, to) || (from > state.today ? '开始日期不能晚于今天' : '');
+  if (err) return toast(err, 'err');
+  Object.assign(ui.period, { mode: 'range', preset: 'custom', from, to: to > state.today ? state.today : to });
   periodApplied();
 };
 $('#btnRefresh').onclick = () => loadData();
@@ -325,7 +366,7 @@ const FILTER_LABEL = { provider: '云厂商', ws: '业务空间', cc: '成本中
 const DIR_LABEL = { in: '输入（含缓存）', out: '输出', emb: '向量', other: '其他' };
 function filterValueLabel(k, v) {
   if (k === 'ws') return v === NO_WS ? '（未归属）' : wsName(v);
-  if (k === 'provider') return PROVIDERS[v] || v;
+  if (k === 'provider') return Object.hasOwn(PROVIDERS, v) ? PROVIDERS[v] : v;
   if (k === 'cc') return v === NO_CC ? '（未分配）' : ccName(v);
   if (k === 'owner') return v === NO_OWNER ? '（未指定）' : ownerName(v);
   if (k === 'key') return keyShort(v);
@@ -353,7 +394,8 @@ function renderFilters(r) {
     return rest.length ? `<optgroup label="其他（不匹配当前筛选，选择后清除冲突条件）">${rest.map(toOpt).join('')}</optgroup>` : '';
   };
   const cls = v => (v ? 'inp active' : 'inp');
-  const sel = (d, label, allLabel, body, extra = '') => `<select class="${cls(isSet(d, f[d]))}" data-f="${d}" aria-label="${label}" title="${label}${extra}">${opt(d === 'channel' ? '__all' : '', allLabel, f[d])}${body}</select>`;
+  // extra 可能包含来自地址栏的筛选值（未知业务空间时原样显示）：属性值必须转义，否则可注入任意标签
+  const sel = (d, label, allLabel, body, extra = '') => `<select class="${cls(isSet(d, f[d]))}" data-f="${d}" aria-label="${esc(label)}" title="${esc(label + extra)}">${opt(d === 'channel' ? '__all' : '', allLabel, f[d])}${body}</select>`;
   // Key 元数据按维度分组计数（业务空间 / 成本中心 下拉显示关联 Key 数）
   const keySet = fv('key');
   const keyCount = dim => { const m = new Map(); for (const id of keySet) { const k = state.apiKeys.get(id); if (!k) continue; const v = dim === 'ws' ? k.wsKey || NO_WS : dim === 'cc' ? k.costCenter || NO_CC : dim === 'owner' ? k.owner || NO_OWNER : k.provider || 'aliyun'; m.set(v, (m.get(v) || 0) + 1); } return m; };
@@ -382,7 +424,11 @@ function renderFilters(r) {
   if (multiCloud() && !f.provider) {
     const pm = new Map();
     for (const l of state.lines) if (modelSet.has(l.model)) { if (!pm.has(l.provider)) pm.set(l.provider, new Set()); pm.get(l.provider).add(l.model); }
-    if (pm.size > 1) modelBody = state.providers.filter(p => pm.has(p)).map(p => `<optgroup label="${esc(PROVIDERS[p])}">${[...pm.get(p)].sort().map(m => opt(m, m, f.model)).join('')}</optgroup>`).join('');
+    if (pm.size > 1) {
+      modelBody = state.providers.filter(p => pm.has(p)).map(p => `<optgroup label="${esc(PROVIDERS[p])}">${[...pm.get(p)].sort().map(m => opt(m, m, f.model)).join('')}</optgroup>`).join('');
+      // 当前选中的模型本期没有账单时也要保留选项，否则下拉框显示“全部模型”而筛选仍然生效
+      if (f.model && ![...pm.values()].some(s => s.has(f.model))) modelBody = `<optgroup label="当前选择">${opt(f.model, f.model, f.model)}</optgroup>` + modelBody;
+    }
   }
   modelBody += others('model', modelSet, m => opt(m, m, f.model));
   const ccSet = fv('cc'), ccVals = [...ccSet], ccCnt = keyCount('cc');
@@ -437,10 +483,14 @@ function scopeSummary() {
 function resolveConflicts(changed) {
   const out = [];
   if (!state.lines.length && !state.apiKeys.size) return out;
-  for (const d of ['item', 'dir', 'channel', 'model', 'key', 'owner', 'cc', 'ws', 'provider']) {
+  // 从刚改变的条件出发逐级累积“彼此兼容”的条件：每个已有条件只与已保留的条件比较，
+  // 不能拿稍后才会被清除的冲突条件去判断（否则仍然有效的下级条件会被误清除）
+  const base = { ...emptyFilters(), q: ui.f.q, metric: ui.f.metric, [changed]: ui.f[changed] };
+  for (const d of ['provider', 'ws', 'cc', 'owner', 'key', 'model', 'channel', 'dir', 'item']) {
     if (d === changed || !isSet(d, ui.f[d])) continue;
-    if (!state.lines.length && ['item', 'dir', 'channel', 'model'].includes(d)) continue; // 本期无账单时无法判断，保留
-    if (!facetValues(d).has(ui.f[d])) { out.push([d, ui.f[d]]); ui.f[d] = d === 'channel' ? '__all' : ''; }
+    if (!state.lines.length && ['item', 'dir', 'channel', 'model'].includes(d)) { base[d] = ui.f[d]; continue; } // 本期无账单时无法判断，保留
+    if (facetValues(d, base).has(ui.f[d])) base[d] = ui.f[d];
+    else { out.push([d, ui.f[d]]); ui.f[d] = d === 'channel' ? '__all' : ''; }
   }
   return out;
 }
@@ -539,7 +589,7 @@ document.addEventListener('click', async e => {
   if (pop && !pop.contains(e.target)) closePop();
   const syncNow = e.target.closest('[data-sync-now]');
   if (syncNow) {
-    try { const r = await http('POST', '/api/admin/sync', { kind: syncNow.dataset.syncNow, cycles: syncNow.dataset.syncNow === 'bills' && ui.period.mode === 'month' ? [ui.period.cycle] : undefined }); toast(r.alreadyRunning ? '已有同类同步任务在运行' : '同步任务已启动'); await app.refreshStatus(); }
+    try { const r = await http('POST', '/api/admin/sync', { kind: syncNow.dataset.syncNow, cycles: syncNow.dataset.syncNow === 'bills' && ui.period.mode === 'month' ? [ui.period.cycle] : undefined }); toast(r.queued ? '已有同类任务在运行，本次请求已排队' : r.alreadyRunning ? '已有同类同步任务在运行' : '同步任务已启动'); await app.refreshStatus(); }
     catch (ex) { toast('启动失败：' + ex.message, 'err', 4000); }
     return;
   }
@@ -565,12 +615,33 @@ document.addEventListener('click', async e => {
   if (e.target.closest('#btnMore')) { ui.moreFilters = !ui.moreFilters; render(); return; }
   const act = e.target.closest('[data-act]');
   if (act?.dataset.act === 'pwd') { closePop(); openPwd(false); }
-  if (act?.dataset.act === 'dismiss-demo') { try { sessionStorage.setItem('bc.demoHide', '1'); } catch { /* ignore */ } render(); return; }
-  if (act?.dataset.act === 'logout') { closePop(); try { await http('POST', '/api/logout'); } finally { location.href = '/login'; } }
+  if (act?.dataset.act === 'dismiss-demo') { try { sessionStorage.setItem('bc.demoHide', '1'); } catch { /* ignore */ } render([], { layoutOnly: true }); return; }
+  if (act?.dataset.act === 'logout') { closePop(); await logout(); return; }
+  if (act?.dataset.act === 'retry-load') { loadData(); return; }
+  if (act?.dataset.act === 'reset-period') { draft = null; Object.assign(ui.period, { mode: 'month', cycle: state.today.slice(0, 7) }); savePeriod(); renderPeriod(); commitPeriodUrl(true); loadData(); return; }
   const close = e.target.closest('[data-close]');
   if (close) close.closest('dialog').close();
 });
 const parseScope = s => { if (!s) return null; try { const o = JSON.parse(s); return o && typeof o === 'object' ? o : null; } catch { return null; } };
+/**
+ * 退出登录：服务端确认会话已删除后才跳转登录页。会话已在其他标签页重新登录时本页的 CSRF 令牌已过期，先取最新令牌重试一次；
+ * 仍失败时提示错误并留在当前页面（直接跳转会被服务端以“已登录”重定向回应用，用户误以为已退出）
+ */
+async function logout() {
+  try {
+    try { await http('POST', '/api/logout'); }
+    catch (ex) {
+      if (ex.code !== 'CsrfFailed') throw ex;
+      const me = await http('GET', '/api/me');
+      state.csrf = me.csrf;
+      await http('POST', '/api/logout');
+    }
+    location.href = '/login';
+  } catch (ex) {
+    if (ex.status) toast('退出登录失败：' + ex.message, 'err', 5000);
+    else if (!/会话已过期|未登录/.test(ex.message)) toast('退出登录失败，请检查网络后重试', 'err', 5000);
+  }
+}
 document.addEventListener('change', e => {
   const t = e.target.closest('[data-f]');
   if (!t || t.dataset.f === 'q') return;
@@ -610,7 +681,7 @@ async function copyText(t) {
   }
   toast(`已复制：${t.length > 40 ? t.slice(0, 40) + '…' : t}`, '', 1800);
 }
-$('#btnCollapse').onclick = () => { $('#app').classList.toggle('collapsed'); LS.set('bc.collapsed', $('#app').classList.contains('collapsed')); setTimeout(render, 60); };
+$('#btnCollapse').onclick = () => { $('#app').classList.toggle('collapsed'); LS.set('bc.collapsed', $('#app').classList.contains('collapsed')); setTimeout(() => render([], { layoutOnly: true }), 60); };
 $('#drawer').addEventListener('click', e => { if (e.target === $('#drawer')) $('#drawer').close(); });
 
 /* ---------------- 主题 ---------------- */
@@ -660,7 +731,7 @@ document.addEventListener('touchstart', e => {
   tipTimer = setTimeout(() => { tipEl.style.display = 'none'; }, 2500);
 }, { passive: true });
 let rTimer, lastW = innerWidth;
-addEventListener('resize', () => { clearTimeout(rTimer); rTimer = setTimeout(() => { if (Math.abs(innerWidth - lastW) > 40) { lastW = innerWidth; render(); } }, 250); });
+addEventListener('resize', () => { clearTimeout(rTimer); rTimer = setTimeout(() => { if (Math.abs(innerWidth - lastW) > 40) { lastW = innerWidth; render([], { layoutOnly: true }); } }, 250); });
 
 /* ---------------- 修改密码 ---------------- */
 function openPwd(force) {
@@ -690,30 +761,51 @@ $('#pwdForm').addEventListener('submit', async e => {
 });
 
 /* ---------------- 启动 & 轮询 ---------------- */
-let lastSyncSeen = 0, lastBillsSeen = 0;
+/*
+ * 轮询：每 20 秒读取同步状态；服务端数据版本（dataVersion）与当前数据不同时才重新加载（与同步记录无关，
+ * 元数据同步没有任何变化时不会触发重新下载）。抽屉 / 对话框打开或正在加载时记为待刷新，关闭后补做。
+ * 会话空闲：后台轮询不刷新空闲计时；用户在页面上有操作（点击、按键、滚动）时，下一次轮询以前台请求发送，避免正在使用的用户被判定为空闲。
+ * 跨天：今天 / 近 N 天 / 本月至今 等相对周期随日期滚动，正在查看的“本月”跨月后切换到新的本月
+ */
+let lastBillsSeen = 0, pendingReload = false, lastActivity = 0, lastTouch = Date.now();
+for (const ev of ['pointerdown', 'keydown', 'wheel', 'touchstart']) document.addEventListener(ev, () => { lastActivity = Date.now(); }, { passive: true, capture: true });
+function rollToday(today) {
+  if (!today || !state.today || today === state.today) return false;
+  const oldCur = state.today.slice(0, 7), p = ui.period;
+  state.today = today;
+  let changed = false;
+  if (p.mode === 'range' && RANGE_PRESETS.includes(p.preset)) { applyPreset(p.preset); changed = true; }
+  else if (p.mode === 'month' && p.cycle === oldCur && today.slice(0, 7) !== oldCur) { p.cycle = today.slice(0, 7); changed = true; }
+  if (changed) { draft = null; savePeriod(); renderPeriod(); commitPeriodUrl(true); }
+  return true;
+}
 async function poll() {
   if (document.hidden) return; // 页面在后台时不轮询，切回时立即刷新
-  await app.refreshStatus(true);
-  const s = state.status?.sync;
-  if (!s) return;
-  const latest = Math.max(s.meta.changedAt || 0, s.bills.changedAt || 0);
-  if (latest > lastSyncSeen) {
-    const first = !lastSyncSeen;
-    const billsChanged = (s.bills.changedAt || 0) > lastBillsSeen;
-    lastSyncSeen = latest; lastBillsSeen = s.bills.changedAt || 0;
-    if (!first && !$('#drawer').open && !document.querySelector('#dlgPwd[open]')) {
-      await loadData({ silent: true, background: true });
-      if (billsChanged && route.name !== 'admin') toast('账单数据已同步更新', '', 2200);
-    }
-  }
+  const active = lastActivity > lastTouch;
+  await app.refreshStatus(!active);
+  if (active) lastTouch = Date.now();
+  const st = state.status;
+  if (!st?.sync) return;
+  const rolled = rollToday(st.today);
+  // 首次加载失败时也在轮询中重试（系统管理等页面没有重试按钮）
+  const stale = rolled || pendingReload || (!state.data && !!state.loadError) || (!!st.dataVersion && !!state.data && st.dataVersion !== state.data.dataVersion);
+  if (!stale) return;
+  if (state.loading || $('#drawer').open || document.querySelector('#dlgPwd[open]')) { pendingReload = true; return; }
+  pendingReload = false;
+  const billsChanged = (st.sync.bills.changedAt || 0) > lastBillsSeen;
+  lastBillsSeen = st.sync.bills.changedAt || 0;
+  await loadData({ silent: true, background: true });
+  if (billsChanged && !rolled && route.name !== 'admin') toast('账单数据已同步更新', '', 2200);
 }
+for (const id of ['#drawer', '#dlgPwd']) $(id).addEventListener('close', () => { if (pendingReload) setTimeout(poll, 50); });
 async function start() {
   await app.refreshStatus();
-  const s = state.status?.sync;
-  lastSyncSeen = Math.max(s?.meta.changedAt || 0, s?.bills.changedAt || 0);
-  lastBillsSeen = s?.bills.changedAt || 0;
-  if (!ui.period.cycle || ui.period.cycle > state.today.slice(0, 7)) ui.period.cycle = state.today.slice(0, 7);
+  lastBillsSeen = state.status?.sync?.bills.changedAt || 0;
+  const cur = state.today.slice(0, 7);
+  if (!ui.period.cycle || ui.period.cycle > cur || (ui.period.mode === 'month' && ui.period.current)) ui.period.cycle = cur;
   if (ui.period.mode === 'range' && ui.period.preset !== 'custom') applyPreset(ui.period.preset);
+  // 本地保存的自定义范围无效（如超过 400 天）时改回近 30 天，避免每次打开都加载失败
+  if (ui.period.mode === 'range' && ui.period.preset === 'custom' && rangeError(ui.period.from, ui.period.to)) applyPreset('30');
   route = parseHash();
   applyQuery(); // 分享链接 / 书签中的周期与筛选优先
   canonicalize();
@@ -722,13 +814,25 @@ async function start() {
   setInterval(poll, 20_000);
   document.addEventListener('visibilitychange', () => { if (!document.hidden) poll(); });
 }
-(async function boot() {
+let booting = 0;
+(async function boot(attempt = 0) {
+  const my = ++booting; // 自动重试与“立即重试”只保留最新的一次启动
   applyTheme(getTheme());
   if (LS.get('bc.collapsed', false)) $('#app').classList.add('collapsed');
   try {
     const me = await http('GET', '/api/me');
     state.me = me.user; state.csrf = me.csrf; state.today = me.today; state.tz = me.tz;
-  } catch { return; }
+  } catch (e) {
+    if (!e.status && /会话已过期|未登录/.test(e.message)) return; // 401：已跳转登录页
+    // 服务重启中（502/503）、网络错误等：显示错误并自动重试，而不是停在空白页面
+    const wait = Math.min(30, 2 ** attempt * 2);
+    $('#view').innerHTML = `<div class="empty"><b>无法连接服务</b><div class="hint">${esc(e.message || '网络错误')}，${wait} 秒后自动重试</div><div class="row" style="justify-content:center;margin-top:10px"><button class="btn primary" id="btnBootRetry">${icon('sync')}立即重试</button></div></div>`;
+    if (my !== booting) return;
+    const t = setTimeout(() => { if (my === booting) boot(attempt + 1); }, wait * 1000);
+    $('#btnBootRetry').onclick = () => { clearTimeout(t); boot(attempt + 1); };
+    return;
+  }
+  if (my !== booting) return; // 已有更新的启动在进行，避免重复启动（重复的轮询与数据加载）
   renderUser();
   if (state.me.mustChange) { route = parseHash(); renderNav(); openPwd(true); return; }
   await start();

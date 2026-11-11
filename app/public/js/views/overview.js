@@ -67,7 +67,7 @@ export function render(v) {
     ${kpi('token', 'Token 总量', noTok ? '—' : compact(tokens), noTok ? '' : deltaPill(tokens, pTokens, { neutral: true }), noTok ? '' : state.compareLabel, noTok ? '当前数据无用量' : ua && ua.requests ? `请求 ${compact(ua.requests)} 次 · 单次 ${intFmt(ua.tokens / ua.requests)} Token` : `输入 ${compact(cur.tIn)} · 输出 ${compact(cur.tOut)}`, intFmt(tokens), '#/models', '查看模型 Token 结构')}
     ${kpi('unit', '每百万 Token 成本', perM == null ? '—' : money(perM), perM == null ? '' : deltaPill(perM, pPerM), perM == null ? '' : state.compareLabel, '费用 ÷ 总 Token × 10⁶')}
     ${kpi('cache', '缓存命中率', hit == null ? '—' : (hit * 100).toFixed(1) + '%', hit == null ? '' : deltaPill(hit, pHit, { pp: true, goodWhenUp: true }), hit == null ? '' : state.compareLabel, saved > 0.01 ? `估算节省 ${moneyShort(saved)}` : hit == null ? '—' : `命中 ${compact(cur.tCache)} Token`)}
-    ${kpi('model', '使用模型', String(byModel.size), '', '', byModel.size ? `主力：${sortedAggs(byModel)[0].key}` : '—', '', '#/models', '查看模型分析')}
+    ${kpi('model', '使用模型', String([...byModel.values()].filter(a => a.cost > 0).length), '', '', byModel.size ? `主力：${sortedAggs(byModel)[0].key}` : '—', '', '#/models', '查看模型分析')}
   </div>
 
   <div class="bi">
@@ -110,14 +110,15 @@ export function render(v) {
   const ins = computeInsights();
   $('#insights').innerHTML = ins.length ? ins.map(x => `<li class="ins ${x.level}"><span class="ins-ico">${icon(x.icon)}</span><div><div class="ins-t">${esc(x.title)}</div><div class="ins-d">${x.html}</div>${x.go ? `<button class="link" data-go="${esc(x.go)}">${esc(x.goLabel || '查看')} →</button>` : ''}${x.day ? `<button class="link" data-day="${esc(x.day)}">${esc(x.dayLabel || '查看当日明细')} →</button>` : ''}${x.model ? `<button class="link" data-model="${esc(x.model)}">${esc(x.modelLabel || '查看模型')} →</button>` : ''}</div></li>`).join('') : '<li class="nodata">暂无需要关注的发现</li>';
 
-  rankList($('#rkKeys'), sortedAggs(byKey).map(a => ({
+  // 排行只显示前 10 项：只为前面的项生成提示内容（上千个 Key 时逐个生成会明显拖慢页面）
+  rankList($('#rkKeys'), sortedAggs(byKey).map((a, i) => ({
     id: a.key, label: keyShort(a.key), sub: a.key === NONE_KEY ? '' : [multiCloud() ? PROVIDERS[state.apiKeys.get(a.key)?.provider || 'aliyun'] : '', state.apiKeys.get(a.key)?.costCenter || wsName(state.apiKeys.get(a.key)?.wsKey || [...a.wss][0] || '')].filter(Boolean).join(' · '),
     value: a.cost, prev: pByKey.get(a.key)?.cost ?? 0, color: DIMS.key.color(a.key),
-    tip: tipRows(DIMS.key.short(a.key), [['费用', money(a.cost)], ['占比', pct(a.cost, cur.cost)], ['上期', money(pByKey.get(a.key)?.cost || 0)], ['Token', compact(totalTokens(a))], ['主要模型', topModels(a, 2).join('、')]]),
+    tip: i >= 12 ? '' : tipRows(DIMS.key.short(a.key), [['费用', money(a.cost)], ['占比', pct(a.cost, cur.cost)], ['上期', money(pByKey.get(a.key)?.cost || 0)], ['Token', compact(totalTokens(a))], ['主要模型', topModels(a, 2).join('、')]]),
   })), { total: cur.cost, showDelta: true, onClick: it => (it.id === NONE_KEY ? app.setFilter({ key: NONE_KEY }, '#/detail') : app.go(`#/key/${encodeURIComponent(it.id)}`)) });
-  rankList($('#rkModels'), sortedAggs(byModel).map(a => ({
+  rankList($('#rkModels'), sortedAggs(byModel).map((a, i) => ({
     id: a.key, label: a.key, sub: `${a.keys.size} 个 Key`, value: a.cost, prev: pByModel.get(a.key)?.cost ?? 0, color: DIMS.model.color(a.key),
-    tip: tipRows(a.key, [['费用', money(a.cost)], ['占比', pct(a.cost, cur.cost)], ['上期', money(pByModel.get(a.key)?.cost || 0)], ['Token', compact(totalTokens(a))], ['每百万 Token', totalTokens(a) ? money(a.cost / totalTokens(a) * 1e6) : '-']]),
+    tip: i >= 12 ? '' : tipRows(a.key, [['费用', money(a.cost)], ['占比', pct(a.cost, cur.cost)], ['上期', money(pByModel.get(a.key)?.cost || 0)], ['Token', compact(totalTokens(a))], ['每百万 Token', totalTokens(a) ? money(a.cost / totalTokens(a) * 1e6) : '-']]),
   })), { total: cur.cost, showDelta: true, onClick: it => app.openModel(it.id) });
 
   // 构成
@@ -203,12 +204,11 @@ function drawTrend(daily, days, avgDay, fc) {
   const ranked = [...aggregate(src, dim.of).values()].filter(a => a.cost > 0).sort((a, b) => b.cost - a.cost).map(a => a.key);
   /** 系列 ID → 全局筛选取值（空的业务空间 / 成本中心 / 负责人转换为“未归属”哨兵值） */
   const fval = id => (by === 'ws' ? id || NO_WS : by === 'cc' ? id || NO_CC : by === 'owner' ? id || NO_OWNER : id);
-  // 已分配颜色的实体保持原色（跨视图一致）；月度视图中空闲的色位依次分给历史费用较高的实体，最多 8 色
+  // 已分配颜色的实体保持原色（跨视图一致）；空闲的色位依次分给当前范围内费用较高的实体，最多 8 色。
+  // 按日视图同样处理：筛选到全局前 7 名以外的实体时，不能全部并成一个灰色“其他”
   const colorOf = new Map(ranked.filter(id => dim.color(id) !== 'var(--other)').map(id => [id, dim.color(id)]));
-  if (ui.trendMode === 'monthly') {
-    const free = [1, 2, 3, 4, 5, 6, 7, 8].map(i => `var(--s${i})`).filter(c => ![...colorOf.values()].includes(c));
-    for (const id of ranked) { if (!free.length) break; if (!colorOf.has(id)) colorOf.set(id, free.shift()); }
-  }
+  const free = [1, 2, 3, 4, 5, 6, 7, 8].map(i => `var(--s${i})`).filter(c => ![...colorOf.values()].includes(c));
+  for (const id of ranked) { if (!free.length || colorOf.size >= 8) break; if (!colorOf.has(id)) colorOf.set(id, free.shift()); }
   const colored = ranked.filter(id => colorOf.has(id));
   const others = ranked.filter(id => !colorOf.has(id));
   const series = colored.map(id => ({ id, label: dim.short(id), color: colorOf.get(id) }));

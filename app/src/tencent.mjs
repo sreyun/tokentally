@@ -71,7 +71,7 @@ export class TencentClient {
   /** endpoint：仅用于测试或私有网关，形如 http://127.0.0.1:9555（为空时使用官方域名） */
   constructor({ secretId, secretKey, region = 'ap-guangzhou', site = 'cn', endpoint = '' }) {
     if (!TC_REGIONS.includes(region)) throw new Error(`不支持的 TokenHub 地域: ${region}`);
-    if (!TC_SITES[site]) throw new Error(`不支持的腾讯云站点: ${site}`);
+    if (!Object.hasOwn(TC_SITES, site)) throw new Error(`不支持的腾讯云站点: ${site}`);
     Object.assign(this, { secretId, secretKey, region, site, endpoint: endpoint.replace(/\/+$/, '') });
     this.calls = 0;
     this.lastBill = 0;
@@ -112,7 +112,7 @@ export class TencentClient {
     Object.assign(entry, { ms: Date.now() - t0, status: res.status, ok, code: ok ? '' : String(r.Error?.Code || res.status), message: ok ? '' : String(r.Error?.Message || ''), requestId: r.RequestId || '' });
     recordCall(entry);
     if (!ok) {
-      if (/RequestLimitExceeded|InternalError|ResourceUnavailable|ServiceUnavailable/i.test(entry.code) && attempt < 4) {
+      if ((/RequestLimitExceeded|InternalError|ResourceUnavailable|ServiceUnavailable|BadResponse/i.test(entry.code) || res.status === 429 || res.status >= 500) && attempt < 4) {
         await sleep(1000 * 2 ** attempt + Math.random() * 500);
         return this.call(service, action, params, attempt + 1);
       }
@@ -145,25 +145,27 @@ export class TencentClient {
     } catch (e) {
       if (!/TooManyObjects/i.test(e.code || '')) throw e;
       // Key 数量过多时 ShowAll 不可用：改为分页（每页固定 10 个）
-      const out = [];
+      // 排行按用量排序，翻页期间排名变化可能让同一个 Key 出现在两页：按 Key 去重
+      const out = new Map();
       for (let offset = 0, i = 0; i < 1000; i++) {
         const r = await this.call('tokenhub', 'DescribeUsageRankList', { Dimension: 'apikey', MetricType: 'tokens', StartTime: start, EndTime: end, Period: 86400, Offset: offset });
         const list = r.TopList || [];
-        out.push(...list.map(x => ({ Rank: x.Rank, Key: x.Key, Name: x.Name, Stats: x.Stats })));
+        for (const x of list) if (!out.has(String(x.Key))) out.set(String(x.Key), { Rank: x.Rank, Key: x.Key, Name: x.Name, Stats: x.Stats });
         offset += list.length;
         if (!list.length || offset >= (r.Total ?? 0)) break;
       }
-      return out;
+      return [...out.values()];
     }
   }
   /** 某个 API Key 在时间窗内按模型 × 日的用量（每页固定 10 个对象） */
   async usageOfKey(keyId, start, end) {
     const out = { timestamps: [], items: [] };
+    const seen = new Set();
     for (let offset = 0, i = 0; i < 100; i++) {
       const r = await this.call('tokenhub', 'DescribeUsageRankList', { Dimension: 'model', MetricType: 'apikey_usage', Anchor: keyId, StartTime: start, EndTime: end, Period: 86400, Offset: offset });
       if (r.Timestamps?.length) out.timestamps = r.Timestamps;
       const list = r.TopList || [];
-      out.items.push(...list);
+      for (const it of list) if (!seen.has(String(it.Key))) { seen.add(String(it.Key)); out.items.push(it); } // 同一模型出现在两页时只取一次
       offset += list.length;
       if (!list.length || offset >= (r.Total ?? 0)) break;
     }
@@ -192,6 +194,13 @@ export class TencentClient {
  * =================================================================== */
 const num = v => { const n = typeof v === 'number' ? v : parseFloat(String(v ?? '').replace(/,/g, '')); return Number.isFinite(n) ? n : 0; };
 export const tcWorkspaceId = region => `tc:${region}`;
+/** 账单地域名称（如“华南地区（广州）”）→ TokenHub 地域；无法识别时返回 ''（视为当前地域） */
+export function tcRegionOf(name) {
+  const s = String(name || '');
+  if (/广州|guangzhou/i.test(s)) return 'ap-guangzhou';
+  if (/新加坡|singapore/i.test(s)) return 'ap-singapore';
+  return '';
+}
 export const tcWorkspaceName = region => `TokenHub · ${TC_REGION_NAMES[region] || region}`;
 
 /** "2026-03-25 19:50:56"（北京时间）→ 毫秒时间戳 */
@@ -219,9 +228,12 @@ export function normalizeTencentKey(k, region) {
 /** 计费项名称 → 与阿里云计费项编码兼容的 io（前端据此识别输入/输出/缓存/思考） */
 export function tcIo(text) {
   const t = String(text || '');
+  // 未命中缓存的输入按原价计费，是普通输入，不能被“命中缓存 / 缓存”规则误判为缓存命中
+  if (/未命中缓存|缓存未命中|非缓存|cache.?miss|uncached/i.test(t)) return /输出|output|completion/i.test(t) ? 'output_token' : 'input_token';
   if (/缓存命中|命中缓存|缓存读|读缓存|cache.?(hit|read)/i.test(t)) return 'input_token_cache';
   if (/缓存写|写缓存|缓存创建|cache.?(write|creat)/i.test(t)) return 'input_token_cache_creation';
-  if (/思考|thinking|reasoning/i.test(t)) return 'thinking_output_token';
+  // 只有明确写出“思考 Token”时才是思考输出；计费项名称常带模型名（如 kimi-k2-thinking-输入），不能据此判为思考输出
+  if (/思考|thinking.?tokens?|reasoning.?tokens?/i.test(t)) return 'thinking_output_token';
   if (/输出|output|completion/i.test(t)) return 'output_token';
   if (/输入|input|prompt/i.test(t)) return 'input_token';
   if (/缓存|cache/i.test(t)) return 'input_token_cache';
@@ -258,12 +270,20 @@ function keyFeeName(d, c, endpointModel) {
  * 账单明细 → 归一化账单行（与阿里云 normalizeBillItem 字段一致，另含 day）。
  * 同一 日 × 资源 × 模型 × 计费项 × 单价 合并（按量计费按小时出账，合并到日）。
  */
-export function tencentBillRows(details, { region, endpointModel = new Map(), keyIds = new Set() } = {}) {
+/** TokenHub 自身的账单（只有这部分费用能按 TokenHub 用量分摊给 TokenHub 的 API Key） */
+const TOKENHUB_RE = /tokenhub|大模型服务平台/i;
+export function tencentBillRows(details, { region, endpointModel = new Map(), keyIds = new Set(), currency = 'CNY' } = {}) {
   const m = new Map();
   for (const d of details || []) {
     const day = String(d.BillDay || d.FeeBeginTime || d.PayTime || '').slice(0, 10);
     if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) continue;
     const rid = String(d.ResourceId || '');
+    // 账单覆盖整个账号的所有地域，而用量与 Key 只来自当前配置的地域：其他地域的费用不能分摊给本地域的 Key
+    const rowRegion = tcRegionOf(d.RegionName);
+    const foreign = !!rowRegion && rowRegion !== region;
+    // 混元 API、知识引擎（DeepSeek）等独立产品的调用不经过 TokenHub 的 API Key，不能按 TokenHub 用量分摊（计入“无 API Key”）
+    const prodName = `${d.BusinessCodeName || ''} ${d.BusinessCode || ''} ${d.ProductCodeName || ''}`;
+    const noAlloc = !!prodName.trim() && !TOKENHUB_RE.test(prodName);
     for (const c of Array.isArray(d.ComponentSet) ? d.ComponentSet : []) {
       const item = c.ItemCodeName || c.ComponentCodeName || '';
       const io = tcIo(`${c.ComponentCodeName || ''} ${c.ItemCodeName || ''}`);
@@ -272,15 +292,15 @@ export function tencentBillRows(details, { region, endpointModel = new Map(), ke
       // 资源本身是 API Key（如联网搜索按次计费）：资源名称是 Key 名称而不是模型，按计费组件归类为“[费用项]”
       const model = keyId === rid && rid ? keyFeeName(d, c, endpointModel) : tcModelOf(d, c, endpointModel);
       const unit = c.UsedAmountUnit || '';
-      const k = [day, rid, model, io, item, c.SinglePrice ?? '', c.PriceUnit || '', unit, keyId].join('\u0001');
+      const k = [day, rid, model, io, item, c.SinglePrice ?? '', c.PriceUnit || '', unit, keyId, foreign ? rowRegion : '', noAlloc ? 'x' : ''].join('\u0001');
       let r = m.get(k);
       if (!r) {
         r = {
-          day, instance_id: rid, api_key_id: keyId, workspace_id: tcWorkspaceId(region), model, io, channel: '', stop_flag: '', kind: 'inference',
+          day, instance_id: rid, api_key_id: keyId, workspace_id: tcWorkspaceId(foreign ? rowRegion : region), model, io, channel: '', stop_flag: '', kind: 'inference', foreign, noAlloc,
           billing_item: item, billing_item_code: c.ItemCode || '', commodity_code: d.ProductCode || '', product_detail: d.ProductCodeName || d.BusinessCodeName || '',
           usage: null, usage_unit: unit, tokens: null, list_price: c.SinglePrice == null ? '' : String(num(c.SinglePrice)), list_price_unit: c.PriceUnit || '',
           gross: 0, pretax: 0, after_discount: 0, invoice_discount: 0, coupons: 0, cash_coupons: 0, prepaid: 0, resource_pkg: '',
-          currency: 'CNY', region: d.RegionName || '', item: d.ActionTypeName || '', subscription_type: d.PayModeName || '', alloc: 0,
+          currency, region: d.RegionName || '', item: d.ActionTypeName || '', subscription_type: d.PayModeName || '', alloc: 0,
         };
         m.set(k, r);
       }
@@ -299,7 +319,7 @@ export function tencentBillRows(details, { region, endpointModel = new Map(), ke
 export function rollupMonth(rows) {
   const m = new Map();
   for (const r of rows) {
-    const k = [r.instance_id, r.api_key_id, r.model, r.io, r.billing_item, r.list_price, r.list_price_unit, r.usage_unit, r.alloc].join('\u0001');
+    const k = [r.instance_id, r.api_key_id, r.workspace_id, r.model, r.io, r.billing_item, r.list_price, r.list_price_unit, r.usage_unit, r.alloc].join('\u0001'); // 含业务空间：其他地域的费用不能并入本地域的月账单行
     let o = m.get(k);
     if (!o) { o = { ...r, usage: null, tokens: null, gross: 0, pretax: 0, after_discount: 0, invoice_discount: 0, coupons: 0, cash_coupons: 0, prepaid: 0 }; delete o.day; m.set(k, o); }
     if (r.usage != null) o.usage = (o.usage || 0) + r.usage;
@@ -312,14 +332,19 @@ export function rollupMonth(rows) {
 /* ---------------- 按用量分摊 ---------------- */
 const MONEY = ['gross', 'pretax', 'after_discount', 'invoice_discount', 'coupons', 'cash_coupons', 'prepaid'];
 const norm = s => String(s || '').toLowerCase().replace(/[^a-z0-9.]/g, '');
-/** 账单模型名与用量模型名匹配：规范化后相等优先，其次互相包含（长度≥4） */
+/**
+ * 账单模型名与用量模型名匹配：规范化后相等优先；否则只接受按分隔符划分的前缀关系（如 hunyuan-turbos 与 hunyuan-turbos-latest），
+ * 版本号不同（deepseek-v3 与 deepseek-v3.1、glm-4 与 glm-4.5-air）不算匹配；有多个同样可能的候选时返回 null，不随意归属
+ */
 export function matchModel(billModel, usageModels) {
   const b = norm(billModel);
   if (!b || /^\[/.test(billModel)) return null;
-  const exact = usageModels.find(u => norm(u) === b);
-  if (exact) return exact;
-  const part = usageModels.filter(u => { const x = norm(u); return x.length >= 4 && b.length >= 4 && (x.includes(b) || b.includes(x)); });
-  return part.sort((x, y) => norm(y).length - norm(x).length)[0] || null;
+  const exact = usageModels.filter(u => norm(u) === b);
+  if (exact.length) return exact[0];
+  const lb = String(billModel).toLowerCase().trim();
+  const prefixOf = (a, x) => x.length > a.length && x.startsWith(a) && /[-_\s/:]/.test(x[a.length]);
+  const part = usageModels.filter(u => { const lu = String(u).toLowerCase().trim(); return lu.length >= 4 && lb.length >= 4 && (prefixOf(lb, lu) || prefixOf(lu, lb)); });
+  return part.length === 1 ? part[0] : null;
 }
 /** 账单计费项对应的用量权重 */
 export function weightOf(u, io) {
@@ -335,15 +360,18 @@ export function weightOf(u, io) {
  * usage：同一周期内的用量行 [{ api_key_id, model, input_tokens, output_tokens, cache_tokens, total_tokens }]
  * 金额按比例拆分，最后一份取余数，保证拆分后合计与原账单完全一致。
  */
-export function allocate(rows, usage, keyWs = () => '') {
-  const models = [...new Set(usage.map(u => u.model))];
+export function allocate(rows, usage, keyWs = () => '', universe = null) {
+  // universe：用于解析模型名的全部用量模型（整月）。先按整月解析出模型，再在本批用量中找该模型的用户：
+  // 当日没有精确模型的用量时不能退而匹配当日的近似模型（由调用方再用整月用量分摊）
+  const models = universe || [...new Set(usage.map(u => u.model))];
   const out = [];
   for (const r of rows) {
-    if (r.api_key_id) { out.push(r); continue; }
+    if (r.api_key_id || r.foreign || r.noAlloc) { out.push(r); continue; } // 其他地域 / 非 TokenHub 产品的费用保留为“无 API Key”
     const model = matchModel(r.model, models);
     const cands = model ? usage.filter(u => u.model === model) : [];
     let ws = cands.map(u => ({ u, w: Math.max(0, weightOf(u, r.io)) })).filter(x => x.w > 0);
     if (!ws.length) ws = cands.map(u => ({ u, w: Math.max(0, u.total_tokens) })).filter(x => x.w > 0); // 该 Token 类型无用量时退回按总 Token
+    if (!ws.length) ws = cands.map(u => ({ u, w: Math.max(0, u.requests || 0) })).filter(x => x.w > 0); // 按次计费（无 Token）的模型按请求数分摊
     const total = ws.reduce((s, x) => s + x.w, 0);
     if (!total) { out.push(r); continue; }
     const byKey = new Map();
@@ -352,7 +380,8 @@ export function allocate(rows, usage, keyWs = () => '') {
     const acc = Object.fromEntries([...MONEY, 'usage', 'tokens'].map(f => [f, 0]));
     shares.forEach(([keyId, w], i) => {
       const last = i === shares.length - 1, f = w / total;
-      const o = { ...r, api_key_id: keyId, workspace_id: keyWs(keyId) || r.workspace_id, alloc: 1 };
+      // 分摊行使用用量中的模型名（账单名按前缀匹配到用量名时两者不同）：前端按模型名关联用量，名称不一致会丢失请求数与单次指标
+      const o = { ...r, model, api_key_id: keyId, workspace_id: keyWs(keyId) || r.workspace_id, alloc: 1 };
       for (const k of MONEY) { o[k] = last ? r[k] - acc[k] : r[k] * f; acc[k] += o[k]; }
       for (const k of ['usage', 'tokens']) { if (r[k] == null) continue; o[k] = last ? r[k] - acc[k] : r[k] * f; acc[k] += o[k]; }
       out.push(o);
@@ -378,7 +407,7 @@ export function parseSeries(timestamps, series, dayOf) {
 
 /* ---------------- 无费用权限时按目录价估算 ---------------- */
 /** DescribeModelList → Map(模型ID/名称 → { input, output, cache }，单位：元/百万 Token） */
-export function priceTable(models) {
+export function priceTable(models, { usd = false } = {}) {
   const out = new Map();
   for (const m of models || []) {
     const infos = Array.isArray(m.ModelChargingInfo) ? m.ModelChargingInfo : m.ModelChargingInfo ? [m.ModelChargingInfo] : [];
@@ -388,7 +417,7 @@ export function priceTable(models) {
     for (const it of info.ChargingItems || []) {
       const unit = String(it.PriceUnit || '');
       const mul = /百万/.test(unit) ? 1 : /千/.test(unit) ? 1000 : /万/.test(unit) ? 100 : null;
-      if (mul == null || !/元/.test(unit)) continue;
+      if (mul == null || !/元/.test(unit) || /美元|USD/i.test(unit) !== usd) continue; // 币种与站点一致（中国站人民币、国际站美元）
       const v = num(it.Price) * mul;
       if (it.PriceName === 'Input') p.input = v; else if (it.PriceName === 'Output') p.output = v; else if (it.PriceName === 'Cache') p.cache = v; else if (it.PriceName === 'Thinking') p.thinking = v;
     }
@@ -398,7 +427,7 @@ export function priceTable(models) {
   return out;
 }
 /** 用量 × 目录价 → 估算账单行（alloc=2，表示估算） */
-export function estimateRows(usage, prices, region, keyWs = () => '') {
+export function estimateRows(usage, prices, region, keyWs = () => '', currency = 'CNY') {
   const rows = [];
   for (const u of usage) {
     const p = prices.get(u.model) || prices.get(matchModel(u.model, [...prices.keys()]) || '');
@@ -410,8 +439,8 @@ export function estimateRows(usage, prices, region, keyWs = () => '') {
       rows.push({
         day: u.day, instance_id: '', api_key_id: u.api_key_id, workspace_id: keyWs(u.api_key_id) || tcWorkspaceId(region), model: u.model, io, channel: '', stop_flag: '', kind: 'inference',
         billing_item: '目录价估算', billing_item_code: '', commodity_code: '', product_detail: 'TokenHub（按目录价估算）', usage: tokens, usage_unit: 'tokens', tokens,
-        list_price: String(price), list_price_unit: '元/百万tokens', gross: cost, pretax: cost, after_discount: cost, invoice_discount: 0, coupons: 0, cash_coupons: 0, prepaid: 0,
-        resource_pkg: '', currency: 'CNY', region: '', item: '', subscription_type: '', alloc: 2,
+        list_price: String(price), list_price_unit: currency === 'USD' ? '美元/百万tokens' : '元/百万tokens', gross: cost, pretax: cost, after_discount: cost, invoice_discount: 0, coupons: 0, cash_coupons: 0, prepaid: 0,
+        resource_pkg: '', currency, region: '', item: '', subscription_type: '', alloc: 2,
       });
     }
   }

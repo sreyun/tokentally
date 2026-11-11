@@ -14,12 +14,17 @@ import { SyncService, todayIn, addDays, addMonths, isCycleFinal, hourIn, PROVIDE
 import { AlertService, ALERT_TYPES, EVENT_TYPES, MAX_CHANNELS, validateWebhook, cleanMobiles } from './alerts.mjs';
 import { selfTest, AliyunClient, explainAliyunError, callLog, MS_REGIONS, BSS_ENDPOINTS } from './aliyun.mjs';
 import { tc3SelfTest, TencentClient, explainTencentError, TC_REGIONS, TC_SITES } from './tencent.mjs';
-import { seedDemo, clearDemo } from './demo.mjs';
+import { seedDemo, clearDemo, demoStale } from './demo.mjs';
 import { PromClient, validateCalls, discover, fetchCalls, buildUsageRows, buildQuery, DEFAULT_CALLS, MAPPING_FIELDS, PROM_AUTH } from './prom.mjs';
 import { loadMasterKey, hashPassword, verifyPassword, burnPasswordCheck, checkPasswordPolicy, randomPassword, maskId, sha256 } from './crypto.mjs';
 
-const VERSION = '1.5.1';
+const VERSION = '1.5.2';
 const log = (...a) => console.log(new Date().toISOString(), ...a);
+
+/* 配置校验：时区与 IP 白名单错误会导致所有接口 500 或安全限制失效，启动时直接报错；其他被忽略的配置给出警告 */
+if (!config.billTzValid) { console.error(`BILL_TZ=${config.billTz} 不是有效的 IANA 时区（如 Asia/Shanghai），服务未启动`); process.exit(1); }
+if (config.badCidrs.length) { console.error(`ALLOW_CIDRS / TRUSTED_PROXIES 中有无效的地址或网段：${config.badCidrs.join(', ')}，服务未启动`); process.exit(1); }
+for (const w of config.warnings) log('配置警告：' + w);
 
 {
   const a = selfTest(), t = tc3SelfTest();
@@ -37,6 +42,19 @@ const log = (...a) => console.log(new Date().toISOString(), ...a);
 fs.mkdirSync(config.dataDir, { recursive: true });
 const master = loadMasterKey(config.dataDir, config.masterKey);
 const store = new Store(path.join(config.dataDir, 'bailian-cost.db'), master.key);
+/* 运维：账号被锁定（如唯一的管理员被他人反复输错密码锁定）时，在服务器上执行 node src/server.mjs --unlock-user=<用户名> 解除 */
+{
+  const arg = process.argv.find(a => a.startsWith('--unlock-user='));
+  if (arg) {
+    const name = arg.slice('--unlock-user='.length).trim();
+    const u = name && store.userByName(name);
+    if (!u) { console.error(`用户不存在：${name}`); process.exit(1); }
+    store.updateUser(u.id, { failed_count: 0, locked_until: null });
+    store.audit('system', '', 'user.unlock.cli', { username: u.username });
+    console.log(`已解除用户 ${u.username} 的登录锁定`);
+    process.exit(0);
+  }
+}
 store.failStaleRuns();
 
 const SECRET_NAMES = { aliyun: ['aliyun.accessKeyId', 'aliyun.accessKeySecret'], tencent: ['tencent.secretId', 'tencent.secretKey'] };
@@ -81,14 +99,25 @@ if (config.demo && !store.getSetting('demo', false) && !anyConfigured() && store
   seedDemo(store, todayIn(config.billTz));
   log('已生成演示数据（DEMO_DATA=true）。在“系统管理”中配置真实访问密钥后，演示数据会被自动清除。');
 }
+/* 演示数据按生成日期刷新：长期运行的演示实例跨天后重新生成，否则本月数据逐渐变空、所有 Key 变为闲置 */
+function refreshDemo() {
+  const today = todayIn(config.billTz);
+  if (!store.getSetting('demo', false) || anyConfigured() || !demoStale(store, today)) return;
+  clearDemo(store, { keepDemo: true });
+  seedDemo(store, today);
+  log('演示数据已按当前日期重新生成');
+}
+refreshDemo();
 const sync = new SyncService({ store, tz: config.billTz, log, tencentEndpoint: config.tencentEndpoint, promAllowLoopback: config.promAllowLoopback });
 const alerts = new AlertService({ store, tz: config.billTz, log, publicUrl: config.publicUrl, allowPrivate: config.alertAllowPrivate, providers: () => sync.configured() });
 sync.onBillsSynced = () => alerts.check('bills');
 sync.onRunFinished = (p, kind) => { if (kind === 'meta') alerts.check('sync'); };
 sync.start();
 setInterval(() => store.purgeSessions(config.sessionIdleMinutes * 60_000), 10 * 60_000).unref();
+store.purgeOld(); // 启动时也清理（此前只在运行满 24 小时后才清理，频繁重启时同步记录无限增长）
 setInterval(() => store.purgeOld(), 24 * 3600_000).unref();
 setInterval(() => alerts.check('schedule'), 5 * 60_000).unref(); // 报表定时 & 无同步时的兜底检查
+setInterval(() => { try { refreshDemo(); } catch (e) { log('演示数据刷新失败：' + e.message); } }, 3600_000).unref();
 
 /* ---------------- 自动备份：每天 BACKUP_HOUR 点生成一份，保留最近 BACKUP_KEEP 份 ---------------- */
 const BACKUP_DIR = path.join(config.dataDir, 'backups');
@@ -99,17 +128,23 @@ function listBackups() {
       .sort((a, b) => b.mtime - a.mtime);
   } catch { return []; }
 }
+/** 清理中断的备份（进程在备份过程中退出会留下 .partial 文件，列表中看不到，也不会被轮换） */
+function cleanPartialBackups() {
+  try { for (const f of fs.readdirSync(BACKUP_DIR)) if (f.endsWith('.partial')) fs.rmSync(path.join(BACKUP_DIR, f), { force: true }); } catch { /* 目录不存在 */ }
+}
+cleanPartialBackups();
 /** 同一时间只允许一个备份任务；使用 SQLite 增量备份 API，备份期间服务照常响应 */
 let backupBusy = null;
 async function createBackup(manual = false) {
   if (backupBusy) throw Object.assign(new Error('已有备份任务正在进行，请稍后再试'), { busy: true });
   backupBusy = (async () => {
     fs.mkdirSync(BACKUP_DIR, { recursive: true, mode: 0o700 });
-    const d = new Date(), p = n => String(n).padStart(2, '0');
-    const name = `tokentally-${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}${manual ? '-manual' : ''}.db`;
+    cleanPartialBackups();
+    // 文件名使用账单时区（与 BACKUP_HOUR 一致），不依赖容器 / 进程的本地时区
+    const parts = Object.fromEntries(new Intl.DateTimeFormat('en-CA', { timeZone: config.billTz, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' }).formatToParts(new Date()).map(x => [x.type, x.value]));
+    const name = `tokentally-${parts.year}${parts.month}${parts.day}-${parts.hour}${parts.minute}${parts.second}${manual ? '-manual' : ''}.db`;
     const file = path.join(BACKUP_DIR, name);
     const tmp = file + '.partial';
-    fs.rmSync(tmp, { force: true });
     try { await store.backupTo(tmp); } catch (e) { fs.rmSync(tmp, { force: true }); throw e; }
     fs.renameSync(tmp, file); // 写完再改名：列表中不会出现半成品
     try { fs.chmodSync(file, 0o600); } catch { /* Windows */ }
@@ -142,11 +177,14 @@ const PRIVATE_ROUTES = { '/': 'index.html', '/index.html': 'index.html' };
 const MODULE_RE = /^\/js\/(?:views\/)?[a-z0-9-]+\.js$/;
 const fileCache = new Map();
 const DEV = process.env.NODE_ENV !== 'production';
+/** 静态文件缓存（含 gzip）：开发模式下按文件修改时间失效，而不是每个请求都重新读取并压缩 */
 function getFile(name) {
+  const file = path.join(PUBLIC_DIR, name);
   let f = fileCache.get(name);
-  if (!f || DEV) {
-    const body = fs.readFileSync(path.join(PUBLIC_DIR, name));
-    f = { body, gz: zlib.gzipSync(body), type: TYPES[path.extname(name)] || 'application/octet-stream', etag: '"' + sha256(body).slice(0, 16) + '"' };
+  const mtime = DEV ? fs.statSync(file).mtimeMs : 0;
+  if (!f || (DEV && f.mtime !== mtime)) {
+    const body = fs.readFileSync(file);
+    f = { body, gz: zlib.gzipSync(body), type: TYPES[path.extname(name)] || 'application/octet-stream', etag: '"' + sha256(body).slice(0, 16) + '"', mtime };
     fileCache.set(name, f);
   }
   return f;
@@ -172,15 +210,30 @@ const allowList = (() => {
  * 客户端 IP：信任反向代理时取 X-Forwarded-For 从右往左第 proxyHops 个地址（由最近的可信代理追加）。
  * 最左侧的地址可由客户端任意填写（Nginx $proxy_add_x_forwarded_for 只在末尾追加），取它会让登录限流、IP 白名单与审计 IP 被伪造绕过
  */
+/**
+ * 只信任来自可信代理地址的 X-Forwarded-* 头（TRUSTED_PROXIES，默认本机、内网与运营商级 NAT 地址段）：
+ * 服务端口可被直接访问时，任何客户端都能自己填写这些头，绕过 IP 白名单与登录限流
+ */
+const trustedProxies = (() => {
+  const bl = new net.BlockList();
+  const list = config.trustedProxies.length ? config.trustedProxies : ['127.0.0.0/8', '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '100.64.0.0/10', '::1/128', 'fc00::/7'];
+  for (const c of list) { const [a, p] = c.split('/'); const t = net.isIPv6(a) ? 'ipv6' : 'ipv4'; if (p) bl.addSubnet(a, Number(p), t); else bl.addAddress(a, t); }
+  return bl;
+})();
+function fromProxy(req) {
+  if (!config.trustProxy) return false;
+  const a = String(req.socket.remoteAddress || '').replace(/^::ffff:/, '');
+  return net.isIP(a) ? trustedProxies.check(a, net.isIPv6(a) ? 'ipv6' : 'ipv4') : false;
+}
 function clientIp(req) {
   let ip = req.socket.remoteAddress || '';
-  if (config.trustProxy && req.headers['x-forwarded-for']) {
+  if (fromProxy(req) && req.headers['x-forwarded-for']) {
     const list = String(req.headers['x-forwarded-for']).split(',').map(s => s.trim()).filter(Boolean);
     if (list.length) ip = list[Math.max(0, list.length - config.proxyHops)];
   }
   return ip.replace(/^::ffff:/, '');
 }
-const isHttps = req => !!req.socket.encrypted || (config.trustProxy && String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim() === 'https');
+const isHttps = req => !!req.socket.encrypted || (fromProxy(req) && String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim() === 'https');
 const cookieSecure = req => (config.cookieSecure === 'true' ? true : config.cookieSecure === 'false' ? false : isHttps(req));
 
 function securityHeaders(req, res) {
@@ -206,7 +259,7 @@ const json = (req, res, status, obj) => send(req, res, status, JSON.stringify(ob
 
 function sendFile(req, res, name) {
   const f = getFile(name);
-  if (req.headers['if-none-match'] === f.etag) { res.writeHead(304, { ETag: f.etag }); return res.end(); }
+  if (etagMatches(req.headers['if-none-match'], f.etag)) { res.writeHead(304, { ETag: f.etag }); return res.end(); }
   const gzip = /\bgzip\b/.test(req.headers['accept-encoding'] || '');
   const body = gzip ? f.gz : f.body;
   res.writeHead(200, { 'Content-Type': f.type, 'Content-Length': body.length, ETag: f.etag, 'Cache-Control': 'no-cache', ...(gzip ? { 'Content-Encoding': 'gzip', Vary: 'Accept-Encoding' } : {}) });
@@ -227,19 +280,30 @@ function parseCookies(req) {
 const cookieName = secure => (secure ? '__Host-bcs' : 'bcs');
 function setSessionCookie(req, res, token, maxAgeSec) {
   const secure = cookieSecure(req);
-  res.setHeader('Set-Cookie', `${cookieName(secure)}=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${maxAgeSec}${secure ? '; Secure' : ''}`);
+  const main = `${cookieName(secure)}=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${maxAgeSec}${secure ? '; Secure' : ''}`;
+  // 退出登录时两种名称都清除
+  res.setHeader('Set-Cookie', token ? main : [main, `${cookieName(!secure)}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0${!secure ? '; Secure' : ''}`]);
 }
-function sessionToken(req) { const c = parseCookies(req); return c['__Host-bcs'] || c.bcs || ''; }
+/** HTTPS 下只接受 __Host- 前缀的会话 Cookie：无前缀的 bcs 可被同一主域下的其他子域写入，用来把用户登录到攻击者的账号 */
+function sessionToken(req) { const c = parseCookies(req); return cookieSecure(req) ? c['__Host-bcs'] || '' : c.bcs || ''; }
 
+/**
+ * 读取 JSON 请求体。超出大小时立即返回 413，其余数据继续读取并丢弃；不能直接销毁套接字，否则客户端收不到 413，只看到连接被重置
+ */
 function readJson(req, limit = 64 * 1024) {
   return new Promise((resolve, reject) => {
     if (req.headers['content-length'] && Number(req.headers['content-length']) > limit) return reject(new HttpError(413, '请求体过大'));
     const ct = String(req.headers['content-type'] || '');
     if (req.headers['content-length'] !== '0' && ct && !ct.startsWith('application/json')) return reject(new HttpError(415, '仅支持 application/json'));
     const chunks = [];
-    let size = 0;
-    req.on('data', c => { size += c.length; if (size > limit) { reject(new HttpError(413, '请求体过大')); req.destroy(); } else chunks.push(c); });
+    let size = 0, tooBig = false;
+    req.on('data', c => {
+      if (tooBig) return; // 继续读取并丢弃，响应发出后连接关闭
+      size += c.length;
+      if (size > limit) { tooBig = true; chunks.length = 0; reject(new HttpError(413, '请求体过大')); } else chunks.push(c);
+    });
     req.on('end', () => {
+      if (tooBig) return;
       if (!chunks.length) return resolve({});
       try { const v = JSON.parse(Buffer.concat(chunks).toString('utf8')); resolve(v && typeof v === 'object' ? v : {}); }
       catch { reject(new HttpError(400, 'JSON 格式错误')); }
@@ -252,7 +316,7 @@ function sameOrigin(req) {
   const origin = req.headers.origin;
   if (!origin) return true;
   try {
-    const host = (config.trustProxy && req.headers['x-forwarded-host']) || req.headers.host;
+    const host = (fromProxy(req) && req.headers['x-forwarded-host']) || req.headers.host;
     return new URL(origin).host === String(host).split(',')[0].trim();
   } catch { return false; }
 }
@@ -268,9 +332,17 @@ function rateLimited(ip, limit = 600, map = ipHits) {
   if (!e || now - e.t > 60_000) { e = { t: now, n: 0 }; map.set(ip, e); }
   return ++e.n > limit;
 }
+/*
+ * 登录限流：密码校验（scrypt）是异步的，并发请求在校验结束前都看不到彼此的失败。
+ * 因此每次尝试在校验前同步占用名额（IP：失败数 + 进行中；账号：failed_count + 进行中），成功后释放、失败后计入失败数
+ */
+const loginInflight = new Map(); // ip -> 校验中的请求数
+const userInflight = new Map();  // userId -> 校验中的请求数
+const bump = (m, k, d) => { const n = (m.get(k) || 0) + d; if (n > 0) m.set(k, n); else m.delete(k); };
 function loginBlocked(ip) {
   const e = loginFails.get(ip);
-  return !!e && Date.now() - e.t < config.login.ipWindowMinutes * 60_000 && e.n >= config.login.maxAttemptsPerIp;
+  const n = e && Date.now() - e.t < config.login.ipWindowMinutes * 60_000 ? e.n : 0;
+  return n + (loginInflight.get(ip) || 0) >= config.login.maxAttemptsPerIp;
 }
 function noteLoginFail(ip) {
   const now = Date.now();
@@ -282,6 +354,7 @@ setInterval(() => {
   const now = Date.now();
   for (const m of [ipHits, metricHits]) for (const [k, v] of m) if (now - v.t > 60_000) m.delete(k);
   for (const [k, v] of loginFails) if (now - v.t > config.login.ipWindowMinutes * 60_000) loginFails.delete(k);
+  for (const [k, v] of pwFails) if (!v.inflight && !(v.lockUntil > now) && now - v.t > config.login.lockMinutes * 60_000) pwFails.delete(k);
 }, 60_000).unref();
 
 /* ===================================================================
@@ -306,15 +379,83 @@ const wsOut = w => ({
 const KEY_ID_RE = /^([A-Za-z0-9][\w.-]{0,63}|__none__)$/;
 const daysBetween = (a, b) => Math.round((Date.parse(b + 'T00:00:00Z') - Date.parse(a + 'T00:00:00Z')) / 864e5) + 1;
 const lastDayOf = cycle => addDays(addMonths(cycle, 1) + '-01', -1);
-const isDate = s => /^\d{4}-\d{2}-\d{2}$/.test(s || '') && !Number.isNaN(Date.parse(s + 'T00:00:00Z'));
+/** 严格日期：2026-02-31 这类不存在的日期会被 Date 顺延到下月，必须往返校验 */
+const isDate = s => {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s || '')) return false;
+  const t = Date.parse(s + 'T00:00:00Z');
+  return !Number.isNaN(t) && new Date(t).toISOString().slice(0, 10) === s;
+};
 
-function getData(url) {
+/** 日期范围查询返回的按日账单行上限（本期 + 对比期） */
+const MAX_DATA_LINES = Math.max(10_000, Number(process.env.MAX_DATA_LINES) || 100_000);
+/** 前端轮询用的数据版本：与 /api/data 的 ETag 使用同一组输入（不含查询参数），任何影响数据的变化都会改变。dv 为本次请求已读取的 store.dataVersion() */
+function dataVersionTag(dv = store.dataVersion()) {
+  return sha256([VERSION, dv, todayIn(config.billTz), sync.configured().join(',')].join('|')).slice(0, 16);
+}
+/** 每个 Key 的最近消费日与近 7/30 天费用：只与数据版本和日期有关，按版本缓存（不随每个统计周期的请求重新扫描全部日账单） */
+let activityCache = { k: '', d: null };
+function keyActivityCached(dv, today) {
+  const k = dv + '|' + today;
+  if (activityCache.k !== k) activityCache = { k, d: store.keyActivity(today) };
+  return activityCache.d;
+}
+/**
+ * 日期范围包含今天时的对比期：前 len-1 天完整对比，最后一天（与今天对应）按今天的已出账比例折算。
+ * 今天的账单延迟数小时入账，直接与完整的对比日比较会让“今天 / 近 7 天”等每天上午显示大幅虚假下降
+ */
+function prevRangeOf(from, today, len, pFrom, pTo) {
+  const fullCur = store.dailyCost(from, addDays(today, -1)), todayCost = store.dailyCost(today, today)[0]?.cost || 0;
+  const days = len - 1;
+  const base = days > 0 ? fullCur.reduce((s, r) => s + r.cost, 0) / days : store.dailyCost(addDays(today, -7), addDays(today, -1)).reduce((s, r) => s + r.cost, 0) / 7;
+  const ratio = base > 0 ? Math.min(1, Math.max(0, todayCost / base)) : 0;
+  const agg = store.queryAgg('D', pFrom, days > 0 ? addDays(pTo, -1) : '0000-00-00');
+  if (ratio > 0) {
+    const part = store.queryAgg('D', pTo, pTo);
+    const idx = ['gross', 'pretax', 'after_discount', 'tokens'].map(c => part.cols.indexOf(c));
+    for (const r of part.rows) { const x = r.slice(); for (const i of idx) if (x[i] != null) x[i] *= ratio; agg.rows.push(x); }
+  }
+  const label = [days > 0 ? `${pFrom} ~ ${addDays(pTo, -1)}` : '', ratio > 0 ? `${pTo} × ${Math.round(ratio * 100)}%（按今天已出账比例折算）` : ''].filter(Boolean).join(' + ') || '无可比数据';
+  return { prev: agg, label };
+}
+/** /api/data 只认这些参数：其余参数不影响结果，也不能进入缓存键（否则任意参数都能绕过缓存、强制重新计算） */
+function dataQueryKey(url) {
+  const q = url.searchParams;
+  return q.get('mode') === 'range' ? `range|${q.get('from') || ''}|${q.get('to') || ''}` : `month|${q.get('cycle') || ''}`;
+}
+/**
+ * “较上月同期”的上月部分：上月 1 日 ~ (n-1) 日的完整日，加上上月第 n 日 × 今天的已出账比例。
+ * 今天尚未结束且账单延迟数小时入账，直接与上月完整的第 n 日比较会在每月初显示大幅虚假下降（如 1 日上午“下降 90%”）。
+ * 已出账比例 = 今天已出账金额 ÷ 本月完整日的日均（1 日用上月日均），限制在 0~1
+ */
+function prevMtdOf(cycle, pc, today) {
+  const pad = n => String(n).padStart(2, '0');
+  const n = Number(today.slice(8, 10)), pDays = Number(lastDayOf(pc).slice(8, 10));
+  const fullTo = Math.min(n - 1, pDays), dayN = n <= pDays ? `${pc}-${pad(n)}` : null;
+  const cur = store.dailyCost(cycle + '-01', today);
+  const fullCur = cur.filter(r => r.day < today).reduce((s, r) => s + r.cost, 0), todayCost = cur.find(r => r.day === today)?.cost || 0;
+  const base = n > 1 ? fullCur / (n - 1) : store.dailyCost(pc + '-01', lastDayOf(pc)).reduce((s, r) => s + r.cost, 0) / pDays;
+  const ratio = dayN ? (base > 0 ? Math.min(1, Math.max(0, todayCost / base)) : 0) : 0;
+  const agg = store.queryAgg('D', pc + '-01', fullTo >= 1 ? `${pc}-${pad(fullTo)}` : '0000-00-00'); // 1 日时没有完整日：空结果
+  if (dayN && ratio > 0) {
+    const part = store.queryAgg('D', dayN, dayN);
+    const idx = ['gross', 'pretax', 'after_discount', 'tokens'].map(c => part.cols.indexOf(c));
+    for (const r of part.rows) { const x = r.slice(); for (const i of idx) if (x[i] != null) x[i] *= ratio; agg.rows.push(x); }
+  }
+  const range = fullTo >= 1 ? `${pc}-01 ~ ${pc}-${pad(fullTo)}` : '';
+  const label = [range, dayN && ratio > 0 ? `${dayN} × ${Math.round(ratio * 100)}%（按今天已出账比例折算）` : ''].filter(Boolean).join(' + ') || '无可比数据';
+  return { prevMtd: agg, label };
+}
+function getData(url, dv = store.dataVersion()) {
   const today = todayIn(config.billTz);
   const mode = url.searchParams.get('mode') === 'range' ? 'range' : 'month';
   const tags = new Map(store.listKeyTags().map(t => [t.api_key_id, t]));
+  const keys = store.listApiKeys();
+  const known = new Set(keys.map(k => k.api_key_id));
   const out = {
-    today, tz: config.billTz, workspaces: store.listWorkspaces().map(wsOut), apiKeys: store.listApiKeys().map(k => keyOut(k, tags)),
-    keyActivity: store.keyActivity(today), budgets: store.budgets(), providers: sync.configured(),
+    today, tz: config.billTz, dataVersion: dataVersionTag(dv), workspaces: store.listWorkspaces().map(wsOut), apiKeys: keys.map(k => keyOut(k, tags)),
+    // 只出现在账单中的 Key（如首次同步前已删除）也可以设置成本中心 / 负责人：单独返回其标签，前端补到账单生成的 Key 上
+    extraTags: [...tags.values()].filter(t => !known.has(t.api_key_id)).map(t => ({ apiKeyId: t.api_key_id, costCenter: t.cost_center || '', owner: t.owner || '', note: t.note || '' })),
+    keyActivity: keyActivityCached(dv, today), budgets: store.budgets(), providers: sync.configured(),
   };
   if (mode === 'month') {
     const cycle = url.searchParams.get('cycle') || today.slice(0, 7);
@@ -326,20 +467,14 @@ function getData(url) {
     const c = store.getCycle(cycle);
     out.period = {
       mode, cycle, from: cycle + '-01', to, daysInPeriod: daysBetween(cycle + '-01', last), elapsedDays: Math.max(0, daysBetween(cycle + '-01', to)),
-      isCurrent, final: isCycleFinal(cycle, today), syncedAt: c?.synced_at || null, prevLabel: pc,
+      // 终版以本地账期是否已定稿为准（日期到了但同步未完成 / 失败时不能显示为终版），与周期标签一致
+      isCurrent, final: isCycleFinal(cycle, today) && !!c?.final, syncedAt: c?.synced_at || null, prevLabel: pc,
     };
     out.lines = store.queryLines('M', cycle, cycle);
     out.daily = store.queryLines('D', cycle + '-01', last, true);
     out.prev = store.queryAgg('M', pc, pc);
     out.prevDaily = store.queryLines('D', pc + '-01', lastDayOf(pc), true);
-    if (isCurrent) {
-      const n = Number(today.slice(8, 10));
-      const pLast = lastDayOf(pc);
-      const pTo = `${pc}-${String(Math.min(n, Number(pLast.slice(8, 10)))).padStart(2, '0')}`;
-      out.prevMtd = store.queryAgg('D', pc + '-01', pTo);
-      out.period.prevMtdLabel = `${pc}-01 ~ ${pTo}`;
-    }
-    out.recon = store.msOverview(cycle);
+    if (isCurrent) { const m = prevMtdOf(cycle, pc, today); out.prevMtd = m.prevMtd; out.period.prevMtdLabel = m.label; }
     out.history = store.queryLines('M', addMonths(cycle, -11), cycle, true);
     out.usage = store.queryUsage(cycle + '-01', last);
   } else {
@@ -348,10 +483,14 @@ function getData(url) {
     const len = daysBetween(from, to);
     if (len > 400) throw new HttpError(400, '日期范围不能超过 400 天');
     const pFrom = addDays(from, -len), pTo = addDays(from, -1);
+    // 响应整体在内存中生成（JSON + gzip）：账单行过多时直接提示缩短范围，避免大账号选择长范围时阻塞服务甚至内存耗尽
+    const rows = store.countLines('D', from, to) + store.countLines('D', pFrom, pTo);
+    if (rows > MAX_DATA_LINES) throw new HttpError(413, `所选日期范围的按日账单过多（本期与对比期共 ${rows.toLocaleString()} 行），请缩短日期范围，或按账期（月）查看`);
     out.period = { mode, from, to, daysInPeriod: len, elapsedDays: Math.max(0, daysBetween(from, to < today ? to : today)), isCurrent: to >= today, prevLabel: `${pFrom} ~ ${pTo}` };
     out.lines = store.queryLines('D', from, to);
     out.daily = null;
-    out.prev = store.queryAgg('D', pFrom, pTo);
+    if (to >= today && from <= today) { const m = prevRangeOf(from, today, len, pFrom, pTo); out.prev = m.prev; out.period.prevLabel = m.label; }
+    else out.prev = store.queryAgg('D', pFrom, pTo);
     out.prevDaily = store.queryLines('D', pFrom, pTo, true);
     const endCycle = to.slice(0, 7);
     out.history = store.queryLines('M', addMonths(endCycle, -11), endCycle, true);
@@ -362,19 +501,19 @@ function getData(url) {
 
 /* 数据范围（全表统计）按数据版本缓存：状态接口每 20 秒被每个标签页轮询一次 */
 let rangeCache = { v: '', d: null };
-function dataRangeCached() {
-  const v = store.dataVersion();
+function dataRangeCached(v = store.dataVersion()) {
   if (rangeCache.v !== v) rangeCache = { v, d: store.dataRange() };
   return rangeCache.d;
 }
 function statusOut() {
+  const dv = store.dataVersion(); // 每个请求只计算一次
   const providers = Object.fromEntries(PROVIDER_LIST.map(p => [p, { name: PROVIDERS[p], configured: secretState(p) === 'ok', secretState: secretState(p) }]));
   return {
     version: VERSION, today: todayIn(config.billTz), tz: config.billTz,
     aliyun: providers.aliyun, providers, anyConfigured: anyConfigured(), branding: store.branding(), demo: !!store.getSetting('demo', false),
     // 调用次数数据源：阿里云需启用云监控 Prometheus（演示模式内置模拟数据）
     calls: ((c, demo) => ({ aliyun: !!c || demo, aliyunFails: !!c?.failMetric || demo }))(sync.callsConfig(), !!store.getSetting('demo', false)),
-    sync: sync.status(), data: dataRangeCached(),
+    sync: sync.status(), data: dataRangeCached(dv), dataVersion: dataVersionTag(dv),
   };
 }
 
@@ -400,22 +539,40 @@ function adminSettingsOut() {
   };
 }
 
-/* 敏感操作二次验证：校验当前登录密码，连续错误达到上限后强制退出该用户全部会话 */
-const pwFails = new Map(); // userId -> 连续输错次数
+/*
+ * 敏感操作二次验证：校验当前登录密码，连续错误达到上限后强制退出该用户全部会话并锁定 LOGIN_LOCK_MINUTES 分钟。
+ * 校验（scrypt）是异步的：尝试次数必须在校验开始前同步占用（失败数 + 进行中 < 上限），否则并发请求可以一次提交任意多个猜测；
+ * 校验通过后还要确认会话仍然有效（并发的错误猜测可能已触发强制退出）。计数在 lockMinutes 内无新失败时自动清零。
+ */
+const pwFails = new Map(); // userId -> { n: 连续错误次数, t: 最近一次失败时间, inflight: 校验中的请求数, lockUntil }
 async function confirmCurrentPassword(ctx, password, action, msg) {
-  const u = store.userById(ctx.user.id);
-  if (u && (await verifyPassword(String(password || ''), u.pass_hash))) { pwFails.delete(u.id); return u; }
-  const max = config.login.maxFailuresPerUser;
-  const n = (pwFails.get(ctx.user.id) || 0) + 1;
-  if (n >= max) {
-    pwFails.delete(ctx.user.id);
-    store.deleteUserSessions(ctx.user.id);
-    store.audit(ctx.user.username, ctx.ip, action + '.lock', `当前密码连续错误 ${n} 次，已强制退出全部会话`);
+  const id = ctx.user.id, max = config.login.maxFailuresPerUser, win = config.login.lockMinutes * 60_000;
+  const now = Date.now();
+  let e = pwFails.get(id);
+  if (e && !e.inflight && !(e.lockUntil > now) && now - e.t > win) { pwFails.delete(id); e = null; }
+  if (e?.lockUntil > now) throw new HttpError(429, '密码错误次数过多，请稍后再试');
+  if (!e) { e = { n: 0, t: now, inflight: 0, lockUntil: 0 }; pwFails.set(id, e); }
+  if (e.n + e.inflight >= max) throw new HttpError(429, '密码校验请求过于频繁，请稍后再试');
+  e.inflight++;
+  let u, ok = false;
+  try {
+    u = store.userById(id);
+    ok = !!u && !u.disabled && (await verifyPassword(String(password || ''), u.pass_hash));
+  } finally { e.inflight--; }
+  if (ok) {
+    if (!store.sessionExists(ctx.session.id_hash)) throw new HttpError(401, '会话已失效，请重新登录', 'Unauthorized');
+    if (!e.n && !e.inflight && pwFails.get(id) === e) pwFails.delete(id);
+    return u;
+  }
+  e.n++; e.t = Date.now();
+  if (e.n >= max) {
+    e.lockUntil = e.t + win;
+    store.deleteUserSessions(id);
+    store.audit(ctx.user.username, ctx.ip, action + '.lock', `当前密码连续错误 ${e.n} 次，已强制退出全部会话`);
     throw new HttpError(401, '密码错误次数过多，已强制退出登录', 'Unauthorized');
   }
-  pwFails.set(ctx.user.id, n);
-  store.audit(ctx.user.username, ctx.ip, action + '.fail', `当前密码错误（${n}/${max}）`);
-  throw new HttpError(403, `${msg}（还可尝试 ${max - n} 次）`);
+  store.audit(ctx.user.username, ctx.ip, action + '.fail', `当前密码错误（${e.n}/${max}）`);
+  throw new HttpError(403, `${msg}（还可尝试 ${max - e.n} 次）`);
 }
 
 const AK_ID_RE = /^[A-Za-z0-9]{12,64}$/;
@@ -449,14 +606,26 @@ function aliyunCallsOut() {
   return { ...c, secretSet: callsSecretSet(), last: store.getSetting('aliyunCalls.last', null), authTypes: PROM_AUTH, query: c.metric && c.keyLabel ? buildQuery(c) : '' };
 }
 
+const obj = v => (v && typeof v === 'object' && !Array.isArray(v) ? v : null);
+/**
+ * 保存系统设置（可同时包含多个分区）。分三步：①校验全部分区（不写库）②需要时校验当前登录密码 ③统一落库并记一条审计。
+ * 任何分区校验失败都不会留下部分已保存的设置
+ */
 async function putSettings(body, ctx) {
-  const changed = [];
+  const changed = [], applies = [], confirms = [];
+  const diff = (prefix, cur, next) => { for (const k of Object.keys(next)) if (next[k] !== cur[k]) changed.push(`${prefix}.${k}`); };
+  const clearDemoIfNeeded = () => {
+    if (!store.getSetting('demo', false)) return;
+    clearDemo(store); sync.resetSchedule(); store.audit(ctx.user.username, ctx.ip, 'demo.clear', null);
+  };
+  for (const k of ['aliyun', 'tencent', 'aliyunCalls', 'branding', 'sync']) if (body[k] != null && !obj(body[k])) throw new HttpError(400, `设置分区 ${k} 格式不正确`);
+
   if (body.aliyun) {
     const a = body.aliyun;
     const cur = store.aliyunSettings();
     const next = {
       msRegion: MS_REGIONS.includes(a.msRegion) ? a.msRegion : cur.msRegion,
-      bssSite: BSS_ENDPOINTS[a.bssSite] ? a.bssSite : cur.bssSite,
+      bssSite: Object.hasOwn(BSS_ENDPOINTS, a.bssSite) ? a.bssSite : cur.bssSite,
       productCode: typeof a.productCode === 'string' ? a.productCode.replace(/[^A-Za-z0-9_,\-]/g, '').slice(0, 100) : cur.productCode,
     };
     const id = typeof a.accessKeyId === 'string' ? a.accessKeyId.trim() : '';
@@ -468,25 +637,28 @@ async function putSettings(body, ctx) {
       if (!id && secret && secretState() !== 'ok') throw new HttpError(400, '请同时填写 AccessKey ID');
       // 敏感操作二次验证：更换 AccessKey 须输入当前登录密码
       if (!a.confirmPassword) throw new HttpError(400, '更换 AccessKey 需要输入当前登录密码确认');
-      await confirmCurrentPassword(ctx, a.confirmPassword, 'aliyun.ak.update', '当前登录密码不正确');
+      confirms.push([a.confirmPassword, 'aliyun.ak.update']);
     }
-    store.setSetting('aliyun', next);
-    for (const k of Object.keys(next)) if (next[k] !== cur[k]) changed.push(`aliyun.${k}`);
-    if (id || secret) {
-      if (store.getSetting('demo', false)) { clearDemo(store); store.audit(ctx.user.username, ctx.ip, 'demo.clear', null); }
-      if (id) store.setSecret('aliyun.accessKeyId', id);
-      store.setSecret('aliyun.accessKeySecret', secret);
-      changed.push('aliyun.accessKey');
-      store.audit(ctx.user.username, ctx.ip, 'aliyun.ak.update', { accessKeyId: maskId(id || store.getSecret('aliyun.accessKeyId')) });
-      sync.run('meta', 'ak-changed', { provider: 'aliyun' });
-    }
+    applies.push(() => {
+      store.setSetting('aliyun', next);
+      diff('aliyun', cur, next);
+      if (id || secret) {
+        clearDemoIfNeeded();
+        if (id) store.setSecret('aliyun.accessKeyId', id);
+        store.setSecret('aliyun.accessKeySecret', secret);
+        changed.push('aliyun.accessKey');
+        store.audit(ctx.user.username, ctx.ip, 'aliyun.ak.update', { accessKeyId: maskId(id || store.getSecret('aliyun.accessKeyId')) });
+      }
+      // 换了密钥或地域/站点：运行中的同步用的是旧配置，排队在其结束后用新配置重新同步（元数据 + 账单）
+      if ((id || secret || next.msRegion !== cur.msRegion || next.bssSite !== cur.bssSite) && secretState('aliyun') === 'ok') sync.credentialsChanged('aliyun');
+    });
   }
   if (body.tencent) {
     const t = body.tencent;
     const cur = store.tencentSettings();
     const next = {
       region: TC_REGIONS.includes(t.region) ? t.region : cur.region,
-      site: TC_SITES[t.site] ? t.site : cur.site,
+      site: Object.hasOwn(TC_SITES, t.site) ? t.site : cur.site,
       businessCode: typeof t.businessCode === 'string' ? t.businessCode.replace(/[^A-Za-z0-9_,\-]/g, '').slice(0, 100) : cur.businessCode,
       estimate: t.estimate == null ? cur.estimate : !!t.estimate,
     };
@@ -498,18 +670,20 @@ async function putSettings(body, ctx) {
       if (id && !key) throw new HttpError(400, '更换 SecretId 时必须同时填写 SecretKey');
       if (!id && key && secretState('tencent') !== 'ok') throw new HttpError(400, '请同时填写 SecretId');
       if (!t.confirmPassword) throw new HttpError(400, '更换腾讯云 API 密钥需要输入当前登录密码确认');
-      await confirmCurrentPassword(ctx, t.confirmPassword, 'tencent.key.update', '当前登录密码不正确');
+      confirms.push([t.confirmPassword, 'tencent.key.update']);
     }
-    store.setSetting('tencent', next);
-    for (const k of Object.keys(next)) if (next[k] !== cur[k]) changed.push(`tencent.${k}`);
-    if (id || key) {
-      if (store.getSetting('demo', false)) { clearDemo(store); store.audit(ctx.user.username, ctx.ip, 'demo.clear', null); }
-      if (id) store.setSecret('tencent.secretId', id);
-      store.setSecret('tencent.secretKey', key);
-      changed.push('tencent.secretKey');
-      store.audit(ctx.user.username, ctx.ip, 'tencent.key.update', { secretId: maskId(id || store.getSecret('tencent.secretId')) });
-    }
-    if ((id || key || next.region !== cur.region || next.site !== cur.site) && secretState('tencent') === 'ok') sync.run('meta', 'key-changed', { provider: 'tencent' });
+    applies.push(() => {
+      store.setSetting('tencent', next);
+      diff('tencent', cur, next);
+      if (id || key) {
+        clearDemoIfNeeded();
+        if (id) store.setSecret('tencent.secretId', id);
+        store.setSecret('tencent.secretKey', key);
+        changed.push('tencent.secretKey');
+        store.audit(ctx.user.username, ctx.ip, 'tencent.key.update', { secretId: maskId(id || store.getSecret('tencent.secretId')) });
+      }
+      if ((id || key || next.region !== cur.region || next.site !== cur.site) && secretState('tencent') === 'ok') sync.credentialsChanged('tencent');
+    });
   }
   if (body.aliyunCalls) {
     const c = body.aliyunCalls, cur = store.aliyunCallsSettings();
@@ -523,23 +697,26 @@ async function putSettings(body, ctx) {
     const secretChange = token || password || c.clearToken || (next.url !== cur.url && cur.url && callsSecretSet());
     if (secretChange) {
       if (!c.confirmPassword) throw new HttpError(400, '修改 Prometheus 地址或认证信息需要输入当前登录密码确认');
-      await confirmCurrentPassword(ctx, c.confirmPassword, 'aliyun.calls.secret', '当前登录密码不正确');
+      confirms.push([c.confirmPassword, 'aliyun.calls.secret']);
     }
-    const mappingChanged = MAPPING_FIELDS.some(k => (next[k] || '') !== (cur[k] || ''));
-    store.setSetting('aliyunCalls', next);
-    for (const k of Object.keys(next)) if (next[k] !== cur[k]) changed.push(`aliyunCalls.${k}`);
-    if (c.clearToken) { store.setSecret('aliyunCalls.token', ''); store.setSecret('aliyunCalls.password', ''); changed.push('aliyunCalls.secret'); }
-    if (token) { store.setSecret('aliyunCalls.token', token); changed.push('aliyunCalls.token'); }
-    if (password) { store.setSecret('aliyunCalls.password', password); changed.push('aliyunCalls.password'); }
-    if (secretChange) store.audit(ctx.user.username, ctx.ip, 'aliyun.calls.secret', { url: next.url });
-    if (mappingChanged && (cur.metric || cur.url)) { store.clearUsage('aliyun'); store.setSetting('aliyunCalls.last', null); changed.push('aliyunCalls.cleared'); }
+    applies.push(() => {
+      // 只改地址（如同一实例的公网地址换成 VPC 地址）不是口径变化：不清空已保存的调用次数（Prometheus 保留期外的日期无法再读回）
+      const mappingChanged = MAPPING_FIELDS.filter(k => k !== 'url').some(k => (next[k] || '') !== (cur[k] || ''));
+      store.setSetting('aliyunCalls', next);
+      diff('aliyunCalls', cur, next);
+      if (c.clearToken) { store.setSecret('aliyunCalls.token', ''); store.setSecret('aliyunCalls.password', ''); changed.push('aliyunCalls.secret'); }
+      if (token) { store.setSecret('aliyunCalls.token', token); changed.push('aliyunCalls.token'); }
+      if (password) { store.setSecret('aliyunCalls.password', password); changed.push('aliyunCalls.password'); }
+      if (secretChange) store.audit(ctx.user.username, ctx.ip, 'aliyun.calls.secret', { url: next.url });
+      // 口径变化：清空旧口径数据；运行中的调用次数同步在写入前会比对口径，发现变化即丢弃结果
+      if (mappingChanged && (cur.metric || cur.url)) { store.clearUsage('aliyun'); store.setSetting('aliyunCalls.last', null); changed.push('aliyunCalls.cleared'); }
+    });
   }
   if (body.branding) {
     const b = body.branding, cur = store.branding();
     const txt = (v, max, d) => (typeof v === 'string' ? v.replace(/[<>"'`\\\u0000-\u001f]/g, '').trim().slice(0, max) || d : d);
     const next = { name: txt(b.name, 24, cur.name), subtitle: txt(b.subtitle, 48, '') };
-    store.setSetting('branding', next);
-    for (const k of Object.keys(next)) if (next[k] !== cur[k]) changed.push(`branding.${k}`);
+    applies.push(() => { store.setSetting('branding', next); diff('branding', cur, next); });
   }
   if (body.sync) {
     const s = body.sync, cur = store.syncSettings();
@@ -550,19 +727,47 @@ async function putSettings(body, ctx) {
       perWorkspaceKeys: s.perWorkspaceKeys == null ? cur.perWorkspaceKeys : !!s.perWorkspaceKeys,
       concurrency: int(s.concurrency, 1, 6, cur.concurrency),
     };
-    store.setSetting('sync', next);
-    for (const k of Object.keys(next)) if (next[k] !== cur[k]) changed.push(`sync.${k}`);
+    applies.push(() => { store.setSetting('sync', next); diff('sync', cur, next); });
   }
+  // 同一次保存中多个分区需要确认时，每个分区填写的密码都要校验（不能用一个分区的密码放行另一个分区）
+  const verified = new Set();
+  for (const [pw, action] of confirms) {
+    if (verified.has(pw)) continue;
+    await confirmCurrentPassword(ctx, pw, action, '当前登录密码不正确');
+    verified.add(pw);
+  }
+  for (const f of applies) f();
   if (changed.length) store.audit(ctx.user.username, ctx.ip, 'settings.update', { fields: changed });
   return adminSettingsOut();
 }
 
+const str = v => (typeof v === 'string' ? v.trim() : '');
+/**
+ * “用表单中的密钥测试”：使用表单当前选择的地域 / 站点（未选择时用已保存的），值先去掉首尾空白再校验（与保存一致）；
+ * 只填写了新 Secret 时与已保存的 ID 组合测试（轮换 Secret 前先验证）
+ */
+function formCreds(body, idField, keyField, idRe, keyRe, savedName, label) {
+  const id = str(body[idField]), key = str(body[keyField]);
+  if (!id && !key) return null;
+  if (id && !idRe.test(id)) throw new HttpError(400, `${label[0]} 格式不正确`);
+  if (key && !keyRe.test(key)) throw new HttpError(400, `${label[1]} 格式不正确`);
+  if (!key) throw new HttpError(400, `请同时填写 ${label[1]}`);
+  if (id) return { id, key };
+  let saved = '';
+  try { saved = store.getSecret(savedName); } catch { /* 无法解密 */ }
+  if (!saved) throw new HttpError(400, `请同时填写 ${label[0]}`);
+  return { id: saved, key };
+}
 async function testTencent(body) {
   let client;
   const t = store.tencentSettings();
-  if (body.secretId || body.secretKey) {
-    if (!TC_ID_RE.test(body.secretId || '') || !TC_KEY_RE.test(body.secretKey || '')) throw new HttpError(400, '请填写完整有效的 SecretId 与 SecretKey');
-    client = new TencentClient({ secretId: body.secretId.trim(), secretKey: body.secretKey.trim(), region: t.region, site: t.site, endpoint: config.tencentEndpoint });
+  const region = TC_REGIONS.includes(body.region) ? body.region : t.region, site = Object.hasOwn(TC_SITES, body.site) ? body.site : t.site;
+  const cred = formCreds(body, 'secretId', 'secretKey', TC_ID_RE, TC_KEY_RE, 'tencent.secretId', ['SecretId', 'SecretKey']);
+  if (cred) client = new TencentClient({ secretId: cred.id, secretKey: cred.key, region, site, endpoint: config.tencentEndpoint });
+  else if (region !== t.region || site !== t.site) {
+    const c = sync.credentials('tencent');
+    if (!c) throw new HttpError(400, '尚未配置腾讯云 API 密钥，请在表单中填写后测试');
+    client = new TencentClient({ secretId: c.id, secretKey: c.secret, region, site, endpoint: config.tencentEndpoint });
   } else {
     try { client = sync.client('tencent'); } catch (e) { throw new HttpError(400, e.message); }
   }
@@ -590,9 +795,13 @@ async function testConnection(body) {
   if (body.provider === 'tencent') return testTencent(body);
   let client;
   const a = store.aliyunSettings();
-  if (body.accessKeyId || body.accessKeySecret) {
-    if (!AK_ID_RE.test(body.accessKeyId || '') || !AK_SECRET_RE.test(body.accessKeySecret || '')) throw new HttpError(400, '请填写完整有效的 AccessKey ID 与 Secret');
-    client = new AliyunClient({ accessKeyId: body.accessKeyId.trim(), accessKeySecret: body.accessKeySecret.trim(), msRegion: a.msRegion, bssSite: a.bssSite });
+  const msRegion = MS_REGIONS.includes(body.msRegion) ? body.msRegion : a.msRegion, bssSite = Object.hasOwn(BSS_ENDPOINTS, body.bssSite) ? body.bssSite : a.bssSite;
+  const cred = formCreds(body, 'accessKeyId', 'accessKeySecret', AK_ID_RE, AK_SECRET_RE, 'aliyun.accessKeyId', ['AccessKey ID', 'AccessKey Secret']);
+  if (cred) client = new AliyunClient({ accessKeyId: cred.id, accessKeySecret: cred.key, msRegion, bssSite });
+  else if (msRegion !== a.msRegion || bssSite !== a.bssSite) {
+    const c = sync.credentials('aliyun');
+    if (!c) throw new HttpError(400, '尚未配置阿里云 AccessKey，请在表单中填写后测试');
+    client = new AliyunClient({ accessKeyId: c.id, accessKeySecret: c.secret, msRegion, bssSite });
   } else {
     try { client = sync.client('aliyun'); } catch (e) { throw new HttpError(400, e.message); }
   }
@@ -637,36 +846,52 @@ route('POST', '/api/login', async (req, res, ctx) => {
     noteLoginFail(ctx.ip);
     return json(req, res, 400, { error: '请输入用户名和密码' });
   }
+  // 读取请求体之后（同一同步步骤内）再检查并占用 IP 名额：只在读取前检查时，先发请求头、后发请求体的并发请求都能通过检查
+  if (loginBlocked(ctx.ip)) return json(req, res, 429, { error: '登录尝试过于频繁，请稍后再试' });
   const u = store.userByName(username.trim());
   const now = Date.now();
-  if (!u) {
-    await burnPasswordCheck(password); noteLoginFail(ctx.ip);
-    store.audit(username.trim().slice(0, 64), ctx.ip, 'login.fail', '用户不存在');
-    return fail();
-  }
-  if (u.locked_until && u.locked_until > now) {
-    await burnPasswordCheck(password); noteLoginFail(ctx.ip);
-    store.audit(u.username, ctx.ip, 'login.fail', '账号锁定中');
-    return fail();
-  }
-  const ok = await verifyPassword(password, u.pass_hash);
-  if (!ok || u.disabled) {
-    noteLoginFail(ctx.ip);
+  const max = config.login.maxFailuresPerUser;
+  bump(loginInflight, ctx.ip, 1);
+  let ok = false;
+  try {
+    if (!u) {
+      await burnPasswordCheck(password); noteLoginFail(ctx.ip);
+      // 不记录输入的原文：用户常把密码误填在用户名框中，原文会以明文留在审计日志与备份里
+      store.audit(`?${sha256(username.trim().toLowerCase()).slice(0, 8)}`, ctx.ip, 'login.fail', `用户不存在（输入长度 ${username.trim().length}）`);
+      return fail();
+    }
+    // 账号锁定中，或进行中的校验已占满剩余失败次数：不再校验密码（并发猜测不能超过失败上限）
+    // failed_count 按上限截断：调低 LOGIN_MAX_FAILURES 后，旧的失败计数不能让账号在没有锁定记录的情况下永远无法登录
+    if ((u.locked_until && u.locked_until > now) || Math.min(u.failed_count, max - 1) + (userInflight.get(u.id) || 0) >= max) {
+      await burnPasswordCheck(password); noteLoginFail(ctx.ip);
+      store.audit(u.username, ctx.ip, 'login.fail', '账号锁定中');
+      return fail();
+    }
+    bump(userInflight, u.id, 1);
+    try { ok = await verifyPassword(password, u.pass_hash); } finally { bump(userInflight, u.id, -1); }
     if (!ok) {
-      const n = u.failed_count + 1;
-      const lock = n >= config.login.maxFailuresPerUser;
-      store.updateUser(u.id, { failed_count: lock ? 0 : n, locked_until: lock ? now + config.login.lockMinutes * 60_000 : u.locked_until });
-      store.audit(u.username, ctx.ip, 'login.fail', lock ? `密码错误，账号锁定 ${config.login.lockMinutes} 分钟` : `密码错误（${n}/${config.login.maxFailuresPerUser}）`);
-    } else store.audit(u.username, ctx.ip, 'login.fail', '账号已禁用');
+      noteLoginFail(ctx.ip);
+      const r = store.noteUserLoginFail(u.id, max, config.login.lockMinutes * 60_000);
+      store.audit(u.username, ctx.ip, 'login.fail', r.locked ? `密码错误，账号锁定 ${config.login.lockMinutes} 分钟` : `密码错误（${r.n}/${max}）`);
+      return fail();
+    }
+  } finally { bump(loginInflight, ctx.ip, -1); }
+  // 校验期间账号可能已被并发的错误猜测锁定、被禁用或被删除：以最新状态为准
+  const cur = store.userById(u.id);
+  if (!cur || cur.disabled || (cur.locked_until && cur.locked_until > Date.now())) {
+    noteLoginFail(ctx.ip);
+    store.audit(u.username, ctx.ip, 'login.fail', !cur ? '用户不存在' : cur.disabled ? '账号已禁用' : '账号锁定中');
     return fail();
   }
+  // 重新登录成功（已证明知道密码）：清除二次验证的失败计数与锁定（被强制退出后用户需要能正常继续操作）
+  pwFails.delete(u.id);
   const old = sessionToken(req);
   if (old) store.deleteSession(sha256(old));
   store.updateUser(u.id, { failed_count: 0, locked_until: null, last_login_at: now, last_login_ip: ctx.ip });
   const { token } = store.createSession(u.id, ctx.ip, req.headers['user-agent'], config.sessionMaxHours * 3600_000);
   setSessionCookie(req, res, token, config.sessionMaxHours * 3600);
   store.audit(u.username, ctx.ip, 'login.success', null);
-  return json(req, res, 200, { ok: true, mustChange: !!u.must_change });
+  return json(req, res, 200, { ok: true, mustChange: !!cur.must_change });
 }, { public: true });
 
 route('POST', '/api/logout', async (req, res, ctx) => {
@@ -696,27 +921,47 @@ route('POST', '/api/me/password', async (req, res, ctx) => {
 route('GET', '/api/status', async (req, res) => json(req, res, 200, statusOut()));
 /* 分析数据：按“数据版本 + 日期 + 查询参数”生成 ETag，数据未变化时返回 304，避免轮询刷新时重复下载 */
 /* 同一 ETag 的响应体（JSON + gzip）缓存在内存中：多个用户 / 标签页、轮询刷新时不再重复查询与压缩（LRU，最多 8 份） */
+/* 缓存按总字节数限制（而不只是条数）：长日期范围的响应可能很大，8 份同时留在内存中会超出容器内存 */
 const dataCache = new Map();
-function cachedData(etag, url) {
+const CACHE_MAX_BYTES = 96 * 1048576, CACHE_ITEM_MAX = 32 * 1048576;
+let cacheBytes = 0;
+function cachedData(etag, url, dv) {
   let c = dataCache.get(etag);
   if (c) { dataCache.delete(etag); dataCache.set(etag, c); return c; }
-  const body = Buffer.from(JSON.stringify(getData(url)));
+  const body = Buffer.from(JSON.stringify(getData(url, dv)));
   c = { body, gz: body.length > 1024 ? zlib.gzipSync(body) : null };
-  dataCache.set(etag, c);
-  while (dataCache.size > 8) dataCache.delete(dataCache.keys().next().value);
+  c.size = body.length + (c.gz?.length || 0);
+  if (c.size > CACHE_ITEM_MAX) return c; // 过大的响应不缓存
+  dataCache.set(etag, c); cacheBytes += c.size;
+  while (dataCache.size > 8 || cacheBytes > CACHE_MAX_BYTES) {
+    const k = dataCache.keys().next().value;
+    cacheBytes -= dataCache.get(k).size; dataCache.delete(k);
+  }
   return c;
 }
+/** If-None-Match 比较（RFC 9110 弱比较）：支持 W/ 前缀、逗号分隔的多个 ETag 与 * */
+function etagMatches(header, etag) {
+  if (!header) return false;
+  const bare = t => t.trim().replace(/^W\//, '');
+  return String(header).split(',').some(t => t.trim() === '*' || bare(t) === bare(etag));
+}
 route('GET', '/api/data', async (req, res, ctx) => {
-  const etag = 'W/"' + sha256([VERSION, store.dataVersion(), todayIn(config.billTz), sync.configured().join(','), ctx.url.search].join('|')).slice(0, 32) + '"';
+  const dv = store.dataVersion();
+  const etag = 'W/"' + sha256([dataVersionTag(dv), dataQueryKey(ctx.url)].join('|')).slice(0, 32) + '"';
   const headers = { 'Cache-Control': 'private, no-cache', ETag: etag };
-  if (req.headers['if-none-match'] === etag) { res.writeHead(304, headers); return res.end(); }
-  const c = cachedData(etag, ctx.url);
+  if (etagMatches(req.headers['if-none-match'], etag)) { res.writeHead(304, headers); return res.end(); }
+  const c = cachedData(etag, ctx.url, dv);
   const gzip = c.gz && /\bgzip\b/.test(req.headers['accept-encoding'] || '');
   const out = gzip ? c.gz : c.body;
   res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': out.length, ...(gzip ? { 'Content-Encoding': 'gzip' } : {}), Vary: 'Accept-Encoding', ...headers });
   return res.end(req.method === 'HEAD' ? undefined : out);
 });
-route('GET', '/api/changes', async (req, res) => json(req, res, 200, { changes: store.listChanges(2000) }));
+/* 变更记录：默认最近 2000 条；带 entity_id 时返回该 Key / 业务空间的全部变更（详情页不能只在最近 2000 条中查找） */
+route('GET', '/api/changes', async (req, res, ctx) => {
+  const id = ctx.url.searchParams.get('entity_id');
+  if (id != null) return json(req, res, 200, { changes: store.changesOf(String(id).slice(0, 128)) });
+  return json(req, res, 200, { changes: store.listChanges(2000), total: store.maxChangeId() });
+});
 /* 品牌信息：登录页使用，无敏感内容 */
 route('GET', '/api/branding', async (req, res) => json(req, res, 200, store.branding()), { public: true });
 
@@ -724,8 +969,8 @@ route('GET', '/api/admin/settings', async (req, res) => json(req, res, 200, admi
 route('PUT', '/api/admin/settings', async (req, res, ctx) => json(req, res, 200, await putSettings(await readJson(req), ctx)), { admin: true });
 route('POST', '/api/admin/test', async (req, res, ctx) => {
   const body = await readJson(req);
-  if (body.provider === 'tencent') store.audit(ctx.user.username, ctx.ip, 'tencent.test', body.secretId ? { secretId: maskId(body.secretId) } : null);
-  else store.audit(ctx.user.username, ctx.ip, 'aliyun.test', body.accessKeyId ? { accessKeyId: maskId(body.accessKeyId) } : null);
+  if (body.provider === 'tencent') store.audit(ctx.user.username, ctx.ip, 'tencent.test', str(body.secretId) ? { secretId: maskId(str(body.secretId)) } : null);
+  else store.audit(ctx.user.username, ctx.ip, 'aliyun.test', str(body.accessKeyId) ? { accessKeyId: maskId(str(body.accessKeyId)) } : null);
   return json(req, res, 200, { results: await testConnection(body) });
 }, { admin: true });
 route('POST', '/api/admin/sync', async (req, res, ctx) => {
@@ -739,9 +984,10 @@ route('POST', '/api/admin/sync', async (req, res, ctx) => {
     targets = [b.provider];
   } else targets = conf;
   const cycles = Array.isArray(b.cycles) ? b.cycles.filter(c => typeof c === 'string' && /^\d{4}-(0[1-9]|1[0-2])$/.test(c)).slice(0, 18) : undefined;
-  const runs = targets.map(p => sync.run(kind, `manual:${ctx.user.username}`, { provider: p, cycles, force: !!b.force }));
+  // 指定账期或强制重新同步时，若同类任务正在运行则排队，在其结束后执行（不能被静默丢弃）
+  const runs = targets.map(p => sync.run(kind, `manual:${ctx.user.username}`, { provider: p, cycles, force: !!b.force, queue: !!(cycles?.length || b.force) }));
   store.audit(ctx.user.username, ctx.ip, 'sync.trigger', { kind, providers: targets, cycles, force: !!b.force });
-  return json(req, res, 200, { runs, runId: runs[0].runId, alreadyRunning: runs.every(r => r.alreadyRunning) });
+  return json(req, res, 200, { runs, runId: runs[0].runId, alreadyRunning: runs.every(r => r.alreadyRunning), queued: runs.some(r => r.queued) });
 }, { admin: true });
 /* 阿里云调用次数：发现指标 / 预览 / 立即同步 */
 route('POST', '/api/admin/aliyun-calls/discover', async (req, res) => {
@@ -790,7 +1036,7 @@ route('GET', '/api/admin/budgets', async (req, res) => {
   return json(req, res, 200, { budgets: store.budgets(), lastCycle, lastMonth });
 }, { admin: true });
 route('PUT', '/api/admin/budgets', async (req, res, ctx) => {
-  const b = await readJson(req);
+  const b = await readJson(req, 256 * 1024); // 2000 个 Key 预算
   const money = v => (v === '' || v == null ? null : (Number.isFinite(Number(v)) && Number(v) >= 0 && Number(v) < 1e10 ? Math.round(Number(v) * 100) / 100 : NaN));
   const monthly = money(b.monthly);
   if (Number.isNaN(monthly)) throw new HttpError(400, '月度总预算金额无效');
@@ -812,11 +1058,12 @@ route('PUT', '/api/admin/budgets', async (req, res, ctx) => {
 
 /* 成本中心 / 负责人 / 备注（本地标签，不回写云厂商） */
 route('PUT', '/api/admin/key-tags', async (req, res, ctx) => {
-  const b = await readJson(req, 256 * 1024);
+  const b = await readJson(req, 2 * 1024 * 1024); // 2000 条 × 成本中心 / 负责人 / 备注（中文 3 字节）
   const items = Array.isArray(b.items) ? b.items : [];
   if (!items.length) throw new HttpError(400, '没有需要保存的标签');
   if (items.length > 2000) throw new HttpError(400, '一次最多保存 2000 条');
   const out = {};
+  if (items.some(it => !obj(it))) throw new HttpError(400, '标签条目格式不正确');
   store.tx(() => {
     for (const it of items) {
       const id = String(it.id || '');
@@ -835,6 +1082,7 @@ route('PUT', '/api/admin/alerts', async (req, res, ctx) => {
   const curById = new Map(cur.channels.map(c => [c.id, c]));
   const list = Array.isArray(b.channels) ? b.channels : cur.channels;
   if (list.length > MAX_CHANNELS) throw new HttpError(400, `最多配置 ${MAX_CHANNELS} 个通知渠道`);
+  if (list.some(c => !obj(c)) || (b.rules != null && !obj(b.rules)) || (b.anomaly != null && !obj(b.anomaly))) throw new HttpError(400, '告警配置格式不正确');
   const rules = Object.fromEntries(Object.keys(cur.rules).map(k => [k, b.rules?.[k] == null ? cur.rules[k] : !!b.rules[k]]));
   const anomaly = {
     ratio: Math.min(20, Math.max(1.2, Number(b.anomaly?.ratio) || cur.anomaly.ratio)),
@@ -848,7 +1096,7 @@ route('PUT', '/api/admin/alerts', async (req, res, ctx) => {
     const id = old ? old.id : 'c' + crypto.randomBytes(4).toString('hex');
     if (used.has(id)) throw new HttpError(400, '渠道 ID 重复');
     used.add(id);
-    const type = ALERT_TYPES[raw.type] ? raw.type : old?.type;
+    const type = Object.hasOwn(ALERT_TYPES, raw.type) ? raw.type : old?.type;
     if (!type) throw new HttpError(400, '不支持的通知类型');
     const name = String(raw.name || '').replace(/[<>"'`\\\u0000-\u001f]/g, '').trim().slice(0, 30) || ALERT_TYPES[type].label;
     const sec = old ? alerts.secretsOf(id) : { webhook: '', secret: '' };
@@ -861,9 +1109,11 @@ route('PUT', '/api/admin/alerts', async (req, res, ctx) => {
     } else if (sec.webhook && old && type !== old.type) {
       throw new HttpError(400, `渠道「${name}」已更换通知类型，请同时填写对应的 Webhook 地址`); // 不同渠道的地址与密钥不能混用
     }
-    if (!webhook && !sec.webhook) throw new HttpError(400, `渠道「${name}」请填写 Webhook 地址`);
+    // 新渠道必须填写地址；已有渠道的地址丢失或无法解密（主密钥变化）时仍允许保存其他配置（规则、其他渠道、删除），但该渠道保持停用，直到重新填写地址
+    if (!webhook && !sec.webhook && !old) throw new HttpError(400, `渠道「${name}」请填写 Webhook 地址`);
+    const usable = !!(webhook || sec.webhook);
     const events = Object.fromEntries(Object.keys(EVENT_TYPES).map(k => [k, raw.events?.[k] == null ? (old?.events?.[k] ?? false) : !!raw.events[k]]));
-    plan.push({ ch: { id, name, type, enabled: !!raw.enabled, events, atAll: !!raw.atAll, atMobiles: cleanMobiles(raw.atMobiles) }, webhook, secretIn, clearSecret: !!raw.clearSecret, sec, isNew: !old });
+    plan.push({ ch: { id, name, type, enabled: !!raw.enabled && usable, events, atAll: !!raw.atAll, atMobiles: cleanMobiles(raw.atMobiles) }, webhook, secretIn, clearSecret: !!raw.clearSecret, sec, isNew: !old });
   }
   // 校验全部通过后再落库，避免部分保存
   for (const p of plan) {
@@ -887,7 +1137,7 @@ route('PUT', '/api/admin/alerts', async (req, res, ctx) => {
 route('POST', '/api/admin/alerts/test', async (req, res, ctx) => {
   const b = await readJson(req, 8192);
   const saved = alerts.settings().channels.find(c => c.id === b.channelId);
-  const type = ALERT_TYPES[b.type] ? b.type : saved?.type;
+  const type = Object.hasOwn(ALERT_TYPES, b.type) ? b.type : saved?.type;
   if (!type) throw new HttpError(400, '请选择通知类型');
   const sec = saved ? alerts.secretsOf(saved.id) : { webhook: '', secret: '' };
   const webhookIn = typeof b.webhook === 'string' ? b.webhook.trim() : '';
@@ -953,14 +1203,24 @@ route('GET', '/api/admin/runs', async (req, res) => json(req, res, 200, { runs: 
 route('GET', '/api/admin/calls', async (req, res) => json(req, res, 200, { calls: callLog }), { admin: true });
 route('GET', '/api/admin/audit', async (req, res) => json(req, res, 200, { audit: store.listAudit(1000) }), { admin: true });
 route('GET', '/api/admin/users', async (req, res) => json(req, res, 200, { users: store.listUsers().map(userOut) }), { admin: true });
+/*
+ * 用户管理：创建管理员、提升为管理员、重置他人密码属于提权 / 接管账号的敏感操作，与更换密钥一样需要当前登录密码确认；
+ * 修改自己的密码必须走 /api/me/password（校验原密码）。“至少保留一个管理员”只统计启用的管理员，已禁用的管理员可以删除或降级
+ */
 route('POST', '/api/admin/users', async (req, res, ctx) => {
-  const { username, password, role } = await readJson(req, 4096);
-  if (!USER_RE.test(username || '')) throw new HttpError(400, '用户名需为 3-32 位字母、数字或 _ . @ -');
+  const { username, password, role, confirmPassword } = await readJson(req, 4096);
+  if (typeof username !== 'string' || !USER_RE.test(username)) throw new HttpError(400, '用户名需为 3-32 位字母、数字或 _ . @ -');
   if (!['admin', 'viewer'].includes(role)) throw new HttpError(400, '角色无效');
   if (store.userByName(username)) throw new HttpError(409, '用户名已存在');
   const err = checkPasswordPolicy(password, username);
   if (err) throw new HttpError(400, err);
+  if (role === 'admin') {
+    if (!confirmPassword) throw new HttpError(400, '创建管理员需要输入当前登录密码确认');
+    await confirmCurrentPassword(ctx, confirmPassword, 'user.create', '当前登录密码不正确');
+  }
+  if (store.userByName(username)) throw new HttpError(409, '用户名已存在');
   const id = store.createUser({ username, passHash: await hashPassword(password), role, mustChange: true });
+  pwFails.delete(Number(id)); // 用户 ID 可能复用已删除用户的 ID
   store.audit(ctx.user.username, ctx.ip, 'user.create', { username, role });
   return json(req, res, 200, { id: Number(id) });
 }, { admin: true });
@@ -970,23 +1230,35 @@ route('PUT', '/api/admin/users/:id', async (req, res, ctx) => {
   const b = await readJson(req, 4096);
   const self = u.id === ctx.user.id;
   const fields = {};
+  let sensitive = '';
   if (b.role != null) {
     if (!['admin', 'viewer'].includes(b.role)) throw new HttpError(400, '角色无效');
     if (self && b.role !== 'admin') throw new HttpError(400, '不能降低自己的权限');
-    if (u.role === 'admin' && b.role !== 'admin' && store.countAdmins() <= 1) throw new HttpError(400, '至少需要保留一个管理员');
+    if (u.role === 'admin' && !u.disabled && b.role !== 'admin' && store.countAdmins() <= 1) throw new HttpError(400, '至少需要保留一个管理员');
+    if (b.role === 'admin' && u.role !== 'admin') sensitive = 'user.promote';
     fields.role = b.role;
   }
   if (b.disabled != null) {
     if (self && b.disabled) throw new HttpError(400, '不能禁用自己');
-    if (b.disabled && u.role === 'admin' && store.countAdmins() <= 1) throw new HttpError(400, '至少需要保留一个启用的管理员');
+    if (b.disabled && !u.disabled && u.role === 'admin' && store.countAdmins() <= 1) throw new HttpError(400, '至少需要保留一个启用的管理员');
     fields.disabled = b.disabled ? 1 : 0;
   }
   if (b.unlock) { fields.locked_until = null; fields.failed_count = 0; }
   if (b.password != null) {
+    if (self) throw new HttpError(400, '修改自己的密码请使用右上角“修改密码”（需要验证原密码）');
+    if (typeof b.password !== 'string') throw new HttpError(400, '密码格式不正确');
     const err = checkPasswordPolicy(b.password, u.username);
     if (err) throw new HttpError(400, err);
+    sensitive ||= 'user.reset';
+  }
+  if (sensitive) {
+    if (!b.confirmPassword) throw new HttpError(400, sensitive === 'user.promote' ? '设为管理员需要输入当前登录密码确认' : '重置他人密码需要输入当前登录密码确认');
+    await confirmCurrentPassword(ctx, b.confirmPassword, sensitive, '当前登录密码不正确');
+  }
+  if (b.password != null) {
     fields.pass_hash = await hashPassword(b.password);
-    fields.must_change = self ? 0 : 1;
+    fields.failed_count = 0; fields.locked_until = null; // 管理员重置密码同时解除锁定
+    fields.must_change = 1;
     fields.pw_changed_at = Date.now();
   }
   store.updateUser(u.id, fields);
@@ -998,8 +1270,9 @@ route('DELETE', '/api/admin/users/:id', async (req, res, ctx) => {
   const u = store.userById(ctx.params.id);
   if (!u) throw new HttpError(404, '用户不存在');
   if (u.id === ctx.user.id) throw new HttpError(400, '不能删除自己');
-  if (u.role === 'admin' && store.countAdmins() <= 1) throw new HttpError(400, '至少需要保留一个管理员');
+  if (u.role === 'admin' && !u.disabled && store.countAdmins() <= 1) throw new HttpError(400, '至少需要保留一个管理员');
   store.deleteUser(u.id);
+  pwFails.delete(u.id);
   store.audit(ctx.user.username, ctx.ip, 'user.delete', { username: u.username });
   return json(req, res, 200, { ok: true });
 }, { admin: true });
@@ -1058,35 +1331,39 @@ async function handle(req, res) {
     return send(req, res, 200, metricsText(), 'text/plain; version=0.0.4; charset=utf-8', { 'Cache-Control': 'no-store' });
   }
   if (!['GET', 'HEAD', 'POST', 'PUT', 'DELETE'].includes(req.method)) return send(req, res, 405, 'Method Not Allowed', 'text/plain', { Allow: 'GET, HEAD, POST, PUT, DELETE' });
-  if (rateLimited(ip)) return json(req, res, 429, { error: '请求过于频繁' });
+  // HEAD 与 GET 走同一路由（响应不带正文）；只读方法不做跨站 / CSRF 校验
+  const method = req.method === 'HEAD' ? 'GET' : req.method;
+  const isStatic = method === 'GET' && (PUBLIC_ROUTES[p] || PRIVATE_ROUTES[p] || MODULE_RE.test(p));
+  // 静态资源（页面与前端模块，带 ETag 缓存）不计入接口限流：多人共用出口 IP 时不能因为加载模块触发 429 导致页面无法启动
+  if (!isStatic && rateLimited(ip, config.rateLimitPerMin)) return json(req, res, 429, { error: '请求过于频繁' });
 
   const token = sessionToken(req);
   // 前端后台轮询带 X-Background: 1，不刷新空闲计时：无人操作的页面会按 SESSION_IDLE_MINUTES 正常过期
   const session = token ? store.getSession(token, config.sessionIdleMinutes * 60_000, req.headers['x-background'] !== '1') : null;
 
-  if ((req.method === 'GET' || req.method === 'HEAD') && PUBLIC_ROUTES[p]) {
+  if (method === 'GET' && PUBLIC_ROUTES[p]) {
     if (p === '/login' && session) { res.writeHead(302, { Location: '/' }); return res.end(); }
     return sendFile(req, res, PUBLIC_ROUTES[p]);
   }
-  if ((req.method === 'GET' || req.method === 'HEAD') && PRIVATE_ROUTES[p]) {
+  if (method === 'GET' && PRIVATE_ROUTES[p]) {
     if (!session) { res.writeHead(302, { Location: '/login' }); return res.end(); }
     return sendFile(req, res, PRIVATE_ROUTES[p]);
   }
-  if ((req.method === 'GET' || req.method === 'HEAD') && MODULE_RE.test(p)) {
+  if (method === 'GET' && MODULE_RE.test(p)) {
     if (!session) return send(req, res, 401, 'Unauthorized', 'text/plain; charset=utf-8');
     if (!fs.existsSync(path.join(PUBLIC_DIR, p.slice(1)))) return send(req, res, 404, 'Not Found', 'text/plain; charset=utf-8');
     return sendFile(req, res, p.slice(1));
   }
   if (!p.startsWith('/api/')) return send(req, res, 404, 'Not Found', 'text/plain; charset=utf-8');
 
-  const r = routes.find(x => x.method === req.method && x.re.test(p));
+  const r = routes.find(x => x.method === method && x.re.test(p));
   if (!r) return json(req, res, 404, { error: '接口不存在' });
   const ctx = { ip, url, params: p.match(r.re).groups || {}, session };
-  if (req.method !== 'GET' && !sameOrigin(req)) return json(req, res, 403, { error: '跨站请求被拒绝' });
+  if (method !== 'GET' && !sameOrigin(req)) return json(req, res, 403, { error: '跨站请求被拒绝' });
   if (!r.opts.public) {
     if (!session) return json(req, res, 401, { error: '未登录或会话已过期', code: 'Unauthorized' });
     ctx.user = { id: session.user_id, username: session.username, role: session.role, mustChange: !!session.must_change };
-    if (req.method !== 'GET' && !safeEqual(req.headers['x-csrf-token'] || '', session.csrf)) return json(req, res, 403, { error: 'CSRF 校验失败，请刷新页面', code: 'CsrfFailed' });
+    if (method !== 'GET' && !safeEqual(req.headers['x-csrf-token'] || '', session.csrf)) return json(req, res, 403, { error: 'CSRF 校验失败，请刷新页面', code: 'CsrfFailed' });
     if (ctx.user.mustChange && !r.opts.allowMustChange) return json(req, res, 403, { error: '请先修改初始密码', code: 'MustChangePassword' });
     if (r.opts.admin && ctx.user.role !== 'admin') return json(req, res, 403, { error: '需要管理员权限', code: 'Forbidden' });
   }
@@ -1095,7 +1372,11 @@ async function handle(req, res) {
 
 const server = http.createServer((req, res) => {
   handle(req, res).catch(e => {
-    if (e instanceof HttpError) return json(req, res, e.status, { error: e.message, code: e.code });
+    if (e instanceof HttpError) {
+      if (res.headersSent) return res.end();
+      // 请求体过大时剩余的请求体由 Node 读取并丢弃（受 requestTimeout 限制）：客户端上传完毕后能收到 413，而不是连接被重置
+      return json(req, res, e.status, { error: e.message, code: e.code });
+    }
     log('请求处理异常', req.method, req.url, e.stack || e);
     if (!res.headersSent) json(req, res, 500, { error: '服务器内部错误' });
     else res.end();

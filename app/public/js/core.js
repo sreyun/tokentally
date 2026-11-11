@@ -16,16 +16,20 @@ export const num = v => { const n = typeof v === 'number' ? v : parseFloat(v); r
 /* ---------- 格式化 ---------- */
 const CUR = { CNY: '¥', USD: '$', JPY: '¥', EUR: '€' };
 export const curSym = () => CUR[state.currency] ?? '';
+/** 数字格式器按小数位缓存：toLocaleString 带参数时每次调用都会新建格式器，大表格与治理检查中会被调用成千上万次 */
+const moneyFmts = new Map();
+const moneyFmt = d => { let f = moneyFmts.get(d); if (!f) moneyFmts.set(d, f = new Intl.NumberFormat('zh-CN', { minimumFractionDigits: d, maximumFractionDigits: d })); return f; };
 export function money(n, d = 2) {
   const v = Math.abs(n) < 0.5 * 10 ** -d ? 0 : n;
-  return (v < 0 ? '-' : '') + curSym() + Math.abs(v).toLocaleString('zh-CN', { minimumFractionDigits: d, maximumFractionDigits: d });
+  return (v < 0 ? '-' : '') + curSym() + moneyFmt(d).format(Math.abs(v));
 }
 export const moneyFine = n => money(n, Math.abs(n) > 0 && Math.abs(n) < 0.01 ? 6 : 4);
 const compactFmt = new Intl.NumberFormat('zh-CN', { notation: 'compact', maximumFractionDigits: 2 });
 export const compact = n => (n == null ? '-' : compactFmt.format(n));
 export const moneyShort = n => (Math.abs(n) >= 1e5 ? (n < 0 ? '-' : '') + curSym() + compact(Math.abs(n)) : money(n));
 export const signedMoney = n => (n > 0 ? '+' : n < 0 ? '−' : '') + money(Math.abs(n));
-export const intFmt = n => (n == null ? '-' : Math.round(n).toLocaleString('zh-CN'));
+const intFmter = new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 0 });
+export const intFmt = n => (n == null ? '-' : intFmter.format(Math.round(n)));
 export const numFmt = (n, d = 3) => (n == null ? '-' : Number(n).toLocaleString('zh-CN', { maximumFractionDigits: d }));
 export const pct = (a, b, d = 1) => (b ? (a / b * 100).toFixed(d) + '%' : '-');
 export function fmtTime(v, withTime = true) {
@@ -270,6 +274,7 @@ export function applyData(d) {
   state.today = d.today;
   state.workspaces = new Map(d.workspaces.map(w => [w.workspaceId, { ...w, source: w.deletedAt ? 'deleted' : 'api' }]));
   state.apiKeys = new Map(d.apiKeys.map(k => [k.apiKeyId, { ...k, source: k.deletedAt ? 'deleted' : 'api' }]));
+  state.extraTags = new Map((d.extraTags || []).map(t => [t.apiKeyId, t]));
   state.lines = mapLines(d.lines);
   state.daily = d.daily ? mapLines(d.daily) : state.lines;
   const usePrevMtd = d.period.mode === 'month' && d.period.isCurrent && d.prevMtd;
@@ -347,6 +352,32 @@ export const REQ_SRC = '腾讯云来自 TokenHub 用量统计；阿里云来自�
 export const callsOn = p => p === 'tencent' || (p === 'aliyun' && !!state.status?.calls?.aliyun);
 /** 失败次数是否可信：阿里云只有配置了失败次数指标才有 */
 export const failsKnown = us => !us?.providers?.has('aliyun') || !!state.status?.calls?.aliyunFails;
+/**
+ * 单次平均费用的分子：只合计有调用次数数据的日期的费用。调用次数常常只覆盖周期的一部分（如阿里云从开启监控投递之日起才有数据、
+ * 数据源中断），用整个周期的费用除以部分日期的请求数会把单次费用放大数倍。dailyLines 为该实体的按日账单行（已按筛选过滤）
+ */
+export function coveredCost(dailyLines, us) {
+  if (!us?.days?.size) return 0;
+  let c = 0;
+  for (const l of dailyLines || []) if (us.days.has(l.date)) c += metricVal(l);
+  return c;
+}
+/**
+ * 单次平均指标（请求数实时、今天的账单延迟数小时入账）：不计今天，分子只用有调用数据的日期的费用。
+ * Token 结构（输入 / 输出 / 缓存）按总 Token 比例扣除今天的部分
+ */
+export function perCallCovered(us, dailyLines) {
+  const d = us?.days?.get(state.today);
+  let u = us;
+  if (d && us.requests - d.requests > 0) {
+    const r = us.tokens ? (us.tokens - d.tokens) / us.tokens : 1;
+    const days = new Map(us.days); days.delete(state.today);
+    u = { ...us, requests: us.requests - d.requests, fails: us.fails - d.fails, tokens: us.tokens - d.tokens, input: us.input * r, output: us.output * r, cache: us.cache * r, days };
+  }
+  return perCall(u, coveredCost(dailyLines, u));
+}
+/** 失败率：失败次数可信时返回失败请求占比，否则 null（页面显示“—”，不能把“未采集”显示成 0%） */
+export const failRateOf = us => (us && us.requests && failsKnown(us) ? us.fails / us.requests : null);
 /** 用量统计口径：请求数可用时计算单次平均 Token / 费用（Token 取用量统计 / 同日同 Key 同模型的账单 Token，费用取账单） */
 export function perCall(us, cost) {
   if (!us || !us.requests) return null;
@@ -355,10 +386,12 @@ export function perCall(us, cost) {
 }
 
 function finalize() {
-  const all = [...state.lines, ...state.daily, ...state.prev, ...state.prevDaily, ...state.history];
+  // 包含上一个完整周期（本月进行中时 prevFull 与 prev 不同）：否则按业务空间 / 成本中心 / 负责人筛选时“上月全月”数据无法关联
+  const all = [...new Set([...state.lines, ...state.daily, ...state.prev, ...state.prevFull, ...state.prevDaily, ...state.history])];
   for (const l of all) {
     if (l.apiKeyId && !state.apiKeys.has(l.apiKeyId)) {
-      state.apiKeys.set(l.apiKeyId, { apiKeyId: l.apiKeyId, provider: l.provider, apiKeyValue: '', description: '', workspaceId: l.workspaceId, workspaceName: '', disabled: null, source: 'bill', accessIps: [], accessibleModels: [], costCenter: '', owner: '', note: '' });
+      const t = state.extraTags?.get(l.apiKeyId); // 只出现在账单中的 Key 也可以有本地标签
+      state.apiKeys.set(l.apiKeyId, { apiKeyId: l.apiKeyId, provider: l.provider, apiKeyValue: '', description: '', workspaceId: l.workspaceId, workspaceName: '', disabled: null, source: 'bill', accessIps: [], accessibleModels: [], costCenter: t?.costCenter || '', owner: t?.owner || '', note: t?.note || '' });
     }
     const k = l.apiKeyId ? state.apiKeys.get(l.apiKeyId) : null;
     if (k && (!k.workspaceId || k.workspaceId === '-') && l.workspaceId) k.workspaceId = l.workspaceId;
@@ -404,6 +437,17 @@ export function wsName(wsKey) {
 }
 const colorFrom = (map, id) => { const i = map.get(id); return i == null ? 'var(--other)' : `var(--s${i + 1})`; };
 export const keyColor = id => colorFrom(state.colors.key, id || NONE_KEY);
+/**
+ * 当前范围内的系列配色：已有全局颜色的实体保持原色（跨视图一致），空闲色位依次分给范围内费用较高的其余实体，最多 8 色。
+ * 筛选 / 下钻到全局前 7 名以外的实体时，图表仍按实体区分，而不是全部并成一个灰色“其他”
+ */
+export function scopeColors(ranked, colorFn, max = 8) {
+  const out = new Map();
+  for (const id of ranked) { const c = colorFn(id); if (c !== "var(--other)") out.set(id, c); }
+  const free = [1, 2, 3, 4, 5, 6, 7, 8].map(i => `var(--s${i})`).filter(c => ![...out.values()].includes(c));
+  for (const id of ranked) { if (!free.length || out.size >= max) break; if (!out.has(id)) out.set(id, free.shift()); }
+  return out;
+}
 const PROV_COLOR = { aliyun: 'var(--s2)', tencent: 'var(--s1)' };
 export const ccName = cc => (cc && cc !== NO_CC ? cc : '（未分配成本中心）');
 export const ownerName = o => (o && o !== NO_OWNER ? o : '（未指定负责人）');
@@ -412,7 +456,7 @@ export const DIMS = {
   key: { label: 'API Key', of: l => l.apiKeyId || NONE_KEY, short: keyShort, color: keyColor },
   model: { label: '模型', of: l => l.model, short: id => id, color: id => colorFrom(state.colors.model, id) },
   ws: { label: '业务空间', of: l => l.wsKey, short: id => wsName(id === NO_WS ? '' : id), color: id => colorFrom(state.colors.ws, id === NO_WS ? '' : id) },
-  provider: { label: '云厂商', of: l => l.provider, short: id => PROVIDERS[id] || id, color: id => PROV_COLOR[id] || 'var(--other)' },
+  provider: { label: '云厂商', of: l => l.provider, short: id => (Object.hasOwn(PROVIDERS, id) ? PROVIDERS[id] : id), color: id => PROV_COLOR[id] || 'var(--other)' },
   cc: { label: '成本中心', of: l => l.cc, short: ccName, color: id => hashColor(id === NO_CC ? '' : id) },
   owner: { label: '负责人', of: l => l.owner, short: ownerName, color: id => hashColor(id === NO_OWNER ? '' : id) },
 };
@@ -433,7 +477,7 @@ export const keyDimVal = {
   provider: k => k.provider || 'aliyun', ws: k => k.wsKey || NO_WS, cc: k => k.costCenter || NO_CC, owner: k => k.owner || NO_OWNER, key: k => k.apiKeyId,
 };
 export const dimName = (dim, v) => (dim === 'ws' ? (v === NO_WS ? '（未归属业务空间）' : wsName(v)) : dim === 'cc' ? ccName(v) : dim === 'owner' ? ownerName(v)
-  : dim === 'provider' ? PROVIDERS[v] || v : dim === 'key' ? keyShort(v) : v);
+  : dim === 'provider' ? (Object.hasOwn(PROVIDERS, v) ? PROVIDERS[v] : v) : dim === 'key' ? keyShort(v) : v);
 export const DIM_LABEL = { provider: '云厂商', ws: '业务空间', cc: '成本中心', owner: '负责人', key: 'API Key', model: '模型' };
 const scopeObj = s => (typeof s === 'string' ? { key: s } : s || null);
 const lineIn = (l, s) => SCOPE_DIMS.every(d => s[d] == null || dimVal[d](l) === s[d]);
@@ -535,13 +579,12 @@ export function filterWith(arr, f) {
     if (f.channel != null && f.channel !== '__all' && l.channel !== f.channel) return false;
     if (f.dir && l.ioi.dir !== f.dir) return false;
     if (f.item && l.io !== f.item) return false;
-    if (q) {
-      const hay = `${l.apiKeyId} ${keyDesc(l.apiKeyId)} ${l.model} ${wsName(l.wsKey)} ${l.workspaceId} ${l.instanceId || ''} ${l.io} ${l.ioi.label} ${l.channel} ${l.cc} ${l.owner || ''} ${PROVIDERS[l.provider] || ''}`.toLowerCase();
-      if (!hay.includes(q)) return false;
-    }
+    // 搜索文本在数据加载时按行生成一次（finalize），不在每次过滤 / 级联计算时重新拼接；不含实例 ID（只有部分数据集带实例 ID，会让各图表口径不一致）
+    if (q && !(l.hay ??= hayOf(l)).includes(q)) return false;
     return true;
   });
 }
+const hayOf = l => `${l.apiKeyId} ${keyDesc(l.apiKeyId)} ${l.model} ${wsName(l.wsKey)} ${l.workspaceId} ${l.io} ${l.ioi.label} ${l.channel} ${l.cc} ${l.owner || ''} ${PROVIDERS[l.provider] || ''}`.toLowerCase();
 export const activeFilterCount = () => ['provider', 'ws', 'key', 'model', 'cc', 'owner', 'dir', 'item', 'q'].filter(k => ui.f[k]).length + (ui.f.channel !== '__all' ? 1 : 0);
 
 export function newAgg(key) {
@@ -614,7 +657,8 @@ export function forecastOf(dailyLines, valFn = metricVal) {
   const full = sum(dailyLines.filter(l => l.date && l.date <= yesterday), valFn);
   const today = sum(dailyLines.filter(l => l.date === state.today), valFn);
   const avg = full / fullDays;
-  return { value: full + today + avg * Math.max(0, p.daysInPeriod - fullDays - 1), avg, fullDays };
+  // 今天尚未结束且账单有数小时延迟：今天按“已出账与日均的较大值”计，否则预测会少算今天未出账的部分（与服务端告警一致）
+  return { value: full + Math.max(today, avg) + avg * Math.max(0, p.daysInPeriod - fullDays - 1), avg, fullDays };
 }
 /** 预算按应付金额（税前）计；keyId 为空表示整体月度预算 */
 export const budgetOf = keyId => (keyId ? state.budgets.keys?.[keyId] ?? null : state.budgets.monthly ?? null);

@@ -61,13 +61,21 @@ docker compose --profile https up -d --build
 ```nginx
 location / {
     proxy_pass http://127.0.0.1:8080;
-    proxy_set_header Host $host;
+    proxy_set_header Host $http_host;   # 保留端口：非 443/80 端口访问时同源校验需要完整的 Host
     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     proxy_set_header X-Forwarded-Proto $scheme;
 }
 ```
 
 > 客户端 IP 取 `X-Forwarded-For` **从右往左**第 N 个地址（N = 可信代理层数）：最左侧的地址可由客户端随意填写，不能用于登录限流与 IP 白名单。只有一层代理时 `TRUST_PROXY=true` 即可；多层代理（如 SLB → Nginx → 本服务）时设为层数，例如 `TRUST_PROXY=2`。
+>
+> 只有来自可信代理地址的请求才会采用 `X-Forwarded-*` 头：默认信任本机、内网（10/8、172.16/12、192.168/16）与 100.64.0.0/10（阿里云 SLB 等）。代理不在这些网段时，用 `TRUSTED_PROXIES` 指定代理地址；服务端口可被公网直接访问时也应设置，避免客户端伪造这些头绕过 IP 白名单与登录限流。
+
+**账号被锁定**：连续输错密码会临时锁定账号（`LOGIN_LOCK_MINUTES`，默认 15 分钟），管理员可在“用户管理”中解锁其他用户。唯一的管理员被锁定时，在服务器上执行：
+
+```bash
+docker compose exec app node src/server.mjs --unlock-user=admin
+```
 
 建议同时配置 `ALLOW_CIDRS` 限制访问来源（如办公网出口 IP）。健康检查 `/healthz`、`/readyz` 不受白名单限制，`/metrics` 仍受白名单与令牌双重保护（请把 Prometheus 所在地址加入白名单）。
 

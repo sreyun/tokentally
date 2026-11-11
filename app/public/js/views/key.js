@@ -3,7 +3,7 @@ import {
   $, esc, state, ui, app, http, money, moneyShort, compact, intFmt, pct, sum, uniq, metricVal, METRICS, NONE_KEY, DIMS, keyObj, keyShort, keyDesc, wsName,
   aggregate, aggAll, sortedAggs, totalTokens, deltaPill, tipRows, icon, help, segCtl, fmtTime, budgetOf, budgetLevel, forecastOf, channelLabel,
   WEEK, weekday, ioInfo, num, periodTag, daysBetween, copyBtn, PROVIDERS, provTag, isAdmin, usageAgg, normModel, REQ_SRC,
-  dimLink, NO_WS, groupHash,
+  dimLink, NO_WS, groupHash, callsOn, perCallCovered, coveredCost, failRateOf, perCall,
 } from '../core.js';
 import { columnChart, rankList, segbar, legendList, legendHtml, bindLegend, bindActivate } from '../charts.js';
 import { table, dataBar } from '../table.js';
@@ -11,6 +11,7 @@ import { billDimsHtml, itemKey, itemUsage } from './models.js';
 import { editTags } from './keys.js';
 import { tokenStatsHtml, drawDailyTokens, drawDailyRequests, reqHelp } from '../stats.js';
 
+const ID_COLL = new Intl.Collator('en', { numeric: true });
 export function render(v, id) {
   const k = keyObj(id);
   if (!k && id !== NONE_KEY) { v.innerHTML = `<button class="back" data-back="#/keys">${icon('chevL')}返回</button><div class="panel empty"><h2>未找到该 API Key</h2><div>ID ${esc(id)} 不在已同步的 Key 列表和当前账单中。</div><div class="row" style="justify-content:center;margin-top:14px"><button class="btn primary" data-go="#/keys">查看全部 API Key</button></div></div>`; return; }
@@ -25,11 +26,17 @@ export function render(v, id) {
   const perM = tokens ? a.cost / tokens * 1e6 : null, pPerM = ptokens ? pa.cost / ptokens * 1e6 : null;
   const hit = a.tIn ? a.tCache / a.tIn : null, pHit = pa.tIn ? pa.tCache / pa.tIn : null;
   const budget = p.mode === 'month' ? budgetOf(id) : null;
-  const fc = forecastOf(daily, l => l.pretax);
+  // 预算按应付金额比较；其余情况与页面上其他指标一样按当前费用口径预测
+  const fc = forecastOf(daily, budget ? l => l.pretax : metricVal);
   const act = state.keyActivity.get(id);
-  const kRows = state.usageRows.filter(u => u.apiKeyId === id);
+  // 该云厂商没有调用次数数据源时不使用库里残留的用量行（与总览、业务分析一致）
+  const kRows = id !== NONE_KEY && callsOn(k?.provider || 'aliyun') ? state.usageRows.filter(u => u.apiKeyId === id) : [];
   const us = kRows.length ? usageAgg(kRows, () => id).get(id) : null;
   const usByModel = usageAgg(kRows, u => normModel(u.model));
+  const fr = failRateOf(us), pcAll = perCallCovered(us, daily);
+  // 最近同步：使用云厂商元数据同步的最近成功时间（实时）；已删除的 Key 显示最后一次被同步到的时间
+  const metaOkAt = state.status?.sync?.providers?.[k?.provider || 'aliyun']?.meta?.lastSuccessAt || null;
+  const lastSync = k?.deletedAt ? k?.lastSeen : (metaOkAt || k?.lastSeen);
   const days = uniq(daily.map(l => l.date)).sort();
   const statusPill = id === NONE_KEY ? '<span class="pill neutral">非 Key 调用</span>'
     : k.source === 'deleted' ? `<span class="pill bad">已删除 ${fmtTime(k.deletedAt, false)}</span>` : k.source === 'bill' ? '<span class="pill warn">不在 Key 列表</span>'
@@ -38,7 +45,7 @@ export function render(v, id) {
   // 上一个 / 下一个：按本期费用从高到低，其次按 ID
   const costOf = new Map(allByKey.map(x => [x.key, x.cost]));
   const order = [...state.apiKeys.keys(), ...(costOf.has(NONE_KEY) ? [NONE_KEY] : [])]
-    .sort((x, y) => (costOf.get(y) || 0) - (costOf.get(x) || 0) || String(y).localeCompare(String(x), 'en', { numeric: true }));
+    .sort((x, y) => (costOf.get(y) || 0) - (costOf.get(x) || 0) || ID_COLL.compare(String(y), String(x)));
   const pos = order.indexOf(id), prevId = pos > 0 ? order[pos - 1] : null, nextId = pos >= 0 && pos < order.length - 1 ? order[pos + 1] : null;
 
   v.innerHTML = `
@@ -62,7 +69,7 @@ export function render(v, id) {
     ${lines.some(l => l.alloc === 2) ? `<div class="notice warn">${icon('warn')}<div><b>费用为目录价估算</b><span class="why">腾讯云 CAM 子用户缺少计费只读权限，当前按 TokenHub 模型目录价 × 用量估算，未含折扣与阶梯价。</span></div></div>` : ''}
     <div class="kpi-wrap"><div class="kpi-row">
       ${tile('wallet', `本期费用 · ${METRICS[ui.f.metric]}`, money(a.cost), deltaPill(a.cost, pa.cost), state.compareLabel, `上期 ${money(pa.cost)} · 原价 ${moneyShort(a.gross)}`)}
-      ${us ? tile('activity', '请求次数', compact(us.requests), '', '', `成功率 ${us.requests ? ((1 - us.fails / us.requests) * 100).toFixed(2) + '%' : '—'}`)
+      ${us ? tile('activity', '请求次数', compact(us.requests), '', '', fr == null ? `成功率 —${us.requests ? '（未采集失败次数）' : ''}` : `成功率 ${((1 - fr) * 100).toFixed(2)}%`)
         : tile('layers', '费用排名', rank ? `第 ${rank}<small>/ ${allByKey.length}</small>` : '—', '', '', `占全部费用 ${pct(a.cost, totalAll)}`)}
       ${tile('token', 'Token 总量', compact(tokens), deltaPill(tokens, ptokens, { neutral: true }), state.compareLabel, `输入 ${compact(a.tIn)} · 输出 ${compact(a.tOut)}`)}
       ${tile('unit', '每百万 Token 成本', perM == null ? '—' : money(perM), perM == null ? '' : deltaPill(perM, pPerM), perM == null ? '' : state.compareLabel, '费用 ÷ 总 Token × 10⁶')}
@@ -71,7 +78,7 @@ export function render(v, id) {
         : tile('calendar', fc ? '预计本月' : '近 7 天', fc ? money(fc.value) : moneyShort(act?.c7 || 0), '', '', fc ? `日均 ${money(fc.avg)}` : `近 30 天 ${moneyShort(act?.c30 || 0)} · 最近 ${act?.lastDay ? act.lastDay.slice(5) : '—'}`)}
     </div></div>
     <div class="bi">
-      <section class="panel c12"><div class="panel-h"><h3>Token 消耗与调用统计</h3>${help(`Token 来自账单用量；请求次数、成功率与单次平均：${REQ_SRC}。单次平均费用 = 本期费用 ÷ 请求次数。`)}<span class="sub">${esc(p.mode === 'month' ? p.cycle + ' 账期' : `${p.from} ~ ${p.to}`)} · ${METRICS[ui.f.metric]}</span></div>
+      <section class="panel c12"><div class="panel-h"><h3>Token 消耗与调用统计</h3>${help(`Token 来自账单用量；请求次数、成功率与单次平均：${REQ_SRC}。单次平均费用 = 有调用数据的日期的费用 ÷ 请求次数（调用次数只覆盖部分日期时不会被放大）。`)}<span class="sub">${esc(p.mode === 'month' ? p.cycle + ' 账期' : `${p.from} ~ ${p.to}`)} · ${METRICS[ui.f.metric]}</span></div>
         ${tokenStatsHtml({ a, pa, daily, us, period: p, scope: 'key', provider: k?.provider || 'aliyun' })}</section>
       <section class="panel ${us ? 'c6' : 'c12'}"><div class="panel-h"><h3>每日 Token 消耗</h3><span class="sub">按 Token 类型堆叠 · 虚线为日均</span></div><div class="legend" id="kTokLegend"></div><div class="chart" id="kTok"></div></section>
       ${us ? `<section class="panel c6"><div class="panel-h"><h3>每日调用次数</h3>${reqHelp()}<span class="sub">成功 / 失败</span></div><div class="legend" id="kReqLegend"></div><div class="chart" id="kReq"></div></section>` : ''}
@@ -87,7 +94,7 @@ export function render(v, id) {
           <div><span>模型权限</span><b>${!k ? '—' : k.authType === 'All' || k.allowAllModels ? '<span class="warn-text">全部模型</span>' : esc((k.accessibleModels || []).join('、') || '—')}</b></div>
           <div><span>IP 白名单</span><b class="mono">${!k ? '—' : ipOpen ? '<span class="warn-text">不限</span>' : esc(k.accessIps.join(', '))}</b></div>
           <div><span>最近消费 / 近 30 天</span><b>${esc(act?.lastDay || '—')} / ${money(act?.c30 || 0)}</b></div>
-          <div><span>首次同步 / 最近同步</span><b>${fmtTime(k?.firstSeen)} / ${fmtTime(k?.lastSeen)}</b></div>
+          <div><span>首次同步 / 最近同步</span><b>${fmtTime(k?.firstSeen)} / ${fmtTime(lastSync)}</b></div>
         </div>
         <div id="kChanges"><div class="nodata">加载中…</div></div></section>
     </div>`;
@@ -123,7 +130,10 @@ export function render(v, id) {
   // 月度
   const hm = uniq(hist.map(l => l.date)).sort();
   const hRank = sortedAggs(aggregate(hist, l => l.model)).map(x => x.key);
-  const hColored = hRank.slice(0, 6), hSeries = hColored.map(m => ({ id: m, label: m, color: colorOfModel(m) !== 'var(--other)' ? colorOfModel(m) : `var(--s${(hColored.indexOf(m) % 8) + 1})` }));
+  // 本期已有颜色的模型沿用原色；其余模型依次使用未被占用的颜色，避免两个模型同色
+  const usedColors = new Set(colored.map((_, i) => `var(--s${i + 1})`));
+  const freeColors = [1, 2, 3, 4, 5, 6, 7, 8].map(i => `var(--s${i})`).filter(c => !usedColors.has(c));
+  const hColored = hRank.slice(0, 6), hSeries = hColored.map(m => ({ id: m, label: m, color: colorOfModel(m) !== 'var(--other)' ? colorOfModel(m) : (freeColors.shift() || 'var(--other)') }));
   if (hRank.length > 6) hSeries.push({ id: '__other', label: '其他模型', color: 'var(--other)' });
   const hc = new Map(); hist.forEach(l => { const kk = l.date + '|' + (hColored.includes(l.model) ? l.model : '__other'); hc.set(kk, (hc.get(kk) || 0) + metricVal(l)); });
   $('#kHLegend', v).innerHTML = hSeries.length > 1 ? legendHtml(hSeries) : '';
@@ -153,10 +163,11 @@ export function render(v, id) {
         { key: 'costPer', label: '单次均费用', align: 'r', fmt: x => (x == null ? '—' : money(x, x < 0.01 ? 4 : 3)), sortVal: r => r.costPer ?? -1 },
       ] : []),
     ],
-    footer: rs => ['合计', money(sum(rs, r => r.cost)), deltaPill(sum(rs, r => r.cost), sum(rs, r => r.prev)), '', intFmt(sum(rs, r => r.tIn)), '', intFmt(sum(rs, r => r.tOut)), '', '', ...(us ? [intFmt(us.requests), us.requests ? (us.fails / us.requests * 100).toFixed(2) + '%' : '—', us.requests ? intFmt(us.tokens / us.requests) : '—', us.requests ? money(a.cost / us.requests, 4) : '—'] : [])],
+    footer: rs => ['合计', money(sum(rs, r => r.cost)), deltaPill(sum(rs, r => r.cost), sum(rs, r => r.prev)), '', intFmt(sum(rs, r => r.tIn)), '', intFmt(sum(rs, r => r.tOut)), '', '', ...(us ? [intFmt(us.requests), fr == null ? '—' : (fr * 100).toFixed(2) + '%', pcAll ? intFmt(pcAll.tokPer) : '—', pcAll ? money(pcAll.costPer, 4) : '—'] : [])],
   }).setRows(mAgg.map(x => {
     const t = totalTokens(x), um = usByModel.get(normModel(x.key));
-    return { model: x.key, cost: x.cost, prev: pm.get(x.key)?.cost || 0, share: a.cost ? x.cost / a.cost : 0, tIn: x.tIn, tOut: x.tOut, hit: x.tIn ? x.tCache / x.tIn : null, perM: t ? x.cost / t * 1e6 : null, days: uniq(daily.filter(l => l.model === x.key && metricVal(l) > 0).map(l => l.date)).length, req: um ? um.requests : null, fail: um && um.requests ? um.fails / um.requests : null, tokPer: um && um.requests ? um.tokens / um.requests : null, costPer: um && um.requests ? x.cost / um.requests : null };
+    const pc = perCallCovered(um, daily.filter(l => normModel(l.model) === normModel(x.key)));
+    return { model: x.key, cost: x.cost, prev: pm.get(x.key)?.cost || 0, share: a.cost ? x.cost / a.cost : 0, tIn: x.tIn, tOut: x.tOut, hit: x.tIn ? x.tCache / x.tIn : null, perM: t ? x.cost / t * 1e6 : null, days: uniq(daily.filter(l => l.model === x.key && metricVal(l) > 0).map(l => l.date)).length, req: um ? um.requests : null, fail: failRateOf(um), tokPer: pc?.tokPer ?? null, costPer: pc?.costPer ?? null };
   }));
   $('#csvM', v).onclick = () => tm.csv(`Key_${id}_模型明细_${periodTag()}.csv`);
 
@@ -210,8 +221,8 @@ async function loadChanges(v, id) {
   const el = $('#kChanges', v);
   if (!el) return;
   try {
-    if (!state.changes) state.changes = (await http('GET', '/api/changes')).changes;
-    const list = state.changes.filter(c => c.entity === 'api_key' && c.entity_id === id);
+    // 按 Key 查询全部变更（不在最近 2000 条全局变更中查找，较早创建的 Key 也能看到历史）
+    const list = (await http('GET', '/api/changes?entity_id=' + encodeURIComponent(id))).changes.filter(c => c.entity === 'api_key');
     const fmt = s => { try { const o = JSON.parse(s || 'null'); return o ? Object.entries(o).map(([kk, x]) => `${FIELD[kk] || kk}：${x == null || x === '' ? '（空）' : x}`).join('；') : ''; } catch { return ''; } };
     el.innerHTML = list.length ? `<ul class="timeline">${list.map(c => `<li><span class="pill ${CHG[c.change]?.[1] || 'neutral'}">${CHG[c.change]?.[0] || esc(c.change)}</span><div><b>${fmtTime(c.ts)}</b>${c.change === 'update' ? `<div class="muted">${esc(fmt(c.before_json))} → ${esc(fmt(c.after_json))}</div>` : ''}</div></li>`).join('')}</ul>` : '<div class="nodata">暂无变更记录</div>';
   } catch (e) { el.innerHTML = `<div class="nodata bad-text">${esc(e.message)}</div>`; }

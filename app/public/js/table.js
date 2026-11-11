@@ -2,6 +2,8 @@
  * 数据表格：排序、分页、合计行、首列冻结、键盘操作、CSV 导出
  * ========================================================================= */
 import { esc, money, ui, LS, toast } from './core.js';
+/** 文本排序：共用一个排序器（localeCompare 带参数时每次比较都会新建排序器，大表格排序会卡顿十几秒） */
+const COLL = new Intl.Collator('zh-CN', { numeric: true });
 
 const registry = {};
 
@@ -34,7 +36,9 @@ export class DataTable {
     this.el.querySelector(`th[data-k="${CSS.escape(k)}"]`)?.focus();
   }
   setRows(rows) { this.rows = rows; this.render(); return this; }
+  /** 排序结果按 行 / 排序列 / 方向 缓存：翻页、改变每页条数时不重新排序 */
   sorted() {
+    if (this._sorted && this._sorted.rows === this.rows && this._sorted.sort === this.sort && this._sorted.dir === this.dir) return this._sorted.out;
     const rows = this.rows.slice();
     const c = this.sort && this.o.columns.find(c => c.key === this.sort);
     if (c) {
@@ -45,9 +49,10 @@ export class DataTable {
         if (x == null && y == null) return 0;
         if (x == null) return 1;
         if (y == null) return -1;
-        return (typeof x === 'number' && typeof y === 'number' ? x - y : String(x).localeCompare(String(y), 'zh-CN', { numeric: true })) * k;
+        return (typeof x === 'number' && typeof y === 'number' ? x - y : COLL.compare(String(x), String(y))) * k;
       });
     }
+    this._sorted = { rows: this.rows, sort: this.sort, dir: this.dir, out: rows };
     return rows;
   }
   render() {
@@ -105,7 +110,8 @@ export function table(id, el, opts) {
   const t = new DataTable(el, opts);
   t.id = id;
   const saved = LS.get('bc.sort.' + id, null);
-  if (prev) { t.sort = prev.sort; t.dir = prev.dir; t.pageSize = prev.pageSize; }
+  // 沿用上次的排序（仅当该列仍存在，如透视表的列随数据变化）、每页条数与页码（后台刷新 / 窗口变化重绘时不回到第一页）
+  if (prev) { if (opts.columns.some(c => c.key === prev.sort)) { t.sort = prev.sort; t.dir = prev.dir; } t.pageSize = prev.pageSize; t.page = prev.page; }
   else if (saved && opts.columns.some(c => c.key === saved.sort)) { t.sort = saved.sort; t.dir = saved.dir; }
   registry[id] = t;
   return t;

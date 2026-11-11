@@ -7,7 +7,7 @@ import {
   $, esc, state, ui, app, LS, http, money, moneyShort, compact, intFmt, pct, sum, uniq, metricVal, METRICS, NONE_KEY, DIMS,
   keyObj, keyShort, filterLines, aggregate, addAgg, aggAll, sortedAggs, newAgg, totalTokens, topModels, deltaPill, icon, help, segCtl,
   fmtTime, periodTag, copyBtn, PROVIDERS, provTag, multiCloud, hasTags, NO_WS, NO_CC, NO_OWNER, dimVal, keyDimVal, dimName, DIM_LABEL,
-  scopeLines, scopeUsage, groupHash, dimLink, isSet, keyMatch, usageFiltered, usageAgg, callsOn, perCall, daysBetween, WEEK, weekday, channelLabel,
+  scopeLines, scopeUsage, groupHash, dimLink, isSet, keyMatch, usageFiltered, usageAgg, callsOn, perCallCovered, perCall, coveredCost, daysBetween, WEEK, weekday, channelLabel,
 } from '../core.js';
 import { columnChart, rankList, divergingList, segbar, legendList, legendHtml, bindLegend, bindActivate } from '../charts.js';
 import { table, dataBar } from '../table.js';
@@ -25,7 +25,7 @@ export function parseGroupArg(arg) {
   const s = String(arg || ''), i = s.indexOf('/');
   if (i < 0) return null;
   const dim = s.slice(0, i), id = s.slice(i + 1);
-  return GROUP_DIMS[dim] && id ? { dim, id } : null;
+  return Object.hasOwn(GROUP_DIMS, dim) && id ? { dim, id } : null; // hasOwn：constructor 等原型属性名不是维度
 }
 /** 用量行（请求次数）在分组维度上的取值：通过 Key 元数据关联 */
 const NONE_OF = { ws: NO_WS, cc: NO_CC, owner: NO_OWNER };
@@ -85,6 +85,9 @@ export function render(v) {
     if (!provs.has(g)) provs.set(g, new Set());
     provs.get(g).add(l.provider);
   }
+  // 单次平均费用只用有调用数据的日期的费用：按分组收集按日账单
+  const dailyBy = new Map();
+  for (const l of daily) { const g = of(l); let a = dailyBy.get(g); if (!a) dailyBy.set(g, a = []); a.push(l); }
   const gk = aggregate(lines, l => of(l) + SEP + DIMS.key.of(l));
   const topKeysOf = new Map();
   for (const a of sortedAggs(gk)) { const [g, k] = a.key.split(SEP); if (a.cost <= 0) continue; if (!topKeysOf.has(g)) topKeysOf.set(g, []); if (topKeysOf.get(g).length < 2) topKeysOf.get(g).push(k); }
@@ -93,7 +96,7 @@ export function render(v) {
     const mem = [...(members.get(id) || [])].filter(x => x !== NONE_KEY);
     const t = totalTokens(a);
     const us = callsOk.get(id) ? ub.get(id) : null;
-    const pc = perCall(us, a.cost);
+    const pc = perCallCovered(us, dailyBy.get(id));
     const w = dim === 'ws' && id !== NO_WS ? state.workspaces.get(id) : null;
     const pset = provs.get(id) || new Set(w ? [w.provider || 'aliyun'] : dim === 'provider' ? [id] : []);
     return {
@@ -277,7 +280,7 @@ export function renderDetail(v, arg) {
   // 关联 Key：元数据属于该分组的 Key（含无消费的 Key）+ 本期 / 上期账单中出现的 Key
   const memberIds = new Set([...state.apiKeys.values()].filter(k => keyDimVal[dim](k) === id).map(k => k.apiKeyId));
   for (const l of [...lines, ...prevLines]) memberIds.add(l.apiKeyId || NONE_KEY);
-  if (!memberIds.size && !lines.length && !ws && !(dim === 'provider' && PROVIDERS[id])) {
+  if (!memberIds.size && !lines.length && !ws && !(dim === 'provider' && Object.hasOwn(PROVIDERS, id))) {
     v.innerHTML = notFound(`${G.label}“${dimName(dim, id)}”在当前周期没有关联的 API Key 或费用。`);
     return;
   }
@@ -375,8 +378,10 @@ export function renderDetail(v, arg) {
   // 关联的 API Key
   const byKey = aggregate(lines, DIMS.key.of), pByKey = aggregate(prevLines, DIMS.key.of);
   const calDays = periodDaysOf(p);
+  const dailyByKey = new Map();
+  for (const l of daily) { const kk = l.apiKeyId || NONE_KEY; let arr = dailyByKey.get(kk); if (!arr) dailyByKey.set(kk, arr = []); arr.push(l); }
   const krows = [...memberIds].map(k => {
-    const ko = keyObj(k) || {}, x = byKey.get(k) || newAgg(k), t = totalTokens(x), u = callsOk ? usByKey.get(k) : null, pc = perCall(u, x.cost), act = state.keyActivity.get(k);
+    const ko = keyObj(k) || {}, x = byKey.get(k) || newAgg(k), t = totalTokens(x), u = callsOk ? usByKey.get(k) : null, pc = perCallCovered(u, dailyByKey.get(k)), act = state.keyActivity.get(k);
     const [status, stc] = keyStatus(k);
     return {
       id: k, desc: keyShort(k), provider: ko.provider || (k === NONE_KEY ? '' : 'aliyun'), hasDesc: !!ko.description, status, stc,

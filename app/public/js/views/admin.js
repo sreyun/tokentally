@@ -28,11 +28,25 @@ export async function render(v, tab) {
 
 /* ---------------- 云厂商接入（通用表单逻辑） ---------------- */
 const SECRET = { ok: ['已配置 · 加密保存', 'on'], none: ['未配置', 'off'], undecryptable: ['无法解密（主密钥已变化），请重新配置', 'off'] };
+/** 每个表单单独记录未保存状态：保存其中一个表单后，页面上其他表单的未保存修改仍受离开确认保护 */
+const markDirty = form => { form.dataset.dirty = '1'; app.dirty = true; };
+const markClean = form => { delete form.dataset.dirty; app.dirty = !!document.querySelector('#view form[data-dirty]'); };
+/** 操作成功后的刷新：等待完成，失败时在页面上提示（不能成为未处理的 Promise 拒绝，也不能悄悄停留在旧内容） */
+async function refresh(box, fn) {
+  try { await fn(); }
+  catch (e) { box.insertAdjacentHTML('afterbegin', `<div class="notice err">${icon('warn')}<div><b>刷新失败</b><span class="why">${esc(e.message)}（操作已完成，可稍后重新打开本页查看）</span></div></div>`); }
+}
+/** 敏感操作的当前登录密码确认；取消时返回 null */
+const askPassword = (title, why) => modal({
+  title, submit: '确认',
+  body: `<p class="hint" style="margin:0 0 10px">${esc(why)}</p><label class="field"><span>当前登录密码</span><input class="inp" type="password" name="password" autocomplete="current-password" required maxlength="256"></label>`,
+  onSubmit: form => { const p = form.elements.password.value; if (!p) throw new Error('请输入当前登录密码'); return { password: p }; },
+}).then(r => r?.password || null);
 function bindCredForm(el, { form, idField, secretField, settingsKey, reload, testBody }) {
   const confirmBox = $('[data-confirm]', form), pw = form.elements.confirmPassword;
   const touched = () => !!(form.elements[idField].value.trim() || form.elements[secretField].value.trim());
   form.addEventListener('input', e => {
-    app.dirty = true;
+    markDirty(form);
     if (e.target === pw) { pw.classList.remove('invalid'); return; }
     confirmBox.hidden = !touched();
     if (confirmBox.hidden) pw.value = '';
@@ -49,9 +63,9 @@ function bindCredForm(el, { form, idField, secretField, settingsKey, reload, tes
     btn.disabled = true;
     try {
       await http('PUT', '/api/admin/settings', { [settingsKey]: body });
-      app.dirty = false;
+      markClean(form);
       toast(changing ? '已保存，密钥已加密存储，正在重新同步' : '配置已保存');
-      await app.refreshStatus(); reload();
+      await app.refreshStatus(); await reload();
     } catch (ex) {
       if (ex.status === 403) { pw.value = ''; pw.classList.add('invalid'); pw.focus(); }
       toast('保存失败：' + ex.message, 'err', 4000);
@@ -72,6 +86,15 @@ function bindCredForm(el, { form, idField, secretField, settingsKey, reload, tes
 /* ---------------- 阿里云接入 ---------------- */
 async function aliyun(el) {
   const s = await http('GET', '/api/admin/settings');
+  el.innerHTML = '<div id="akBox"></div><div class="bi" style="margin-top:16px" id="callsBox"></div>';
+  const akBox = $('#akBox', el), callsBox = $('#callsBox', el);
+  // 两个表单各自刷新：保存其中一个时不能重绘另一个（会丢失另一个表单中未保存的输入）
+  const reloadAk = () => refresh(akBox, async () => akPanel(akBox, await http('GET', '/api/admin/settings'), reloadAk));
+  const reloadCalls = () => refresh(callsBox, async () => callsPanel(callsBox, (await http('GET', '/api/admin/settings')).aliyunCalls, reloadCalls));
+  akPanel(akBox, s, reloadAk);
+  callsPanel(callsBox, s.aliyunCalls, reloadCalls);
+}
+function akPanel(el, s, reload) {
   const a = s.aliyun, ss = SECRET[a.secretState] || ['-', ''];
   el.innerHTML = `<div class="bi">
     <section class="panel c7"><div class="panel-h"><h3>阿里云 RAM 用户 AccessKey</h3>${help('使用 RAM 用户 AccessKey 调用百炼与费用中心只读接口；Secret 只写不回显，以 AES-256-GCM 加密后存入 SQLite，主密钥与数据分离保存。')}</div>
@@ -95,13 +118,12 @@ async function aliyun(el) {
       <p class="hint" style="margin:0 0 10px">系统策略 <b>AliyunBailianReadOnlyAccess</b> + <b>AliyunBSSReadOnlyAccess</b>，或下方最小权限自定义策略：</p>
       <pre class="code">${esc(JSON.stringify(POLICY, null, 2))}</pre>
       <p class="hint" style="margin:10px 0 0">建议为本系统创建专用 RAM 用户，只授予只读权限并定期轮换 AccessKey。更换 Key 后系统会立即重新同步。</p>
-    </section></div>
-    <div class="bi" style="margin-top:16px" id="callsBox"></div>`;
+    </section></div>`;
   bindCredForm(el, {
-    form: $('#akForm', el), idField: 'accessKeyId', secretField: 'accessKeySecret', settingsKey: 'aliyun', reload: () => aliyun(el),
-    testBody: fd => (fd ? { provider: 'aliyun', accessKeyId: fd.accessKeyId, accessKeySecret: fd.accessKeySecret } : { provider: 'aliyun' }),
+    form: $('#akForm', el), idField: 'accessKeyId', secretField: 'accessKeySecret', settingsKey: 'aliyun', reload,
+    // 表单测试使用表单中选择的地域 / 站点（与保存后实际使用的一致）
+    testBody: fd => (fd ? { provider: 'aliyun', accessKeyId: fd.accessKeyId, accessKeySecret: fd.accessKeySecret, msRegion: fd.msRegion, bssSite: fd.bssSite } : { provider: 'aliyun' }),
   });
-  callsPanel($('#callsBox', el), s.aliyunCalls, () => aliyun(el));
 }
 
 /* ---------------- 阿里云调用次数：百炼监控投递 → 云监控 Prometheus ---------------- */
@@ -174,7 +196,7 @@ function callsPanel(box, c, reload) {
     confirmBox.hidden = !needConfirm();
   };
   sync();
-  form.addEventListener('input', e => { app.dirty = true; if (e.target === pw) pw.classList.remove('invalid'); else sync(); });
+  form.addEventListener('input', e => { markDirty(form); if (e.target === pw) pw.classList.remove('invalid'); else sync(); });
   form.addEventListener('change', sync);
 
   const fill = (list, el) => { $(el, form).innerHTML = [...new Set(list)].map(x => `<option value="${esc(x)}"></option>`).join(''); };
@@ -195,13 +217,13 @@ function callsPanel(box, c, reload) {
         const f = form.elements;
         if (x.fail) f.failMetric.value = x.name;
         else { f.metric.value = x.name; f.keyLabel.value = x.keyLabel || f.keyLabel.value; f.modelLabel.value = x.modelLabel || f.modelLabel.value; f.aggregation.value = /_total$|_count$|counter/i.test(x.name) ? 'increase' : 'sum'; }
-        app.dirty = true; sync();
+        markDirty(form); sync();
       };
       out.querySelectorAll('[data-use]').forEach(b => { b.onclick = () => use(d.candidates[Number(b.dataset.use)]); });
       if (d.guess && !val('metric')) {
         const f = form.elements;
         Object.assign(f.metric, { value: d.guess.metric }); f.failMetric.value = d.guess.failMetric || ''; f.keyLabel.value = d.guess.keyLabel || ''; f.modelLabel.value = d.guess.modelLabel || ''; f.aggregation.value = d.guess.aggregation;
-        app.dirty = true; sync();
+        markDirty(form); sync();
         toast('已按推荐填写指标映射，请预览核对');
       }
     } catch (ex) { out.innerHTML = `<div class="bad-text">${esc(ex.message)}</div>`; }
@@ -243,7 +265,7 @@ function callsPanel(box, c, reload) {
     try {
       const r = await http('POST', '/api/admin/aliyun-calls/sync', {});
       toast(r.from ? `已同步 ${r.from} ~ ${r.to}：${Number(r.requests).toLocaleString()} 次调用` : '同步完成，但没有查询到调用次数', '', 4000);
-      app.reload?.(); reload();
+      app.reload?.(); await reload();
     } catch (ex) { toast('同步失败：' + ex.message, 'err', 5000); }
   });
 
@@ -257,15 +279,16 @@ function callsPanel(box, c, reload) {
       if (!pw.value) { confirmBox.hidden = false; pw.classList.add('invalid'); pw.focus(); toast('修改地址或认证信息需输入当前登录密码', 'err'); return; }
       body.confirmPassword = pw.value;
     }
-    const remap = c.metric && ['url', 'metric', 'failMetric', 'keyLabel', 'modelLabel', 'aggregation', 'filter'].some(k => String(body[k] || '').replace(/\/+$/, '') !== String(c[k] || ''));
-    if (remap && !confirm('修改了指标映射或地址，保存后将清空已同步的阿里云调用次数并按新配置重新读取。是否继续？')) return;
+    // 只改地址（如公网地址换成 VPC 地址）不清空已同步的调用次数，与服务端一致
+    const remap = c.metric && ['metric', 'failMetric', 'keyLabel', 'modelLabel', 'aggregation', 'filter'].some(k => String(body[k] || '') !== String(c[k] || ''));
+    if (remap && !confirm('修改了指标映射，保存后将清空已同步的阿里云调用次数并按新配置重新读取。是否继续？')) return;
     const btn = form.querySelector('[type=submit]');
     btn.disabled = true;
     try {
       await http('PUT', '/api/admin/settings', { aliyunCalls: body });
-      app.dirty = false;
+      markClean(form);
       toast(body.enabled ? '已保存，将随下一次阿里云账单同步读取调用次数（也可点“立即同步”）' : '配置已保存');
-      await app.refreshStatus(); reload();
+      await app.refreshStatus(); await reload();
     } catch (ex) {
       if (ex.status === 403) { pw.value = ''; pw.classList.add('invalid'); pw.focus(); }
       toast('保存失败：' + ex.message, 'err', 4000);
@@ -309,8 +332,8 @@ async function tencent(el) {
       <pre class="code">${esc(JSON.stringify(TC_POLICY, null, 2))}</pre>
     </section></div>`;
   bindCredForm(el, {
-    form: $('#tcForm', el), idField: 'secretId', secretField: 'secretKey', settingsKey: 'tencent', reload: () => tencent(el),
-    testBody: fd => (fd ? { provider: 'tencent', secretId: fd.secretId, secretKey: fd.secretKey } : { provider: 'tencent' }),
+    form: $('#tcForm', el), idField: 'secretId', secretField: 'secretKey', settingsKey: 'tencent', reload: () => refresh(el, () => tencent(el)),
+    testBody: fd => (fd ? { provider: 'tencent', secretId: fd.secretId, secretKey: fd.secretKey, region: fd.region, site: fd.site } : { provider: 'tencent' }),
   });
 }
 
@@ -382,15 +405,17 @@ async function sync(el) {
     if (b.dataset.pick || b.dataset.all) { const p = $('#syncProv', el).value; if (p) body.provider = p; }
     if (b.dataset.pick) { body.cycles = [$('#syncCycle', el).value]; body.force = $('#syncForce', el).checked; }
     if (b.dataset.all) { body.force = true; if (!confirm('将按回溯月数重新拉取全部账期账单，可能需要数分钟。继续？')) return; }
-    try { const r = await http('POST', '/api/admin/sync', body); toast(r.alreadyRunning ? '已有同类同步任务在运行' : '同步任务已启动'); await app.refreshStatus(); }
+    try { const r = await http('POST', '/api/admin/sync', body); toast(r.queued ? '已有同类任务在运行，本次请求已排队，将在其结束后执行' : r.alreadyRunning ? '已有同类同步任务在运行' : '同步任务已启动', '', 3600); await app.refreshStatus(); }
     catch (ex) { toast('启动失败：' + ex.message, 'err', 4000); }
   });
+  // 同步策略表单同样记录未保存状态：离开或刷新本页前提示
+  $('#syncForm', el).addEventListener('input', () => markDirty($('#syncForm', el)));
   $('#syncForm', el).onsubmit = async e => {
     e.preventDefault();
     const fd = new FormData(e.target);
     try {
       await http('PUT', '/api/admin/settings', { sync: { metaIntervalMin: fd.get('metaIntervalMin'), billIntervalMin: fd.get('billIntervalMin'), backfillMonths: fd.get('backfillMonths'), concurrency: fd.get('concurrency'), perWorkspaceKeys: fd.get('perWorkspaceKeys') === 'on' } });
-      toast('同步策略已保存'); sync(el);
+      markClean(e.target); toast('同步策略已保存'); await refresh(el, () => sync(el));
     } catch (ex) { toast('保存失败：' + ex.message, 'err', 4000); }
   };
 }
@@ -506,6 +531,7 @@ async function budgets(el) {
     const fd = new FormData(e.target);
     const keysB = {};
     rows.forEach(r => { if (r.budget !== '' && r.budget != null) keysB[r.id] = r.budget; });
+    if (Object.keys(keysB).length > 2000) return toast(`最多为 2000 个 Key 设置预算（当前 ${Object.keys(keysB).length} 个），请缩小批量设置的范围`, 'err', 5000);
     try {
       state.budgets = await http('PUT', '/api/admin/budgets', { monthly: fd.get('monthly'), alertPct: fd.get('alertPct'), keys: keysB });
       app.dirty = false;
@@ -576,10 +602,14 @@ async function alerts(el) {
     rules: al.rules, anomaly: al.anomaly, reportHour: al.reportHour, ...extra,
   });
   const save = async (channels, extra, okMsg) => {
+    // 保存渠道会重绘本页：告警规则表单有未保存的修改时先确认，避免被静默丢弃
+    const rf = $('#rForm', el);
+    if (!extra.rules && rf?.dataset.dirty && !confirm('告警规则有未保存的修改，继续将丢弃这些修改。是否继续？')) return;
     const out = await http('PUT', '/api/admin/alerts', payload(channels, extra));
+    if (rf) markClean(rf);
     const r = out.check || {};
     toast(r.error ? `${okMsg}，但发送失败：${r.error}` : r.sent ? `${okMsg}，并已发送 ${r.sent} 条当前满足条件的通知` : okMsg, r.error ? 'err' : '', 4500);
-    alerts(el);
+    await refresh(el, () => alerts(el));
   };
   $('#addCh', el).onclick = () => editChannel(al, null, async ch => save([...al.channels, ch], {}, '渠道已添加'));
   el.querySelectorAll('[data-ch-edit]').forEach(b => b.onclick = () => { const c = al.channels.find(x => x.id === b.dataset.chEdit); editChannel(al, c, async ch => save(al.channels.map(x => (x.id === c.id ? ch : x)), {}, '渠道已保存')); });
@@ -594,6 +624,7 @@ async function alerts(el) {
     try { await http('POST', '/api/admin/alerts/test', { channelId: c.id, type: c.type, atAll: c.atAll, atMobiles: c.atMobiles }); toast(`测试消息已发送到「${c.name}」，请在群中查看`); }
     catch (ex) { toast(ex.message, 'err', 5000); } finally { b.disabled = false; }
   });
+  $('#rForm', el).addEventListener('input', () => markDirty($('#rForm', el)));
   $('#rForm', el).onsubmit = async e => {
     e.preventDefault();
     const fd = new FormData(e.target);
@@ -602,21 +633,24 @@ async function alerts(el) {
       anomaly: { ratio: Number(fd.get('ratio')), minAmount: Number(fd.get('minAmount')), keys: fd.get('anomalyKeys') === 'on' },
       reportHour: Number(fd.get('reportHour')),
     };
-    try { await save(al.channels, extra, '告警规则已保存'); } catch (ex) { toast('保存失败：' + ex.message, 'err', 4000); }
+    try { markClean(e.target); await save(al.channels, extra, '告警规则已保存'); } catch (ex) { markDirty(e.target); toast('保存失败：' + ex.message, 'err', 4000); }
   };
   // 报表预览
-  let kind = 'daily';
+  let kind = 'daily', seq = 0;
+  // 请求序号：先点“月报”再点“日报”时，较慢返回的月报不能覆盖当前选中的日报预览
   const preview = async (send = false) => {
-    const box = $('#rPrev', el);
+    const box = $('#rPrev', el), my = ++seq, k = kind;
     if (!send) box.innerHTML = '<div class="nodata">加载中…</div>';
     try {
-      const r = await http('POST', '/api/admin/alerts/report', { kind, send, channelId: send ? $('#rCh', el).value : undefined });
+      const r = await http('POST', '/api/admin/alerts/report', { kind: k, send, channelId: send ? $('#rCh', el).value : undefined });
+      if (my !== seq || k !== kind) { if (send) toast('报表已发送'); return; }
       box.innerHTML = `<div class="rp-t">${esc(r.title)}${r.empty ? ' <span class="pill neutral">无费用，定时发送时将跳过</span>' : ''}</div>${r.lines.map(l => (l === '' ? '<div class="rp-gap"></div>' : l.startsWith('#') ? `<div class="rp-h">${esc(l.replace(/^#+\s*/, ''))}</div>` : `<div class="rp-l">${esc(l).replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')}</div>`)).join('')}`;
       if (send) toast('报表已发送');
-    } catch (ex) { if (send) toast(ex.message, 'err', 5000); else box.innerHTML = `<div class="bad-text">${esc(ex.message)}</div>`; }
+    } catch (ex) { if (send) toast(ex.message, 'err', 5000); else if (my === seq) box.innerHTML = `<div class="bad-text">${esc(ex.message)}</div>`; }
   };
   el.querySelectorAll('[data-rk]').forEach(b => b.onclick = () => { kind = b.dataset.rk; el.querySelectorAll('[data-rk]').forEach(x => x.setAttribute('aria-pressed', String(x === b))); preview(); });
-  $('#rSend', el).onclick = async e => { e.currentTarget.disabled = true; try { await preview(true); } finally { e.currentTarget.disabled = false; } };
+  // 事件分发结束后 e.currentTarget 会变为 null：按钮必须在 await 之前取得
+  $('#rSend', el).onclick = async e => { const btn = e.currentTarget; btn.disabled = true; try { await preview(true); } finally { btn.disabled = false; } };
   preview();
 }
 
@@ -695,7 +729,7 @@ async function users(el) {
       { key: 'sessions', label: '会话', align: 'r' },
       { key: 'ops', label: '操作', sortable: false, fmt: (x, r) => `<div class="row" style="gap:4px;flex-wrap:nowrap">
         <button class="btn sm" data-u="role" data-id="${r.id}" data-v="${r.role === 'admin' ? 'viewer' : 'admin'}">设为${r.role === 'admin' ? '只读' : '管理员'}</button>
-        <button class="btn sm" data-u="pw" data-id="${r.id}">重置密码</button>
+        ${r.id === state.me.id ? '' : `<button class="btn sm" data-u="pw" data-id="${r.id}">重置密码</button>`}
         <button class="btn sm" data-u="dis" data-id="${r.id}" data-v="${r.disabled ? 0 : 1}">${r.disabled ? '启用' : '禁用'}</button>
         ${r.locked ? `<button class="btn sm" data-u="unlock" data-id="${r.id}">解锁</button>` : ''}
         <button class="btn sm danger" data-u="del" data-id="${r.id}" data-name="${esc(r.username)}">删除</button></div>` },
@@ -705,25 +739,33 @@ async function users(el) {
     const b = e.target.closest('[data-u]'); if (!b) return;
     const id = b.dataset.id;
     try {
-      if (b.dataset.u === 'role') await http('PUT', `/api/admin/users/${id}`, { role: b.dataset.v });
+      if (b.dataset.u === 'role') {
+        // 设为管理员属于提权操作，需要再次验证当前登录密码
+        let confirmPassword;
+        if (b.dataset.v === 'admin') { confirmPassword = await askPassword('设为管理员', '将该用户设为管理员后，其可以修改云厂商密钥、用户与全部系统配置。请输入当前登录密码确认。'); if (!confirmPassword) return; }
+        await http('PUT', `/api/admin/users/${id}`, { role: b.dataset.v, confirmPassword });
+      }
       else if (b.dataset.u === 'dis') await http('PUT', `/api/admin/users/${id}`, { disabled: b.dataset.v === '1' });
       else if (b.dataset.u === 'unlock') await http('PUT', `/api/admin/users/${id}`, { unlock: true });
       else if (b.dataset.u === 'pw') {
         const pw = genPassword();
         if (!confirm(`将该用户密码重置为：\n\n${pw}\n\n请复制后安全告知用户（首次登录须修改）。确认重置？`)) return;
-        await http('PUT', `/api/admin/users/${id}`, { password: pw });
+        const confirmPassword = await askPassword('重置密码', '重置他人密码属于敏感操作，请输入当前登录密码确认。');
+        if (!confirmPassword) return;
+        await http('PUT', `/api/admin/users/${id}`, { password: pw, confirmPassword });
       } else if (b.dataset.u === 'del') {
         if (!confirm(`确认删除用户「${b.dataset.name}」？此操作不可撤销。`)) return;
         await http('DELETE', `/api/admin/users/${id}`);
       }
-      toast('已更新'); users(el);
+      toast('已更新'); await refresh(el, () => users(el));
     } catch (ex) { toast('操作失败：' + ex.message, 'err', 4000); }
   });
   $('#genPw', el).onclick = () => { $('#uForm', el).password.value = genPassword(); };
   $('#uForm', el).onsubmit = async e => {
     e.preventDefault();
     const fd = Object.fromEntries(new FormData(e.target));
-    try { await http('POST', '/api/admin/users', fd); toast(`已创建用户 ${fd.username}`); users(el); }
+    if (fd.role === 'admin') { fd.confirmPassword = await askPassword('创建管理员', '创建管理员账号属于敏感操作，请输入当前登录密码确认。'); if (!fd.confirmPassword) return; }
+    try { await http('POST', '/api/admin/users', fd); toast(`已创建用户 ${fd.username}`); await refresh(el, () => users(el)); }
     catch (ex) { toast('创建失败：' + ex.message, 'err', 4000); }
   };
 }
@@ -766,10 +808,10 @@ async function system(el) {
         <div><span>指标内容</span><b>同步状态与最近成功时间、本月各云厂商应付金额、预算使用率、Key 数量、告警渠道状态、会话数</b></div>
       </div></section></div>`;
   const form = $('#brForm', el);
-  form.addEventListener('input', e => { const k = e.target.name; const t = el.querySelector(`[data-bp="${k}"]`); if (t) t.textContent = e.target.value; app.dirty = true; });
+  form.addEventListener('input', e => { const k = e.target.name; const t = el.querySelector(`[data-bp="${k}"]`); if (t) t.textContent = e.target.value; markDirty(form); });
   form.onsubmit = async e => {
     e.preventDefault();
-    try { await http('PUT', '/api/admin/settings', { branding: Object.fromEntries(new FormData(form)) }); app.dirty = false; toast('品牌设置已保存'); await app.refreshStatus(); app.render(); }
+    try { await http('PUT', '/api/admin/settings', { branding: Object.fromEntries(new FormData(form)) }); markClean(form); toast('品牌设置已保存'); await app.refreshStatus(); app.render(); }
     catch (ex) { toast('保存失败：' + ex.message, 'err', 4000); }
   };
   const drawBackups = list => table('backups', $('#bkTbl', el), {

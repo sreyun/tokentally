@@ -14,7 +14,8 @@ export async function render(v) {
   const marker = v.querySelector('[data-chg-loading]');
   const stale = () => my !== seq || !marker.isConnected;
   let all;
-  try { all = (await http('GET', '/api/changes')).changes; }
+  let total = 0;
+  try { const r = await http('GET', '/api/changes'); all = r.changes; total = r.total || all.length; }
   catch (e) { if (!stale()) v.innerHTML = `<div class="notice err">${icon('warn')}<div><b>加载失败</b><span class="why">${esc(e.message)}</span></div></div>`; return; }
   state.changes = all;
   if (stale()) return;
@@ -23,7 +24,7 @@ export async function render(v) {
   const n = k => all.filter(c => c.change === k).length;
   v.innerHTML = `
     <div class="stat-strip">
-      <div><span>变更总数</span><b>${all.length}</b></div>
+      <div><span>${total > all.length ? `最近 ${all.length} 条变更` : '变更总数'}</span><b>${all.length}</b></div>
       <div><span>新增</span><b>${n('create')}</b></div>
       <div><span>修改</span><b>${n('update')}</b></div>
       <div><span>删除</span><b>${n('delete')}</b></div>
@@ -38,12 +39,13 @@ export async function render(v) {
     onRowClick: r => app.go(r.entity === 'api_key' ? `#/key/${encodeURIComponent(r.entity_id)}` : groupHash('ws', r.entity_id)),
     columns: [
       { key: 'ts', label: '时间', fmt: x => fmtTime(x), csv: r => fmtTime(r.ts) },
-      { key: 'entity', label: '对象', fmt: x => (x === 'api_key' ? 'API Key' : '业务空间') },
-      { key: 'name', label: '名称 / 描述', fmt: (x, r) => `${esc(x || '（无描述）')}<span class="sub mono">${esc(r.entity_id)}</span>` },
-      { key: 'change', label: '变更', fmt: x => `<span class="pill ${CHG[x]?.[1] || 'neutral'}">${CHG[x]?.[0] || esc(x)}</span>` },
+      { key: 'entity', label: '对象', fmt: x => (x === 'api_key' ? 'API Key' : '业务空间'), csv: r => (r.entity === 'api_key' ? 'API Key' : '业务空间') },
+      { key: 'name', label: '名称 / 描述', fmt: (x, r) => `${esc(x || '（无描述）')}<span class="sub mono">${esc(r.entity_id)}</span>`, csv: r => r.name || '' },
+      { key: 'change', label: '变更', fmt: x => `<span class="pill ${CHG[x]?.[1] || 'neutral'}">${CHG[x]?.[0] || esc(x)}</span>`, csv: r => CHG[r.change]?.[0] || r.change },
       { key: 'before', label: '变更前', cls: 'wrap-cell', sortable: false, fmt: (x, r) => esc(fmtJson(r.before_json)) || '<span class="muted">—</span>', csv: r => fmtJson(r.before_json) },
       { key: 'after', label: '变更后', cls: 'wrap-cell', sortable: false, fmt: (x, r) => esc(fmtJson(r.after_json)) || '<span class="muted">—</span>', csv: r => fmtJson(r.after_json) },
     ],
+    csvExtra: [{ label: 'ID', val: r => r.entity_id }], // 无描述的 Key 只能靠 ID 识别
   }).setRows(list);
   $('#csv', v).onclick = () => t.csv('API_Key变更记录.csv');
 }

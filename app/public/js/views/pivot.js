@@ -6,6 +6,12 @@ import { table } from '../table.js';
 const TT = { in: '输入（非缓存）', hit: '缓存命中', create: '缓存创建', out: '输出', emb: '向量', other: '其他 / 订阅' };
 const TIME = { peak: '峰时', offpeak: '闲时', std: '不分时段' };
 /** ISO 周（周一开始）：返回“2026-W45（11-02~11-08）”的排序键 */
+/** 自然周在当前统计周期内实际覆盖的日期范围 */
+const weekSpan = f => {
+  const p = state.data?.period, end = p ? (p.to < state.today ? p.to : state.today) : addDays(f, 6);
+  const a = p && f < p.from ? p.from : f, t = addDays(f, 6);
+  return [a, t > end ? end : t];
+};
 const isoWeek = d => {
   const wd = (weekday(d) + 6) % 7, from = addDays(d, -wd), thu = addDays(from, 3), y = thu.slice(0, 4), jan4 = `${y}-01-04`;
   const w1 = addDays(jan4, -((weekday(jan4) + 6) % 7));
@@ -19,7 +25,8 @@ const DIM = {
   ws: { label: '业务空间', of: l => l.wsKey, name: wsName },
   key: { label: 'API Key', of: l => l.apiKeyId || NONE_KEY, name: keyShort },
   model: { label: '模型', of: l => l.model, name: x => x },
-  week: { label: '自然周', of: l => isoWeek(l.date), name: x => { const [w, f] = x.split('|'); return `${w}（${f.slice(5)}~${addDays(f, 6).slice(5)}）`; }, src: 'daily' },
+  // 统计周期首尾的自然周只覆盖部分日期：标题显示实际覆盖的日期并标注“部分”
+  week: { label: '自然周', of: l => isoWeek(l.date), name: x => { const [w, f] = x.split('|'); const [a, b] = weekSpan(f); return `${w}（${a.slice(5)}~${b.slice(5)}${a !== f || b !== addDays(f, 6) ? '，部分' : ''}）`; }, src: 'daily' },
   weekday: { label: '星期', of: l => String((weekday(l.date) + 6) % 7), name: x => '周' + WEEK[(Number(x) + 1) % 7], src: 'daily' },
   dir: { label: 'Token 类型', of: l => (l.ioi.dir === 'in' ? (l.ioi.cache === 'hit' ? 'hit' : l.ioi.cache === 'create' ? 'create' : 'in') : l.ioi.dir), name: x => TT[x] || x },
   item: { label: '计费项', of: l => l.io, name: x => (x ? ioInfo(x).label : '（无）') },
@@ -75,11 +82,19 @@ export function render(v) {
   const isTime = ['date', 'month', 'week', 'weekday'].includes(pv.cols);
   let colIds = [...colT.keys()].sort(isTime ? undefined : (a, b) => colT.get(b) - colT.get(a));
   const LIMIT = isTime ? 62 : 20;
-  const extra = colIds.slice(LIMIT); colIds = colIds.slice(0, LIMIT);
+  // 时间列保留最近的 LIMIT 列（更早的合并为第一列“更早 N 项”）；其他维度按金额取前 LIMIT 列
+  const extra = isTime ? colIds.slice(0, Math.max(0, colIds.length - LIMIT)) : colIds.slice(LIMIT);
+  colIds = isTime ? colIds.slice(-LIMIT) : colIds.slice(0, LIMIT);
   const OTHER = '\u0002other';
-  if (extra.length) { for (const r of rowT.keys()) cell.set(r + '\u0001' + OTHER, sum(extra, c => cell.get(r + '\u0001' + c) || 0)); colT.set(OTHER, sum(extra, c => colT.get(c))); colIds.push(OTHER); }
+  if (extra.length) {
+    for (const r of rowT.keys()) cell.set(r + '\u0001' + OTHER, sum(extra, c => cell.get(r + '\u0001' + c) || 0));
+    colT.set(OTHER, sum(extra, c => colT.get(c)));
+    if (isTime) colIds.unshift(OTHER); else colIds.push(OTHER);
+  }
   const rowIds = [...rowT.keys()].filter(r => rowT.get(r) > 0);
-  const maxCell = Math.max(0, ...[...cell.values()]);
+  // 只在显示的单元格中取最大值，且用循环：展开全部单元格作为参数，交叉组合很多时会超出调用栈
+  let maxCell = 0;
+  for (const r of rowIds) for (const c of colIds) { const x = cell.get(r + '\u0001' + c) || 0; if (x > maxCell) maxCell = x; }
 
   v.innerHTML = `
     <section class="panel">
@@ -95,7 +110,7 @@ export function render(v) {
       </div>
       <div class="row" style="margin-bottom:12px"><span class="muted" style="font-size:12px">常用：</span>${PRESETS.map((p, i) => (p.when && !p.when() ? '' : `<button class="btn sm ${p.rows === pv.rows && p.cols === pv.cols ? 'primary' : ''}" data-preset="${i}">${esc(p.name)}</button>`)).join('')}</div>
       <div id="tbl"></div>
-      <div class="panel-foot">共 ${rowIds.length} 行 × ${colIds.length} 列${extra.length ? `（列按${ms.label()}取前 ${LIMIT}，其余 ${extra.length} 项合并为“其他”）` : ''} · 合计 ${esc(ms.fmt(grand))}</div>
+      <div class="panel-foot">共 ${rowIds.length} 行 × ${colIds.length} 列${extra.length ? (isTime ? `（按时间保留最近 ${LIMIT} 列，更早的 ${extra.length} 项合并为“更早”）` : `（列按${ms.label()}取前 ${LIMIT}，其余 ${extra.length} 项合并为“其他”）`) : ''} · 合计 ${esc(ms.fmt(grand))}</div>
     </section>`;
 
   const fmtCell = (x, r, c) => {
@@ -115,13 +130,22 @@ export function render(v) {
   }[dim] || {});
   const drill = (r, c) => {
     const patch = { ...toFilter(pv.rows, r), ...toFilter(pv.cols, c) };
-    for (const [dim, val] of [[pv.rows, r], [pv.cols, c]]) {
+    // 日期比自然周更精确：先应用自然周，再应用日期（日期 × 自然周的单元格只看当天）
+    const dims = [[pv.rows, r], [pv.cols, c]].sort((a, b) => (a[0] === 'date') - (b[0] === 'date'));
+    // 无法精确定位的维度要提示：缓存命中 / 缓存创建按全部输入定位，“（无）”计费项无法单独筛选
+    const widen = [];
+    for (const [dim, val] of dims) {
+      if (dim === 'dir' && (val === 'hit' || val === 'create')) widen.push(`Token 类型“${TT[val] || val}”按全部输入定位`);
+      if (dim === 'item' && !val) widen.push('“（无）”计费项无法单独筛选');
+    }
+    for (const [dim, val] of dims) {
       if (dim === 'date') app.setPeriod({ mode: 'range', preset: 'custom', from: val, to: val }, { url: false });
       if (dim === 'month') app.setPeriod({ mode: 'month', cycle: val }, { url: false });
-      if (dim === 'week') { const f = val.split('|')[1], t = addDays(f, 6); app.setPeriod({ mode: 'range', preset: 'custom', from: f, to: t > state.today ? state.today : t }, { url: false }); }
+      if (dim === 'week') { const [a, b] = weekSpan(val.split('|')[1]); app.setPeriod({ mode: 'range', preset: 'custom', from: a, to: b }, { url: false }); } // 只取本周期内的日期
     }
     const nf = [pv.rows, pv.cols].filter(d => ['time', 'weekday'].includes(d)).map(d => DIM[d].label);
-    if (nf.length) toast(`${nf.join('、')}不是筛选维度，已按其余维度定位账单`, '', 2600);
+    const notes = [...(nf.length ? [`${nf.join('、')}不是筛选维度，已按其余维度定位账单`] : []), ...widen];
+    if (notes.length) toast(notes.join('；'), '', 3600);
     app.setFilter(patch, '#/detail');
   };
   /** 行下钻：实体维度进入详情页，日期行打开当日明细，账期行切换账期 */
@@ -137,9 +161,12 @@ export function render(v) {
     else if (d === 'month') app.setPeriod({ mode: 'month', cycle: id });
     else if (d === 'item' || d === 'channel' || d === 'dir') app.setFilter(toFilter(d, id));
   };
-  const colName = c => (c === OTHER ? `其他 ${extra.length} 项` : cd.name(c));
-  const columns = [{ key: 'name', label: rd.label, sortVal: ['date', 'month', 'week', 'weekday'].includes(pv.rows) ? (r => r.id) : undefined, fmt: (x, r) => `<b style="font-weight:600">${esc(x)}</b>${r.sub ? `<span class="sub mono">${esc(r.sub)}</span>` : ''}` }];
-  if (pv.cols !== 'none') colIds.forEach((c, i) => columns.push({ key: 'c' + i, label: colName(c), align: 'r', fmt: (x, r) => fmtCell(x, r.id, c), csv: r => (r['c' + i] ? +r['c' + i].toFixed(6) : 0) }));
+  const colName = c => (c === OTHER ? `${isTime ? '更早' : '其他'} ${extra.length} 项` : cd.name(c));
+  // 导出时名称附带 Key / 业务空间 ID：同名的 Key（如多个 prod）在分摊表中必须能区分并对应回云厂商账单
+  const columns = [{ key: 'name', label: rd.label, sortVal: ['date', 'month', 'week', 'weekday'].includes(pv.rows) ? (r => r.id) : undefined, fmt: (x, r) => `<b style="font-weight:600">${esc(x)}</b>${r.sub ? `<span class="sub mono">${esc(r.sub)}</span>` : ''}`, csv: r => (r.sub ? `${r.name} (${r.sub})` : r.name) }];
+  // 导出的列标题附带 Key / 业务空间 ID：同名的列必须能区分
+  const csvName = c => (c !== OTHER && ['key', 'ws'].includes(pv.cols) && c ? `${colName(c)} (${c})` : colName(c));
+  if (pv.cols !== 'none') colIds.forEach((c, i) => columns.push({ key: 'c' + i, label: colName(c), csvLabel: csvName(c), align: 'r', fmt: (x, r) => fmtCell(x, r.id, c), csv: r => (r['c' + i] ? +r['c' + i].toFixed(6) : 0) }));
   columns.push({ key: 'total', label: '合计', align: 'r', fmt: x => `<b>${esc(ms.fmt(x))}</b>`, csv: r => +r.total.toFixed(6) });
   columns.push({ key: 'share', label: '占比', align: 'r', fmt: x => (x * 100).toFixed(1) + '%', csv: r => (r.share * 100).toFixed(2) + '%' });
   const rows = rowIds.map(r => {
@@ -148,7 +175,8 @@ export function render(v) {
     return o;
   });
   const t = table('pivot:' + pv.rows + ':' + pv.cols, $('#tbl', v), {
-    sort: ['date', 'month', 'week', 'weekday'].includes(pv.rows) ? 'name' : 'total', dir: ['date', 'month', 'week', 'weekday'].includes(pv.rows) ? 'asc' : 'desc', pageSize: 0, caption: '多维透视', maxHeight: '64vh',
+    // 行数很多（如上千个 Key）时分页渲染，避免一次生成全部行与单元格
+    sort: ['date', 'month', 'week', 'weekday'].includes(pv.rows) ? 'name' : 'total', dir: ['date', 'month', 'week', 'weekday'].includes(pv.rows) ? 'asc' : 'desc', pageSize: rowIds.length > 300 ? 200 : 0, caption: '多维透视', maxHeight: '64vh',
     onRowClick: ['key', 'model', 'ws', 'provider', 'cc', 'owner', 'date', 'month', 'item', 'channel', 'dir'].includes(pv.rows) ? rowDrill : null,
     columns,
     footer: rs => columns.map(c => (c.key === 'name' ? '合计' : c.key === 'total' ? esc(ms.fmt(grand)) : c.key === 'share' ? '100%' : esc(ms.fmt(sum(rs, r => r[c.key] || 0))))),

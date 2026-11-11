@@ -16,6 +16,7 @@ import dns from 'node:dns';
 import net from 'node:net';
 import crypto from 'node:crypto';
 import { todayIn, hourIn, addDays, addMonths, isCycleFinal, PROVIDER_NAMES } from './sync.mjs';
+import { dayStartSec } from './prom.mjs';
 
 export const ALERT_TYPES = {
   dingtalk: { label: '钉钉群机器人', hosts: ['oapi.dingtalk.com'], sign: true, mention: 'mobile' },
@@ -61,7 +62,7 @@ function safeLookup(hostname, options, cb) {
 
 /** 校验 Webhook 地址；返回规范化后的 URL 字符串，不合法时抛出带中文说明的 Error */
 export function validateWebhook(type, raw, { allowPrivate = false } = {}) {
-  const t = ALERT_TYPES[type];
+  const t = Object.hasOwn(ALERT_TYPES, type) ? ALERT_TYPES[type] : null;
   if (!t) throw new Error('不支持的通知类型');
   let u;
   try { u = new URL(String(raw || '').trim()); } catch { throw new Error('Webhook 地址格式不正确'); }
@@ -92,17 +93,22 @@ function postJson(url, body, headers, allowPrivate) {
     const host = new URL(url).hostname.replace(/^\[|\]$/g, '');
     if (!allowPrivate && net.isIP(host) && isPrivateIp(host)) return reject(Object.assign(new Error(`目标地址 ${host} 属于内网或保留地址，已拒绝`), { code: 'EPRIVATE' }));
     const data = Buffer.from(JSON.stringify(body));
+    // 总时限：timeout 只是空闲超时，持续缓慢回传数据的地址会让请求一直挂起，阻塞所有渠道的告警队列
+    let done = false;
+    const finish = (fn, v) => { if (done) return; done = true; clearTimeout(timer); fn(v); };
+    const timer = setTimeout(() => { req.destroy(new Error('请求超时（15 秒）')); }, 15_000);
+    timer.unref?.();
     const req = https.request(url, {
       method: 'POST', timeout: 8000, lookup: allowPrivate ? undefined : safeLookup,
       headers: { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': data.length, 'User-Agent': 'tokentally-alert/1.2', ...headers },
     }, res => {
       const chunks = []; let size = 0;
       res.on('data', c => { size += c.length; if (size > 65536) req.destroy(new Error('响应内容过大')); else chunks.push(c); });
-      res.on('end', () => resolve({ status: res.statusCode, text: Buffer.concat(chunks).toString('utf8') }));
-      res.on('error', reject);
+      res.on('end', () => finish(resolve, { status: res.statusCode, text: Buffer.concat(chunks).toString('utf8') }));
+      res.on('error', e => finish(reject, e));
     });
     req.on('timeout', () => req.destroy(new Error('请求超时（8 秒）')));
-    req.on('error', reject);
+    req.on('error', e => finish(reject, e));
     req.end(data);
   });
 }
@@ -115,22 +121,39 @@ const chg = (a, b) => (b > 0 ? `${a >= b ? '+' : '−'}${Math.abs((a - b) / b * 
 export const clean = s => String(s || '').replace(/[[\]()<>*_`#|\\~]/g, '').replace(/\s+/g, ' ').trim().slice(0, 40);
 const strip = s => String(s).replace(/\*\*/g, '');
 
+/**
+ * 机器人消息长度上限按 UTF-8 字节计算（企业微信 markdown 4096 字节、钉钉 20000 字节、飞书卡片约 30KB；中文每字 3 字节）。
+ * 超出时从正文末尾按整行删减并注明，页眉、页脚与链接保留；按字符数截断会让中文消息仍然超限而被拒绝，并在每次检查时重复失败
+ */
+export const MSG_BYTES = { wecom: 4000, dingtalk: 18000, feishu: 25000 };
+export function fitLines(head, body, tail, maxBytes) {
+  const size = arr => Buffer.byteLength(arr.join('\n'), 'utf8');
+  if (size([...head, ...body, ...tail]) <= maxBytes) return [...head, ...body, ...tail];
+  // 线性计算：逐行累计字节数（上千行的预算告警不能反复拼接整条消息）
+  const fixed = size([...head, ...tail]) + 1, lens = body.map(l => Buffer.byteLength(l, 'utf8') + 1);
+  let kept = 0, used = fixed;
+  const note = n => Buffer.byteLength(`…另有 ${n} 行内容未显示`, 'utf8') + 1;
+  while (kept < body.length && used + lens[kept] + note(body.length - kept - 1) <= maxBytes) used += lens[kept++];
+  const dropped = body.length - kept;
+  const out = [...head, ...body.slice(0, kept), `…另有 ${dropped} 行内容未显示`, ...tail];
+  return size(out) <= maxBytes ? out : [Buffer.from(out.join('\n'), 'utf8').subarray(0, maxBytes - 3).toString('utf8').replace(/�+$/, '')];
+}
 function buildMessage(type, { title, level, lines, footer, link, mentions }) {
   const atText = mentions?.mobiles?.length ? '\n\n' + mentions.mobiles.map(m => '@' + m).join(' ') : '';
   if (type === 'dingtalk') {
-    const text = [`### ${title}`, '', ...lines.map(l => (l.startsWith('#') || l === '' ? l : `- ${l}`)), '', `> ${footer}`, ...(link ? ['', `[打开费用分析](${link})`] : [])].join('\n') + atText;
+    const text = fitLines([`### ${title}`, ''], lines.map(l => (l.startsWith('#') || l === '' ? l : `- ${l}`)), ['', `> ${footer}`, ...(link ? ['', `[打开费用分析](${link})`] : [])], MSG_BYTES.dingtalk - Buffer.byteLength(atText)).join('\n') + atText;
     return { msgtype: 'markdown', markdown: { title, text }, ...(mentions ? { at: { atMobiles: mentions.mobiles || [], isAtAll: !!mentions.all } } : {}) };
   }
   if (type === 'feishu') {
-    const content = [...lines.map(l => (l.startsWith('#') ? `**${l.replace(/^#+\s*/, '')}**` : l === '' ? '' : `• ${l}`)), '', `<font color='grey'>${footer}</font>`, ...(mentions?.all ? ['<at id=all></at>'] : [])].join('\n');
+    const content = fitLines([], lines.map(l => (l.startsWith('#') ? `**${l.replace(/^#+\s*/, '')}**` : l === '' ? '' : `• ${l}`)), ['', `<font color='grey'>${footer}</font>`, ...(mentions?.all ? ['<at id=all></at>'] : [])], MSG_BYTES.feishu).join('\n');
     const elements = [{ tag: 'markdown', content }];
     if (link) elements.push({ tag: 'action', actions: [{ tag: 'button', text: { tag: 'plain_text', content: '打开费用分析' }, type: 'primary', url: link }] });
     return { msg_type: 'interactive', card: { config: { wide_screen_mode: true }, header: { template: level === 'bad' ? 'red' : level === 'warn' ? 'orange' : level === 'good' ? 'green' : 'blue', title: { tag: 'plain_text', content: title } }, elements } };
   }
   if (type === 'wecom') {
     const color = level === 'bad' ? 'warning' : level === 'warn' ? 'comment' : 'info';
-    const content = [`### <font color="${color}">${title}</font>`, ...lines.map(l => (l.startsWith('#') ? `**${l.replace(/^#+\s*/, '')}**` : l === '' ? '' : `> ${l}`)), `<font color="comment">${footer}</font>`, ...(link ? [`[打开费用分析](${link})`] : [])].join('\n');
-    return { msgtype: 'markdown', markdown: { content: content.slice(0, 3800) } };
+    const content = fitLines([`### <font color="${color}">${title}</font>`], lines.map(l => (l.startsWith('#') ? `**${l.replace(/^#+\s*/, '')}**` : l === '' ? '' : `> ${l}`)), [`<font color="comment">${footer}</font>`, ...(link ? [`[打开费用分析](${link})`] : [])], MSG_BYTES.wecom).join('\n');
+    return { msgtype: 'markdown', markdown: { content } };
   }
   return null;
 }
@@ -165,7 +188,8 @@ function checkResponse(type, { status, text }) {
   try { j = JSON.parse(text); } catch { /* 非 JSON */ }
   if (!j) return;
   const code = j.errcode ?? j.code ?? j.StatusCode;
-  if (code != null && Number(code) !== 0) throw new Error(`${j.errmsg || j.msg || j.StatusMessage || '机器人返回错误'}（错误码 ${code}）`);
+  // 机器人拒绝了消息内容（而非网络 / 鉴权问题）：标记 content，发送循环会继续尝试该渠道的后续消息
+  if (code != null && Number(code) !== 0) throw Object.assign(new Error(`${j.errmsg || j.msg || j.StatusMessage || '机器人返回错误'}（错误码 ${code}）`), { content: /length|exceed|content|长度|过长|invalid.*(markdown|msg)/i.test(String(j.errmsg || j.msg || '')) });
 }
 
 /* ---------------- 日期工具 ---------------- */
@@ -198,7 +222,7 @@ export class AlertService {
     try { webhook = this.store.getSecret('alerts.webhook') || ''; secret = this.store.getSecret('alerts.secret') || ''; } catch { /* 主密钥变化：无法迁移地址 */ }
     const channels = [];
     if (webhook || s.type) {
-      const type = ALERT_TYPES[s.type] ? s.type : 'dingtalk';
+      const type = Object.hasOwn(ALERT_TYPES, s.type) ? s.type : 'dingtalk';
       channels.push({ id: 'c1', name: ALERT_TYPES[type].label, type, enabled: !!s.enabled && !!webhook, events: { ...DEFAULT_EVENTS, anomaly: false, sync: false, monthly: false }, atAll: false, atMobiles: [] });
       if (webhook) this.store.setSecret('alerts.ch.c1.webhook', webhook);
       if (secret) this.store.setSecret('alerts.ch.c1.secret', secret);
@@ -225,9 +249,13 @@ export class AlertService {
     try { return { webhook: this.store.getSecret(`alerts.ch.${id}.webhook`) || '', secret: this.store.getSecret(`alerts.ch.${id}.secret`) || '' }; }
     catch { return { webhook: '', secret: '', undecryptable: true }; }
   }
+  /**
+   * 告警状态。sent（预算 / 异常）按账期重置：新账期重新评估；
+   * syncSent（同步故障 / 恢复）不随账期重置：一轮持续跨月的故障不能在月初再通知一次（保留 90 天）
+   */
   stateFor(cycle) {
     const st = this.store.getSetting('alerts.state', null) || {};
-    const base = { cycle, sent: {}, reports: st.reports || {}, lastChangeId: st.lastChangeId || {}, channels: st.channels || {}, history: st.history || [] };
+    const base = { cycle, sent: {}, syncSent: st.syncSent || {}, reports: st.reports || {}, lastChangeId: st.lastChangeId || {}, channels: st.channels || {}, history: st.history || [] };
     return st.cycle === cycle ? { ...base, sent: st.sent || {} } : base;
   }
   saveState(st) { this.store.setSetting('alerts.state', st); }
@@ -294,7 +322,7 @@ export class AlertService {
   }
   /** 兼容旧接口 */
   evaluate(today) { return this.evaluateBudget(today); }
-  /** 与前端口径一致：已完整的日 + 今日实际 + 完整日日均 × 剩余天数 */
+  /** 与前端口径一致：已完整的日 + max(今日实际, 日均) + 完整日日均 × 剩余天数 */
   forecast(daily, cycle, today) {
     if (today.slice(0, 7) !== cycle) return null;
     const from = cycle + '-01', yesterday = addDays(today, -1);
@@ -302,7 +330,9 @@ export class AlertService {
     const fullDays = daysBetween(from, yesterday);
     let full = 0, td = 0;
     for (const r of daily) { if (r.day <= yesterday) full += r.cost || 0; else if (r.day === today) td += r.cost || 0; }
-    return full + td + (full / fullDays) * Math.max(0, daysInMonth(cycle) - fullDays - 1);
+    // 今天按“已出账与日均的较大值”计：今天未结束且账单延迟入账，直接用已出账金额会让预测偏低、预算预警偏晚
+    const avg = full / fullDays;
+    return full + Math.max(td, avg) + avg * Math.max(0, daysInMonth(cycle) - fullDays - 1);
   }
 
   /* ---------- 费用异常（昨日 vs 前 7 日日均） ---------- */
@@ -313,9 +343,12 @@ export class AlertService {
     const items = [];
     const check = (scope, vals, name) => {
       const y = vals.get(day) || 0;
-      let base = 0; for (let i = 1; i <= 7; i++) base += vals.get(addDays(day, -i)) || 0;
-      base /= 7;
-      if (y - base < a.minAmount) return;
+      // 日均只按有记录的日期计算：新 Key / 新账号的前几天不能被未存在的日子（记为 0）拉低基数而连续误报
+      const first = [...vals.keys()].sort()[0];
+      let base = 0, n = 0; for (let i = 1; i <= 7; i++) { const d = addDays(day, -i); if (first && d >= first) { base += vals.get(d) || 0; n++; } }
+      if (n < 3) return; // 历史不足 3 天，无法判断是否异常
+      base /= n;
+      if (y <= 0 || y <= base || y - base < Math.max(a.minAmount, 0.01)) return;
       if (base > 0 && y < base * a.ratio) return;
       items.push({ code: `anomaly:${scope}:${day}`, level: 'warn', delta: y - base, text: `**${name}** ${day.slice(5)} 费用 ${yuan(y)}，为前 7 日日均 ${yuan(base)} 的 ${base > 0 ? (y / base).toFixed(1) + ' 倍' : '—（此前无消费）'}（+${yuan(y - base)}）` });
     };
@@ -335,19 +368,23 @@ export class AlertService {
   }
 
   /* ---------- 同步故障（连续失败 3 次）与恢复 ---------- */
+  /**
+   * 去重标识以“本轮连续失败之前最后一次非失败任务的 ID”为锚点：同一轮故障无论再失败多少次标识都不变（只通知一次），
+   * 次数按真实的连续失败次数统计（不受查询窗口限制）
+   */
   evaluateSync() {
     const items = [];
     for (const p of this.providers()) {
       for (const kind of ['meta', 'bills']) {
-        const runs = this.store.recentRuns(kind, p, 12);
+        const runs = this.store.recentRuns(kind, p, 1);
         if (!runs.length) continue;
         const name = `${PROVIDER_NAMES[p]}${kind === 'meta' ? ' API Key 同步' : '账单同步'}`;
         if (runs[0].status === 'error') {
-          let n = 0; while (n < runs.length && runs[n].status === 'error') n++;
-          if (n >= 3) items.push({ code: `sync:${p}:${kind}:${runs[n - 1].id}`, level: 'bad', text: `**${name}连续失败 ${n} 次**：${clean(runs[0].error).slice(0, 80) || '未知错误'}` });
+          const { n, anchor } = this.store.errorStreak(kind, p);
+          if (n >= 3) items.push({ code: `sync:${p}:${kind}:${anchor}`, level: 'bad', text: `**${name}连续失败 ${n} 次**：${clean(runs[0].error).slice(0, 80) || '未知错误'}` });
         } else {
-          let n = 1; while (n < runs.length && runs[n].status === 'error') n++;
-          if (n - 1 >= 3) items.push({ code: `syncok:${p}:${kind}:${runs[n - 1].id}`, level: 'good', text: `**${name}已恢复**：此前连续失败 ${n - 1} 次` });
+          const { n, anchor } = this.store.errorStreak(kind, p, runs[0].id);
+          if (n >= 3) items.push({ code: `syncok:${p}:${kind}:${anchor}`, level: 'good', text: `**${name}已恢复**：此前连续失败 ${n} 次` });
         }
       }
     }
@@ -379,15 +416,17 @@ export class AlertService {
       return ps.length > 1 ? '按云厂商：' + ps.sort((x, y) => y.cost - x.cost).map(x => `${PROVIDER_NAMES[x.k] || x.k} ${yuan(x.cost)}`).join('，') : null;
     };
     if (kind === 'daily') {
-      const day = addDays(today, -1), cycle = today.slice(0, 7);
+      // 月累计按“昨日”所在的月份统计：每月 1 日的日报描述的是上月最后一天，应给出上月合计，而不是本月刚开始的累计
+      const day = addDays(today, -1), cycle = day.slice(0, 7), isCur = cycle === today.slice(0, 7);
       const rows = this.store.dailyByKey(addDays(day, -1), day);
       const y = rows.filter(r => r.day === day), p = rows.filter(r => r.day !== day);
       const yc = y.reduce((s, r) => s + r.cost, 0), pc = p.reduce((s, r) => s + r.cost, 0);
-      const { daily } = this.store.budgetUsage(cycle);
-      const mtd = daily.filter(r => r.day <= today).reduce((s, r) => s + (r.cost || 0), 0);
-      const fc = this.forecast(daily, cycle, today);
+      const { daily, month } = this.store.budgetUsage(cycle);
+      // 月累计与预算使用率按账期（月）账单计算，与预算告警、概览预算条、/metrics 一致；日账单只用于预测
+      const mtd = month.reduce((s, r) => s + (r.cost || 0), 0);
+      const fc = isCur ? this.forecast(daily, cycle, today) : null;
       const lines = [`**昨日（${day.slice(5)}）费用 ${yuan(yc)}**，较前一日 ${chg(yc, pc)}`];
-      lines.push(`本月累计 ${yuan(mtd)}${fc != null ? `，预计月末 ${yuan(fc)}` : ''}${b.monthly ? `，月度预算 ${yuan(b.monthly)}（已用 ${pct(mtd / b.monthly * 100)}）` : ''}`);
+      lines.push(`${isCur ? '本月累计' : `${cycle} 合计`} ${yuan(mtd)}${fc != null ? `，预计月末 ${yuan(fc)}` : ''}${b.monthly ? `，月度预算 ${yuan(b.monthly)}（已用 ${pct(mtd / b.monthly * 100)}）` : ''}`);
       const ps = provSplit(y); if (ps) lines.push(ps);
       const tk = top(sumBy(y, r => r.id).map(x => ({ id: x.k, cost: x.cost })), 5, r => this.keyName(r.id, keys), yc);
       if (tk.length) lines.push('', '#### 昨日 API Key Top 5', ...tk);
@@ -426,7 +465,15 @@ export class AlertService {
     if (cc.length > 1 || (cc[0] && cc[0].k !== '未分配成本中心')) lines.push('', '#### 按成本中心', ...top(cc.map(x => ({ k: x.k, cost: x.cost })), 6, r => r.k, c));
     const tm = top(this.store.monthByModel(cycle), 3, r => clean(r.model), c);
     if (tm.length) lines.push('', '#### 模型 Top 3', ...tm);
-    return { title: `费用月报 · ${cycle}`, level: 'info', lines, empty: c < 0.005 && o < 0.005, period: cycle, ready: isCycleFinal(cycle, today), path: `#/overview?cycle=${cycle}` };
+    // 月报在上月出账后发送：本地账期已定稿即发送；账单同步持续失败时最晚 10 日发送（避免永远不发）
+    const ready = isCycleFinal(cycle, today) && (!!this.store.getCycle(cycle)?.final || today >= addDays(addMonths(cycle, 1) + '-01', 9));
+    return { title: `费用月报 · ${cycle}`, level: 'info', lines, empty: c < 0.005 && o < 0.005, period: cycle, ready, path: `#/overview?cycle=${cycle}` };
+  }
+  /** 报表周期结束后，所有已配置云厂商是否都完成过一次（部分）成功的账单同步：用于判断“空报表”是否真的为空 */
+  periodSynced(kind, today = todayIn(this.tz)) {
+    const end = kind === 'daily' ? today : kind === 'weekly' ? isoWeek(today).from : today.slice(0, 7) + '-01';
+    const ts = dayStartSec(end, this.tz) * 1000;
+    return this.providers().every(p => Math.max(this.store.lastRun('bills', 'success', p)?.finished_at || 0, this.store.lastRun('bills', 'partial', p)?.finished_at || 0) >= ts);
   }
 
   /* ---------- 评估并发送 ---------- */
@@ -435,23 +482,32 @@ export class AlertService {
     const run = async () => {
       const s = this.settings();
       const chans = s.channels.filter(c => c.enabled);
-      if (!chans.length) return { skipped: 'disabled' };
+      if (!chans.length) {
+        // 全部停用时也要清除变更游标：之后重新启用某个渠道时与首次启用一样，不补发停用期间的历史变更
+        const st0 = this.stateFor(todayIn(this.tz).slice(0, 7));
+        if (Object.keys(st0.lastChangeId || {}).length) { st0.lastChangeId = {}; this.saveState(st0); }
+        return { skipped: 'disabled' };
+      }
       const today = todayIn(this.tz), cycle = today.slice(0, 7), hour = hourIn(this.tz), st = this.stateFor(cycle);
       const afterHour = hour >= s.reportHour;
       const lazy = {};
       const get = (k, f) => (lazy[k] ??= f());
       let sent = 0, errors = [];
+      const active = new Set();
       for (const ch of chans) {
         const sec = this.secretsOf(ch.id);
         if (!sec.webhook) continue;
+        active.add(ch.id);
         st.sent[ch.id] ||= {};
+        st.syncSent[ch.id] ||= {};
         st.reports[ch.id] ||= {};
+        const sentMap = code => (/^sync(ok)?:/.test(code) ? st.syncSent[ch.id] : st.sent[ch.id]);
         const msgs = [];
         const alertMsg = (event, title, items, path) => {
-          const fresh = items.filter(i => !st.sent[ch.id][i.code]);
+          const fresh = items.filter(i => !sentMap(i.code)[i.code]);
           if (!fresh.length) return;
           const show = fresh.filter(i => !i.hidden);
-          if (!show.length) { for (const i of fresh) st.sent[ch.id][i.code] = Date.now(); return; }
+          if (!show.length) { for (const i of fresh) sentMap(i.code)[i.code] = Date.now(); return; }
           const level = show.some(i => i.level === 'bad') ? 'bad' : show.every(i => i.level === 'good') ? 'good' : show.some(i => i.level === 'warn') ? 'warn' : 'info';
           msgs.push({ event, title, level, lines: show.map(i => i.text), codes: fresh.map(i => i.code), mention: EVENT_TYPES[event].mention && level !== 'good', path });
         };
@@ -475,7 +531,8 @@ export class AlertService {
             const r = get('report:' + kind, () => this.report(kind, today));
             if (kind === 'monthly' && !r.ready) continue;
             if (st.reports[ch.id][kind] === r.period) continue;
-            if (r.empty) { st.reports[ch.id][kind] = r.period; continue; }
+            // 空报表只有在该周期的账单确认已同步后才算“已发送”；否则（如刚配置密钥、回填尚未完成）稍后有数据时再发送
+            if (r.empty) { if (get('synced:' + kind, () => this.periodSynced(kind, today))) st.reports[ch.id][kind] = r.period; continue; }
             msgs.push({ event: kind, title: r.title, level: r.level, lines: r.lines, report: { kind, period: r.period }, path: r.path });
           }
         }
@@ -483,7 +540,7 @@ export class AlertService {
           try {
             await this.send(ch, sec, { ...m, today });
             const now = Date.now();
-            for (const c of m.codes || []) st.sent[ch.id][c] = now;
+            for (const c of m.codes || []) sentMap(c)[c] = now;
             if (m.report) st.reports[ch.id][m.report.kind] = m.report.period;
             if (m.changeTo) st.lastChangeId[ch.id] = m.changeTo;
             st.channels[ch.id] = { ...(st.channels[ch.id] || {}), lastSentAt: now, lastError: null, lastErrorAt: null };
@@ -495,13 +552,17 @@ export class AlertService {
             st.channels[ch.id] = { ...(st.channels[ch.id] || {}), lastError: msg, lastErrorAt: Date.now() };
             errors.push(`${ch.name}：${msg}`);
             this.log(`告警发送失败（${ch.name} · ${EVENT_TYPES[m.event]?.label}）：${msg}`);
-            break; // 该渠道后续消息下次再试
+            if (e.content) continue; // 内容被拒绝：不影响该渠道的其他消息
+            break; // 网络 / 鉴权问题：该渠道后续消息下次再试
           }
         }
       }
-      // 清理已删除渠道的状态
+      // 清理已删除渠道的状态；停用（或地址缺失）的渠道清除变更游标：重新启用时与首次启用一样不补发停用期间的历史变更
       const ids = new Set(s.channels.map(c => c.id));
-      for (const k of ['sent', 'reports', 'lastChangeId', 'channels']) for (const id of Object.keys(st[k] || {})) if (!ids.has(id)) delete st[k][id];
+      for (const k of ['sent', 'syncSent', 'reports', 'lastChangeId', 'channels']) for (const id of Object.keys(st[k] || {})) if (!ids.has(id)) delete st[k][id];
+      for (const id of Object.keys(st.lastChangeId || {})) if (!active.has(id)) delete st.lastChangeId[id];
+      const old = Date.now() - 90 * 864e5;
+      for (const m of Object.values(st.syncSent || {})) for (const [c, t] of Object.entries(m)) if (t < old) delete m[c];
       this.saveState(st);
       if (sent) this.log(`告警/报表已发送 ${sent} 条（${trigger}）`);
       return errors.length ? { sent, error: errors.join('；') } : { sent };

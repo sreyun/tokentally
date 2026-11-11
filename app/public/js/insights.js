@@ -48,11 +48,13 @@ export function computeInsights() {
   }
 
   // 2. 预测与预算
-  const fc = forecastOf(daily, l => l.pretax);
+  // 预算比较固定用应付金额（预算按应付金额设置）；其余情况与旁边的“预计本月费用”一致，按当前费用口径
   const budget = budgetOf();
+  const useBudget = budget && !hasDimFilter();
+  const fc = forecastOf(daily, useBudget ? l => l.pretax : metricVal);
   if (fc) {
-    const prevFull = sum(filterLines(state.prevFull), l => l.pretax);
-    if (budget && !hasDimFilter()) {
+    const prevFull = sum(filterLines(state.prevFull), useBudget ? l => l.pretax : metricVal);
+    if (useBudget) {
       const r = fc.value / budget * 100;
       out.push({
         level: r >= 100 ? 'bad' : r >= (state.budgets.alertPct || 80) ? 'warn' : 'good', icon: 'wallet', rank: r >= 100 ? 0 : 2,
@@ -70,8 +72,11 @@ export function computeInsights() {
 
   // 3. 超预算 Key（当月）
   if (p.mode === 'month') {
-    const over = sortedAggs(byKey).filter(a => budgetOf(a.key) && a.pretax >= budgetOf(a.key));
-    if (over.length) out.push({ level: 'bad', icon: 'wallet', rank: 0, title: `${over.length} 个 API Key 已超出预算`, html: over.slice(0, 3).map(a => `${b(keyShort(a.key))} ${esc(money(a.pretax))} / ${esc(money(budgetOf(a.key)))}`).join('；'), go: '#/governance', goLabel: '查看治理' });
+    // 预算是 Key 的整月总额：按该 Key 的全部应付金额判断，不受模型等筛选影响（与治理页一致）
+    const full = new Map();
+    for (const l of state.lines) { const id = l.apiKeyId || NONE_KEY; full.set(id, (full.get(id) || 0) + l.pretax); }
+    const over = sortedAggs(byKey).filter(a => budgetOf(a.key) && (full.get(a.key) || 0) >= budgetOf(a.key));
+    if (over.length) out.push({ level: 'bad', icon: 'wallet', rank: 0, title: `${over.length} 个 API Key 已超出预算`, html: over.slice(0, 3).map(a => `${b(keyShort(a.key))} ${esc(money(full.get(a.key) || 0))} / ${esc(money(budgetOf(a.key)))}`).join('；'), go: '#/governance', goLabel: '查看治理' });
   }
 
   // 4. 费用集中度
@@ -107,7 +112,16 @@ export function computeInsights() {
 
   // 7. 治理风险
   const noDesc = ranked.filter(a => a.key !== NONE_KEY && !keyObj(a.key)?.description);
-  const deleted = ranked.filter(a => a.key !== NONE_KEY && ['deleted', 'bill'].includes(keyObj(a.key)?.source));
+  // 已删除的 Key 只统计删除日之后（账单时区）的费用，与 Key 治理一致：删除前的正常消费不是风险
+  const delDay = ts => { try { return new Intl.DateTimeFormat('en-CA', { timeZone: state.tz || 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(Number(ts))); } catch { return ''; } };
+  const deleted = ranked.filter(a => {
+    const k = keyObj(a.key);
+    if (a.key === NONE_KEY || !k) return false;
+    if (k.source === 'bill') return true;
+    if (k.source !== 'deleted' || !k.deletedAt) return false;
+    const dd = delDay(k.deletedAt);
+    return state.daily.some(l => l.apiKeyId === a.key && l.date > dd && l.pretax > 0.005);
+  });
   if (noDesc.length || deleted.length) {
     out.push({ level: 'warn', icon: 'shield', rank: 3, title: '存在需治理的 API Key', html: [
       noDesc.length ? `${b(noDesc.length + ' 个')}有消费的 Key 未填写描述（${noDesc.slice(0, 2).map(a => esc(a.key)).join('、')}），费用难以归属` : '',
@@ -120,7 +134,8 @@ export function computeInsights() {
   if (peak + off > 0 && peak / (peak + off) > 0.6) out.push({ level: 'info', icon: 'clock', rank: 7, title: `峰时调用占分时计费的 ${pct(peak, peak + off)}`, html: `峰时 ${b(money(peak))}，闲时 ${b(money(off))}。可将批量、离线类任务调度至闲时以降低单价。` });
 
   // 9. 新增模型
-  const prevModels = new Set(prevLines.map(l => l.model));
+  // 是否“新增”与上一个完整周期比较（本月进行中时 prev 只是上月同期，月初会把常用模型误判为新增）
+  const prevModels = new Set(filterLines(state.prevFull).map(l => l.model));
   const newModels = sortedAggs(aggregate(lines, l => l.model)).filter(a => a.cost > 0 && !prevModels.has(a.key));
   if (newModels.length && prevLines.length) out.push({ level: 'info', icon: 'model', rank: 8, title: `本期新增使用 ${newModels.length} 个模型`, html: newModels.slice(0, 4).map(a => `${b(a.key)} ${esc(money(a.cost))}`).join('、') + (newModels.length > 4 ? ' 等' : '') + '。', ...(newModels.length === 1 ? { model: newModels[0].key, modelLabel: '查看该模型' } : { go: '#/models', goLabel: '模型分析' }) });
 

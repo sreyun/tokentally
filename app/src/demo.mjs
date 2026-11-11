@@ -133,14 +133,27 @@ export function seedDemo(store, today) {
     store.finishRun(id, 'success', kind === 'meta' ? { workspaces: p === 'aliyun' ? WS.length : 1, apiKeys: (p === 'aliyun' ? ALI_KEYS : TC_KEYS).length, changes: 0, warnings: [] } : { cycles: cycles.map(c => ({ cycle: c, demo: true })), warnings: [] }, null, 0);
   }
   store.setSetting('demo', true);
+  store.setSetting('demo.seededFor', today);
 }
 
-/** 清除演示数据（配置真实访问密钥时调用） */
-export function clearDemo(store) {
+/** 演示数据是否需要按当前日期重新生成（跨天后“本月 / 昨日 / 闲置”等都会偏离） */
+export function demoStale(store, today) {
+  return store.getSetting('demo.seededFor', null) !== today;
+}
+
+/**
+ * 清除演示数据（配置真实访问密钥时调用；keepDemo=true 用于重新生成演示数据）。
+ * 变更记录清空后 ID 从 1 重新开始，告警状态中的变更游标、已发送记录也必须一起清除，否则真实的 Key 变更通知与报表会被跳过
+ */
+export function clearDemo(store, { keepDemo = false } = {}) {
   store.tx(() => {
     for (const t of ['bill_lines', 'bill_periods', 'bill_cycles', 'usage_lines', 'api_keys', 'workspaces', 'change_log', 'key_tags', 'ms_overview']) store.db.exec(`DELETE FROM ${t}`);
     store.q("DELETE FROM sync_runs WHERE trig = 'demo'").run();
   });
   store.setSetting('budgets', { monthly: null, alertPct: 80, keys: {} });
-  store.setSetting('demo', false);
+  const st = store.getSetting('alerts.state', null);
+  // 变更记录 ID 重新开始，变更游标必须清除；每日重新生成演示数据时保留报表 / 告警的已发送记录，避免每天重复发送
+  if (st) store.setSetting('alerts.state', keepDemo ? { ...st, lastChangeId: {} } : { channels: st.channels || {} });
+  store.setSetting('demo.seededFor', null);
+  if (!keepDemo) store.setSetting('demo', false);
 }

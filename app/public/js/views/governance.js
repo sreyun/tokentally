@@ -17,6 +17,8 @@ const RULES = {
   no_ws: { name: '未归属业务空间', severity: 'low', advice: '将 Key 归入对应项目的业务空间，便于按空间分摊成本。' },
 };
 const ipOpen = k => !(k.accessIps || []).length || (k.accessIps || []).some(ip => ip === '0.0.0.0/0' || ip === '::/0');
+/** 时间戳在账单时区中的日期（账单日按账单时区划分，不能用浏览器本地时区） */
+const billDay = ts => { try { return new Intl.DateTimeFormat('en-CA', { timeZone: state.tz || 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(Number(ts))); } catch { return new Date(Number(ts)).toISOString().slice(0, 10); } };
 
 /* 治理检查只依赖本期数据与预算（与筛选无关），但导航徽标每次重绘都会调用：按数据数组 + 预算缓存结果 */
 const findMemo = new WeakMap();
@@ -40,8 +42,14 @@ function computeFindingsRaw() {
     const id = k.apiKeyId, c = cost.get(id) || 0, act = state.keyActivity.get(id);
     const add = (rule, detail) => out.push({ rule, ruleName: RULES[rule].name, severity: RULES[rule].severity, advice: RULES[rule].advice, keyId: id, detail, cost: c });
     const live = k.source === 'api';
-    if ((k.source === 'deleted' || k.source === 'bill') && c > 0) add('deleted_billing', `${k.source === 'deleted' ? `${fmtTime(k.deletedAt, false)} 已从${PROVIDERS[k.provider || 'aliyun']}删除` : '不在当前 Key 列表'}，本期仍产生 ${money(c)}`);
-    if (live && k.disabled === true && c > 0) add('disabled_billing', `已禁用，本期产生 ${money(c)}`);
+    if (k.source === 'deleted' && k.deletedAt) {
+      // 只统计删除日之后（账单时区）的费用：删除前的正常消费（如轮换 Key、查看历史账期）不是风险
+      const delDay = billDay(k.deletedAt);
+      const after = sum((daily.get(id) || []).filter(l => l.date > delDay), l => l.pretax);
+      if (after > 0.005) add('deleted_billing', `${delDay} 已从${PROVIDERS[k.provider || 'aliyun']}删除，此后仍产生 ${money(after)}`);
+    } else if ((k.source === 'deleted' || k.source === 'bill') && c > 0) add('deleted_billing', `${k.source === 'deleted' ? '已删除' : '不在当前 Key 列表'}，本期仍产生 ${money(c)}`);
+    // 禁用没有时间记录：只在近 7 天仍有费用时提示（本期早些时候、禁用前的消费不算）
+    if (live && k.disabled === true && c > 0 && (act?.c7 || 0) > 0.005) add('disabled_billing', `已禁用，近 7 天仍产生 ${money(act.c7)}（本期合计 ${money(c)}）`);
     const budget = month ? budgetOf(id) : null;
     if (budget) {
       if (c >= budget) add('over_budget', `本期 ${money(c)}，预算 ${money(budget)}，超出 ${money(c - budget)}`);
@@ -51,8 +59,11 @@ function computeFindingsRaw() {
       }
     }
     if (act && act.c7 >= 10) {
-      const a7 = act.c7 / 7, a23 = (act.c30 - act.c7) / 23;
-      if (a7 > a23 * 2) add('spike', `近 7 天日均 ${money(a7)}，此前 23 天日均 ${money(a23)}（${a23 ? (a7 / a23).toFixed(1) + ' 倍' : '新增'}）`);
+      // 此前的日均只按 Key 已存在的天数计算：创建不足 30 天的 Key 不能把尚未存在的日子记为 0，误报“费用突增”
+      const age = k.gmtCreate ? Math.floor((Date.now() - Number(k.gmtCreate)) / 864e5) : 30;
+      const prevDays = Math.min(23, Math.max(0, age - 7));
+      const a7 = act.c7 / 7, a23 = prevDays ? (act.c30 - act.c7) / prevDays : null;
+      if (a23 != null && a7 > a23 * 2) add('spike', `近 7 天日均 ${money(a7)}，此前 ${prevDays} 天日均 ${money(a23)}（${a23 ? (a7 / a23).toFixed(1) + ' 倍' : '新增'}）`);
     }
     if (!k.description && (c > 0 || (act && act.c30 > 0))) add('no_desc', `本期 ${money(c)}，近 30 天 ${money(act?.c30 || 0)}`);
     if (useCc && !k.costCenter && c > 0) add('no_cc', `本期 ${money(c)}，未分配成本中心`);

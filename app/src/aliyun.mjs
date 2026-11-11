@@ -100,20 +100,28 @@ export function selfTest() {
 }
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
-
+export const MS_GAP_MS = 250;
 
 export class AliyunClient {
   constructor({ accessKeyId, accessKeySecret, securityToken = '', msRegion = 'cn-beijing', bssSite = 'cn' }) {
     if (!MS_REGIONS.includes(msRegion)) throw new Error(`不支持的百炼地域: ${msRegion}`);
-    if (!BSS_ENDPOINTS[bssSite]) throw new Error(`不支持的费用中心站点: ${bssSite}`);
+    if (!Object.hasOwn(BSS_ENDPOINTS, bssSite)) throw new Error(`不支持的费用中心站点: ${bssSite}`);
     Object.assign(this, { accessKeyId, accessKeySecret, securityToken, msRegion, bssSite });
     this.calls = 0;
+    this.msNext = 0;
   }
 
   async call(product, action, query = {}, attempt = 0) {
     const p = PRODUCTS[product];
     const def = p && p.actions[action];
     if (!def) throw new Error(`接口不在白名单中: ${product}.${action}`);
+    // 百炼 OpenAPI 限频较严（连续约 10 次调用即返回 Throttling.User）：同一客户端内的调用间隔至少 250ms。
+    // 同步预约时间片，并发调用也会依次排开
+    if (product === 'modelstudio') {
+      const slot = Math.max(Date.now(), this.msNext);
+      this.msNext = slot + MS_GAP_MS;
+      while (Date.now() < slot) await sleep(slot - Date.now()); // 定时器可能提前触发（Windows 时钟精度），循环直到时间片开始
+    }
     const [method, pathTpl] = def;
     const q = {};
     for (const [k, v] of Object.entries(query)) {
@@ -143,9 +151,11 @@ export class AliyunClient {
       if (attempt < 2) { await sleep(1500 * (attempt + 1)); return this.call(product, action, query, attempt + 1); }
       throw new AliyunError(action, 0, 'NetworkError', entry.message);
     }
-    let json;
-    try { json = JSON.parse(text); } catch { json = { Code: 'BadResponse', Message: text.slice(0, 300) }; }
-    const ok = res.ok && json.success !== false && json.Success !== false;
+    // 非 JSON 响应（网关 / 代理返回的 HTML 错误页等）即使是 HTTP 200 也不能当成功：否则会被当作“空列表 / 无账单”入库
+    let json, parsed = true;
+    try { json = JSON.parse(text); } catch { parsed = false; }
+    if (!parsed || !json || typeof json !== 'object') json = { Code: 'BadResponse', Message: `响应不是有效的 JSON（HTTP ${res.status}）：${String(text).slice(0, 200)}` };
+    const ok = parsed && res.ok && json.success !== false && json.Success !== false;
     Object.assign(entry, {
       ms: Date.now() - t0, status: res.status, ok,
       code: ok ? '' : String(json.Code ?? json.code ?? res.status),
@@ -154,7 +164,7 @@ export class AliyunClient {
     });
     recordCall(entry);
     if (!ok) {
-      if (/Throttling|ServiceUnavailable|InternalError|SystemBusy/i.test(entry.code) && attempt < 4) {
+      if ((/Throttling|ServiceUnavailable|InternalError|SystemBusy|BadResponse/i.test(entry.code) || res.status === 429 || res.status >= 500) && attempt < 4) {
         await sleep(1000 * 2 ** attempt + Math.random() * 500);
         return this.call(product, action, query, attempt + 1);
       }
@@ -170,13 +180,16 @@ export class AliyunClient {
     let token = '';
     for (let i = 0; i < 200; i++) {
       const r = await this.call('modelstudio', action, { ...base, maxResults: 100, nextToken: token || undefined });
+      if (r[arrKey] != null && !Array.isArray(r[arrKey])) throw new AliyunError(action, 200, 'BadResponse', `响应中的 ${arrKey} 不是列表`, r.requestId || r.RequestId);
       const items = r[arrKey] || [];
       out.push(...items);
       token = r.nextToken || '';
-      if (!token || seen.has(token) || !items.length) break;
+      if (!token || !items.length) return out;
+      // 重复的 nextToken 或达到页数上限：列表不完整，必须报错——元数据同步会把未取到的 Key 标记为已删除
+      if (seen.has(token)) throw new AliyunError(action, 200, 'BadResponse', '分页返回重复的 nextToken，列表不完整');
       seen.add(token);
     }
-    return out;
+    throw new AliyunError(action, 200, 'BadResponse', '分页超过 200 页，列表不完整');
   }
 
   /** BssOpenApi DescribeInstanceBill 分页（NextToken / MaxResults ≤ 300） */
@@ -186,7 +199,9 @@ export class AliyunClient {
     let token = '';
     for (let i = 0; i < 2000; i++) {
       const r = await this.call('bss', 'DescribeInstanceBill', { ...query, MaxResults: 300, NextToken: token || undefined });
-      const d = r.Data || {};
+      // 缺少 Data 的响应不是“当天没有账单”，不能用空结果替换已入库的账单
+      if (!r.Data || typeof r.Data !== 'object') throw new AliyunError('DescribeInstanceBill', 200, 'BadResponse', '响应缺少 Data', r.RequestId || r.requestId);
+      const d = r.Data;
       const items = Array.isArray(d.Items) ? d.Items : (d.Items?.Item || []);
       out.push(...items);
       token = d.NextToken || '';

@@ -2,8 +2,8 @@
 import {
   $, esc, state, ui, app, money, moneyShort, compact, intFmt, pct, sum, uniq, metricVal, METRICS, NONE_KEY, DIMS, keyObj, keyDesc, keyShort, wsName,
   filterLines, aggregate, sortedAggs, newAgg, totalTokens, topModels, unitsText, deltaPill, tipRows, icon, help, segCtl, fmtTime, budgetOf, budgetLevel,
-  forecastOf, isCurrentMonth, periodTag, copyBtn, PROVIDERS, provTag, multiCloud, isAdmin, modal, http, toast, NO_CC, NO_WS, NO_OWNER, perCall, daysBetween, usageFiltered, usageAgg, REQ_SRC,
-  dimLink, groupHash, hasTags,
+  forecastOf, isCurrentMonth, periodTag, copyBtn, PROVIDERS, provTag, multiCloud, isAdmin, modal, http, toast, NO_CC, NO_WS, NO_OWNER, perCallCovered, perCall, daysBetween, usageFiltered, usageAgg, REQ_SRC,
+  dimLink, groupHash, hasTags, callsOn, coveredCost, failRateOf,
 } from '../core.js';
 import { table, dataBar } from '../table.js';
 import { heatmap, dayCols } from '../charts.js';
@@ -36,7 +36,8 @@ export async function editTags(ids) {
         return { id: k.apiKeyId, costCenter: g('costCenter'), owner: g('owner'), note: g('note') };
       }).filter(it => { const k = keyObj(it.id); return (k.costCenter || '') !== it.costCenter || (k.owner || '') !== it.owner || (k.note || '') !== it.note; });
       if (!items.length) return { count: 0 };
-      await http('PUT', '/api/admin/key-tags', { items });
+      // 分批保存：服务端每次最多 2000 条，请求体也有大小限制
+      for (let i = 0; i < items.length; i += 500) await http('PUT', '/api/admin/key-tags', { items: items.slice(i, i + 500) });
       return { count: items.length };
     },
   });
@@ -49,6 +50,10 @@ export function keyRows() {
   const pByKey = aggregate(filterLines(state.prev), DIMS.key.of);
   const daily = filterLines(state.daily);
   const dByKey = new Map(); daily.forEach(l => { const id = l.apiKeyId || NONE_KEY; if (!dByKey.has(id)) dByKey.set(id, []); dByKey.get(id).push(l); });
+  // 预算是每个 Key 的整月总额：预算使用与预计月末按该 Key 的全部费用计算，不受模型 / Token 类型等筛选影响（与治理页一致）
+  const fullByKey = new Map(), fullDaily = new Map();
+  for (const l of state.lines) { const id = l.apiKeyId || NONE_KEY; fullByKey.set(id, (fullByKey.get(id) || 0) + l.pretax); }
+  for (const l of state.daily) { const id = l.apiKeyId || NONE_KEY; let a = fullDaily.get(id); if (!a) fullDaily.set(id, a = []); a.push(l); }
   const total = sum([...byKey.values()], a => a.cost);
   const f = ui.f, q = f.q.trim().toLowerCase();
   const narrowing = f.model || f.dir || f.item || f.channel !== '__all';
@@ -69,7 +74,9 @@ export function keyRows() {
     return true;
   });
   const month = state.data.period.mode === 'month';
-  const allocKeys = new Set(lines.filter(l => l.alloc).map(l => l.apiKeyId || NONE_KEY));
+  // 费用口径按 Key 记录最大值：1 = 按用量分摊真实账单，2 = 按目录价估算（不能把估算标成“分摊”）
+  const allocKeys = new Map();
+  for (const l of lines) if (l.alloc) { const id = l.apiKeyId || NONE_KEY; allocKeys.set(id, Math.max(allocKeys.get(id) || 0, l.alloc)); }
   const usageByKey = usageAgg(usageFiltered() || [], u => u.apiKeyId);
   const pp = state.data.period, calDays = Math.max(1, daysBetween(pp.from, pp.to < state.today ? pp.to : state.today));
   return { total, rows: ids.map(id => {
@@ -81,14 +88,17 @@ export function keyRows() {
     else if (k.disabled === true) { status = '已禁用'; st = 'off'; }
     else if (k.disabled === false) { status = '启用'; st = 'on'; }
     const tokens = totalTokens(a);
-    const budget = month ? budgetOf(id === NONE_KEY ? null : id) : null;
-    const fc = budget && isCurrentMonth() ? forecastOf(dByKey.get(id) || [], l => l.pretax) : null;
+    // “无 API Key”的预算保存在 keys.__none__（预算管理页同名条目），不能取月度总预算
+    const budget = month ? budgetOf(id) : null;
+    const fc = budget && isCurrentMonth() ? forecastOf(fullDaily.get(id) || [], l => l.pretax) : null;
     const ipOpen = !(k.accessIps || []).length || (k.accessIps || []).some(x => x === '0.0.0.0/0' || x === '::/0');
-    const us = usageByKey.get(id);
+    // 只有该云厂商有调用次数数据源时才使用用量行（阿里云关闭调用次数后库里残留的旧数据不能出现）
+    const us = id !== NONE_KEY && callsOn(k.provider || 'aliyun') ? usageByKey.get(id) : null;
+    const pc = perCallCovered(us, dByKey.get(id));
     return {
       provider: k.provider || (id === NONE_KEY ? '' : 'aliyun'), costCenter: k.costCenter || '', owner: k.owner || '', note: k.note || '', remark: k.remark || '',
-      requests: us ? us.requests : null, failRate: us && us.requests ? us.fails / us.requests : null, alloc: allocKeys.has(id) ? 1 : 0,
-      tokPer: perCall(us, a.cost)?.tokPer ?? null, costPer: perCall(us, a.cost)?.costPer ?? null, dayTok: totalTokens(a) / calDays,
+      requests: us ? us.requests : null, failRate: failRateOf(us), alloc: allocKeys.get(id) || 0,
+      tokPer: pc?.tokPer ?? null, costPer: pc?.costPer ?? null, dayTok: totalTokens(a) / calDays, budgetUsed: fullByKey.get(id) || 0,
       id, apiKeyId: id === NONE_KEY ? '' : id, desc: keyShort(id), hasDesc: !!k.description, masked: k.apiKeyValue || '', wsName: id === NONE_KEY ? '—' : wsName(k.wsKey), wsId: k.wsKey || '',
       status, st, deletedAt: k.deletedAt,
       perm: id === NONE_KEY || !k.authType ? '—' : k.authType === 'All' || k.allowAllModels ? '全部模型' : `${(k.accessibleModels || []).length} 个模型`,
@@ -108,7 +118,7 @@ export function render(v) {
   const spent = rows.filter(r => r.cost > 0 && r.id !== NONE_KEY);
   const top = rows.slice().sort((a, b) => b.cost - a.cost)[0];
   const withBudget = rows.filter(r => r.budget);
-  const over = withBudget.filter(r => r.pretax >= r.budget || (r.fc != null && r.fc >= r.budget));
+  const over = withBudget.filter(r => r.budgetUsed >= r.budget || (r.fc != null && r.fc >= r.budget));
   v.innerHTML = `
     <div class="stat-strip">
       <div><span>API Key 总数</span><b>${all.length}</b></div>
@@ -131,7 +141,7 @@ export function render(v) {
   const tagged = rows.some(r => r.costCenter || r.owner);
   const hasUsage = rows.some(r => r.requests != null);
   const cols = [
-    { key: 'desc', label: 'API Key', csvLabel: '描述', fmt: (x, r) => `<span class="sw" style="background:${DIMS.key.color(r.id)}"></span><b style="font-weight:600">${esc(x)}</b>${provTag(r.provider)}${!r.hasDesc && r.id !== NONE_KEY ? '<span class="tag warn">无描述</span>' : ''}${r.alloc ? '<span class="tag" title="腾讯云账单不含 API Key，费用按 TokenHub 用量占比分摊">分摊</span>' : ''}<span class="sub mono">${esc(r.apiKeyId || '—')}${copyBtn(r.apiKeyId, '复制 Key ID')}${r.masked ? ' · ' + esc(r.masked) : ''}</span>` },
+    { key: 'desc', label: 'API Key', csvLabel: '描述', fmt: (x, r) => `<span class="sw" style="background:${DIMS.key.color(r.id)}"></span><b style="font-weight:600">${esc(x)}</b>${provTag(r.provider)}${!r.hasDesc && r.id !== NONE_KEY ? '<span class="tag warn">无描述</span>' : ''}${r.alloc === 2 ? '<span class="tag warn" title="缺少腾讯云计费权限，按 TokenHub 目录价 × 用量估算（不含折扣与阶梯价）">估算</span>' : r.alloc ? '<span class="tag" title="腾讯云账单不含 API Key，费用按 TokenHub 用量占比分摊">分摊</span>' : ''}<span class="sub mono">${esc(r.apiKeyId || '—')}${copyBtn(r.apiKeyId, '复制 Key ID')}${r.masked ? ' · ' + esc(r.masked) : ''}</span>` },
     { key: 'wsName', label: '业务空间', title: '点击业务空间名称查看该空间的全部 Key、模型与趋势', fmt: (x, r) => (r.id === NONE_KEY ? '—' : dimLink('ws', r.wsId || NO_WS, x)) + (r.wsId ? `<span class="sub mono">${esc(r.wsId)}</span>` : '') },
   ];
   if (tagged || isAdmin()) cols.push(
@@ -143,7 +153,7 @@ export function render(v) {
     { key: 'chg', label: state.compareLabel, align: 'r', fmt: (x, r) => deltaPill(r.cost, r.prevCost), csv: r => r.chg.toFixed(6) },
     { key: 'share', label: '占比', align: 'r', fmt: x => (x ? (x * 100).toFixed(1) + '%' : '-'), csv: r => (r.share * 100).toFixed(2) + '%' },
   );
-  if (month) cols.push({ key: 'budgetUse', label: '预算使用', fmt: (x, r) => budgetCell(r), sortVal: r => (r.budget ? r.pretax / r.budget : -1), csv: r => (r.budget ? `${(r.pretax / r.budget * 100).toFixed(1)}%` : '') });
+  if (month) cols.push({ key: 'budgetUse', label: '预算使用', fmt: (x, r) => budgetCell(r), sortVal: r => (r.budget ? r.budgetUsed / r.budget : -1), csv: r => (r.budget ? `${(r.budgetUsed / r.budget * 100).toFixed(1)}%` : '') });
   cols.push(
     { key: 'tIn', label: '输入 Token', align: 'r', fmt: x => intFmt(x) },
     { key: 'tOut', label: '输出 Token', align: 'r', fmt: x => intFmt(x) },
@@ -153,7 +163,7 @@ export function render(v) {
     ...(hasUsage ? [
       { key: 'requests', label: '请求数', title: REQ_SRC, align: 'r', fmt: x => (x == null ? '<span class="muted">—</span>' : intFmt(x)), sortVal: r => r.requests ?? -1 },
       { key: 'tokPer', label: '单次均 Token', title: '单次平均 Token = 总 Token ÷ 请求数（阿里云取同日同 Key 同模型的账单 Token）', align: 'r', fmt: x => (x == null ? '<span class="muted">—</span>' : intFmt(x)), sortVal: r => r.tokPer ?? -1, csv: r => (r.tokPer == null ? '' : Math.round(r.tokPer)) },
-      { key: 'costPer', label: '单次均费用', title: '单次平均费用 = 本期费用 ÷ 请求数', align: 'r', fmt: x => (x == null ? '<span class="muted">—</span>' : money(x, x < 0.01 ? 4 : 3)), sortVal: r => r.costPer ?? -1, csv: r => (r.costPer == null ? '' : r.costPer.toFixed(6)) },
+      { key: 'costPer', label: '单次均费用', title: '单次平均费用 = 有调用数据的日期的费用 ÷ 请求数', align: 'r', fmt: x => (x == null ? '<span class="muted">—</span>' : money(x, x < 0.01 ? 4 : 3)), sortVal: r => r.costPer ?? -1, csv: r => (r.costPer == null ? '' : r.costPer.toFixed(6)) },
       { key: 'failRate', label: '失败率', title: '失败请求 ÷ 请求数', align: 'r', fmt: x => (x == null ? '<span class="muted">—</span>' : `<span class="${x >= 0.05 ? 'bad-text' : x >= 0.01 ? 'warn-text' : ''}">${(x * 100).toFixed(2)}%</span>`), sortVal: r => r.failRate ?? -1, csv: r => (r.failRate == null ? '' : (r.failRate * 100).toFixed(2) + '%') },
     ] : []),
     { key: 'topModels', label: '主要模型', title: '点击模型查看该 Key 在该模型上的消耗', fmt: (x, r) => r.topModelList.map(m => dimLink('model', m, m, { global: true, key: r.id })).join('、') || '<span class="muted">—</span>' },
@@ -168,7 +178,7 @@ export function render(v) {
     sort: 'cost', pageSize: 100, caption: 'API Key 明细', rowClass: r => (r.deletedAt ? 'deleted' : ''),
     onRowClick: r => (r.id === NONE_KEY ? app.setFilter({ key: NONE_KEY }, '#/detail') : app.go(`#/key/${encodeURIComponent(r.id)}`)),
     columns: cols,
-    csvExtra: [{ label: '云厂商', val: r => PROVIDERS[r.provider] || '' }, { label: 'API Key ID', val: r => r.apiKeyId }, { label: 'API Key（脱敏）', val: r => r.masked }, { label: '负责人', val: r => r.owner }, { label: '备注', val: r => r.note || r.remark }, { label: '费用口径', val: r => (r.alloc ? '按用量分摊' : '账单直接归属') }, { label: '业务空间ID', val: r => r.wsId }, { label: '原价', val: r => r.gross.toFixed(6) }, { label: '上期费用', val: r => r.prevCost.toFixed(6) }, { label: '缓存命中 Token', val: r => Math.round(r.tCache) }, { label: '向量 Token', val: r => Math.round(r.tEmb) }, { label: '其他用量', val: r => r.units }, { label: '近30天', val: r => r.c30.toFixed(2) }, { label: '月度预算', val: r => r.budget ?? '' }, { label: '可访问模型', val: r => r.permTip }, { label: '创建人', val: r => r.createdBy }],
+    csvExtra: [{ label: '云厂商', val: r => PROVIDERS[r.provider] || '' }, { label: 'API Key ID', val: r => r.apiKeyId }, { label: 'API Key（脱敏）', val: r => r.masked }, { label: '负责人', val: r => r.owner }, { label: '备注', val: r => r.note || r.remark }, { label: '费用口径', val: r => (r.alloc === 2 ? '目录价估算' : r.alloc ? '按用量分摊' : '账单直接归属') }, { label: '业务空间ID', val: r => r.wsId }, { label: '原价', val: r => r.gross.toFixed(6) }, { label: '上期费用', val: r => r.prevCost.toFixed(6) }, { label: '缓存命中 Token', val: r => Math.round(r.tCache) }, { label: '向量 Token', val: r => Math.round(r.tEmb) }, { label: '其他用量', val: r => r.units }, { label: '近30天', val: r => r.c30.toFixed(2) }, { label: '月度预算', val: r => r.budget ?? '' }, { label: '可访问模型', val: r => r.permTip }, { label: '创建人', val: r => r.createdBy }],
     footer: rs => cols.map(c => (c.key === 'desc' ? `合计 ${rs.length} 个` : c.key === 'cost' ? money(sum(rs, r => r.cost)) : c.key === 'chg' ? deltaPill(sum(rs, r => r.cost), sum(rs, r => r.prevCost)) : c.key === 'tIn' ? intFmt(sum(rs, r => r.tIn)) : c.key === 'tOut' ? intFmt(sum(rs, r => r.tOut)) : c.key === 'c7' ? money(sum(rs, r => r.c7)) : '')),
   }).setRows(rows);
   $('#onlySpent', v).onchange = e => { ui.onlySpent = e.target.checked; app.render(); };
@@ -191,7 +201,7 @@ export function render(v) {
 
 export function budgetCell(r) {
   if (!r.budget) return '<span class="muted">未设置</span>';
-  const p = r.pretax / r.budget * 100, lv = budgetLevel(r.pretax, r.budget), fl = r.fc != null ? budgetLevel(r.fc, r.budget) : '';
+  const p = r.budgetUsed / r.budget * 100, lv = budgetLevel(r.budgetUsed, r.budget), fl = r.fc != null ? budgetLevel(r.fc, r.budget) : '';
   const color = lv === 'bad' ? 'var(--crit)' : lv === 'warn' ? 'var(--warn)' : 'var(--accent)';
   return `<div class="mini-budget" title="预算 ${esc(money(r.budget))}${r.fc != null ? `，预计月末 ${esc(money(r.fc))}` : ''}"><span><b>${p.toFixed(0)}%</b> <span class="muted">/ ${esc(moneyShort(r.budget))}</span>${fl === 'bad' && lv !== 'bad' ? ' <span class="pill bad">预计超</span>' : ''}</span>
     <div class="progress"><i style="width:${Math.min(100, p).toFixed(1)}%;background:${color}"></i></div></div>`;

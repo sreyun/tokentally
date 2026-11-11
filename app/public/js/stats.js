@@ -3,7 +3,7 @@
  *  - Token：总量与结构（输入非缓存 / 缓存命中 / 输出 / 向量）、输出/输入比、日均、峰值日、消耗天数、按次计费用量
  *  - 调用（腾讯云 TokenHub 用量统计；阿里云百炼监控投递的云监控 Prometheus）：请求次数、成功率、单次平均 Token（输入 / 输出 / 缓存命中）、单次平均费用、每千次费用
  * ========================================================================= */
-import { esc, state, ui, money, compact, intFmt, uniq, sum, METRICS, WEEK, weekday, daysBetween, totalTokens, deltaPill, unitsText, icon, help, perCall, REQ_SRC } from './core.js';
+import { esc, state, ui, money, compact, intFmt, uniq, sum, METRICS, WEEK, weekday, daysBetween, totalTokens, deltaPill, unitsText, icon, help, perCallCovered, perCall, coveredCost, REQ_SRC } from './core.js';
 import { columnChart, legendHtml } from './charts.js';
 
 export const periodDays = p => Math.max(1, daysBetween(p.from, p.to < state.today ? p.to : state.today));
@@ -19,7 +19,9 @@ export function tokenStatsHtml({ a, pa, daily, us, period, scope = 'key', provid
   daily.forEach(l => { if (l.tokens) dayTok.set(l.date, (dayTok.get(l.date) || 0) + l.tokens); });
   const peak = [...dayTok.entries()].sort((x, y) => y[1] - x[1])[0];
   const active = [...dayTok.values()].filter(x => x > 0).length;
-  const pc = perCall(us, a.cost);
+  // 单次平均费用只用有调用数据的日期的费用；日均请求按有调用数据的天数计算
+  const pc = perCallCovered(us, daily);
+  const usDays = us?.days?.size || 0;
   const units = unitsText(a);
   const cell = (label, value, sub = '', cls = '') => `<div class="tok-cell ${cls}"><span>${esc(label)}</span><b>${value}</b>${sub ? `<em>${sub}</em>` : ''}</div>`;
   const share = x => (tokens ? `占 ${(x / tokens * 100).toFixed(1)}%` : '');
@@ -43,10 +45,10 @@ export function tokenStatsHtml({ a, pa, daily, us, period, scope = 'key', provid
         ${units ? cell('按次 / 其他计费用量', esc(units), '非 Token 计费项') : ''}
       </div></div>
       <div class="tok-group"><h4>调用</h4>${pc ? `<div class="tok-cells">
-        ${cell('请求次数', intFmt(pc.requests), `日均 ${intFmt(pc.requests / calDays)} 次${scope === 'model' && us.keys ? ` · ${us.keys.size} 个 Key` : ''}`, 'big')}
+        ${cell('请求次数', intFmt(pc.requests), `日均 ${intFmt(pc.requests / Math.max(1, usDays))} 次${usDays < calDays ? `（按 ${usDays} 天调用数据）` : ''}${scope === 'model' && us.keys ? ` · ${us.keys.size} 个 Key` : ''}`, 'big')}
         ${pc.success == null ? cell('成功率', '—', '阿里云未配置失败次数指标') : cell('成功率', (pc.success * 100).toFixed(2) + '%', `失败 ${intFmt(pc.fails)} 次`, pc.success < 0.95 ? 'bad' : pc.success < 0.99 ? 'warn' : '')}
         ${cell('单次平均 Token', intFmt(pc.tokPer), `输入 ${intFmt(pc.inPer)} · 输出 ${intFmt(pc.outPer)}`)}
-        ${cell('单次平均费用', money(pc.costPer, pc.costPer < 0.01 ? 4 : 3), `每千次 ${money(pc.costPerK)}`)}
+        ${cell('单次平均费用', money(pc.costPer, pc.costPer < 0.01 ? 4 : 3), `每千次 ${money(pc.costPerK)}${usDays < calDays ? ` · 仅计有调用数据的 ${usDays} 天费用` : ''}`)}
         ${cell('单次平均缓存命中', intFmt(us.cache / pc.requests), us.input ? `占输入 ${(us.cache / us.input * 100).toFixed(1)}%` : '')}
       </div>` : `<div class="tok-empty">${icon('info')}<div><b>暂无调用次数数据</b><span>${esc(why)}</span></div></div>`}</div>
     </div>`;
@@ -76,7 +78,8 @@ export function drawDailyRequests(el, legendEl, us, period, { height = 240 } = {
   columnChart(el, {
     xs: days, series: [{ id: 'ok', label: '成功', color: 'var(--s3)' }, { id: 'fail', label: '失败', color: 'var(--s8)' }], height, fmt: x => intFmt(x),
     cell: (x, s) => { const d = us.days.get(x); return d ? (s === 'ok' ? d.requests - d.fails : d.fails) : 0; },
-    avg: days.length ? us.requests / periodDays(period) : null, xLabel: x => x.slice(5),
+    avg: days.length ? us.requests / days.length : null, xLabel: x => x.slice(5), // 均值按有调用数据的天数
+
     tipTitle: x => { const d = us.days.get(x); return `${x}（周${WEEK[weekday(x)]}）${d && d.requests ? ` · 单次平均 ${intFmt(d.tokens / d.requests)} Token` : ''}`; },
     empty: '本期无调用记录',
   });

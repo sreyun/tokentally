@@ -9,6 +9,7 @@ import https from 'node:https';
 import dns from 'node:dns';
 import net from 'node:net';
 import zlib from 'node:zlib';
+import { Writable, pipeline } from 'node:stream';
 
 const METRIC_RE =/^[a-zA-Z_:][a-zA-Z0-9_:]*$/;
 const LABEL_RE = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
@@ -96,8 +97,14 @@ export async function fetchCalls(client, cfg, { from, to, tz, nowSec = Math.floo
       const byEnd = new Map(ends.map((t, i) => [t, full[i]]));
       const uniform = ends.every((t, i) => !i || t - ends[i - 1] === 86400);
       if (uniform) {
-        const data = await client.queryRange(buildQuery(q), ends[0], ends[ends.length - 1], 86400);
-        for (const r of parseDaily(data, { ...cfg, dayOf: t => byEnd.get(Math.round(t)) })) put(r.day, r.keyValue, r.model, field, r.value);
+        // 按 31 天分段查询：长回读窗口一次查询的响应在内存中会膨胀数十倍；
+        // 返回点按最近的日终时刻（±12 小时）对应到自然日：部分后端（如 VictoriaMetrics、带缓存的查询前端）会把步长对齐到 UTC 零点
+        const dayAt = t => { const i = Math.round((t - ends[0]) / 86400); return i >= 0 && i < full.length && Math.abs(t - ends[i]) <= 43200 ? full[i] : byEnd.get(Math.round(t)); };
+        for (let i = 0; i < ends.length; i += 31) {
+          const seg = ends.slice(i, i + 31);
+          const data = await client.queryRange(buildQuery(q), seg[0], seg[seg.length - 1], 86400);
+          for (const r of parseDaily(data, { ...cfg, dayOf: dayAt })) put(r.day, r.keyValue, r.model, field, r.value);
+        }
       } else {
         for (const d of full) {
           const s = dayStartSec(d, tz), e = dayStartSec(nextDay(d), tz);
@@ -151,27 +158,40 @@ export class PromClient {
     else if (authType === 'raw' && token) this.headers.Authorization = token;
     else if (authType === 'basic' && (username || password)) this.headers.Authorization = 'Basic ' + Buffer.from(`${username}:${password}`).toString('base64');
   }
-  /** 原始 GET：返回 { status, text }；仅 http/https，不跟随重定向，限制大小与超时 */
+  /**
+   * 原始 GET：返回 { status, text }；仅 http/https，不跟随重定向，限制大小与超时。
+   * 响应体用 stream.pipeline 读取：gzip 响应中途断开（代理超时、Prometheus 重启）时也会报错，而不是让 Promise 永远挂起、
+   * 进而卡住整个账单同步；另设总时限，不依赖套接字空闲超时
+   */
   raw(u) {
     const host = u.hostname.replace(/^\[|\]$/g, '');
     if (net.isIP(host) && promBlocked(host, this.allowLoopback)) return Promise.reject(Object.assign(new Error(`目标地址 ${host} 不允许访问（元数据 / 本机 / 保留地址）`), { code: 'EBLOCKED' }));
     const mod = u.protocol === 'https:' ? https : http;
     this.calls++;
     return new Promise((resolve, reject) => {
-      const req = mod.request(u, { method: 'GET', headers: this.headers, timeout: this.timeoutMs, lookup: guardedLookup(this.allowLoopback) }, res => {
-        let stream = res;
-        if (/gzip/i.test(res.headers['content-encoding'] || '')) { stream = res.pipe(zlib.createGunzip()); stream.on('error', reject); }
+      let done = false, req = null;
+      const finish = (err, v) => {
+        if (done) return;
+        done = true; clearTimeout(timer);
+        if (err) { req?.destroy(); reject(err); } else resolve(v);
+      };
+      const timer = setTimeout(() => finish(Object.assign(new Error('请求超时'), { code: 'ETIMEDOUT' })), Math.max(60_000, this.timeoutMs * 3));
+      timer.unref?.();
+      req = mod.request(u, { method: 'GET', headers: this.headers, timeout: this.timeoutMs, lookup: guardedLookup(this.allowLoopback) }, res => {
         const chunks = []; let size = 0;
-        stream.on('data', c => {
-          size += c.length;
-          if (size > MAX_BODY) { req.destroy(); reject(new Error('Prometheus 响应过大，请缩小查询范围或增加过滤条件')); return; }
-          chunks.push(c);
+        const sink = new Writable({
+          write(c, _enc, cb) {
+            size += c.length;
+            if (size > MAX_BODY) return cb(new Error('Prometheus 响应过大，请缩小查询范围或增加过滤条件'));
+            chunks.push(c); cb();
+          },
         });
-        stream.on('end', () => resolve({ status: res.statusCode, text: Buffer.concat(chunks).toString('utf8') }));
-        stream.on('error', reject);
+        const streams = /gzip/i.test(res.headers['content-encoding'] || '') ? [res, zlib.createGunzip(), sink] : [res, sink];
+        pipeline(...streams, err => (err ? finish(err.code === 'ERR_STREAM_PREMATURE_CLOSE' ? Object.assign(new Error('响应中断'), { code: 'ECONNRESET' }) : err)
+          : finish(null, { status: res.statusCode, text: Buffer.concat(chunks).toString('utf8') })));
       });
       req.on('timeout', () => req.destroy(Object.assign(new Error('请求超时'), { code: 'ETIMEDOUT' })));
-      req.on('error', reject);
+      req.on('error', e => finish(e));
       req.end();
     });
   }
@@ -245,8 +265,10 @@ export function parseDaily(data, { keyLabel, modelLabel, dayOf }) {
     const keyValue = String(s.metric?.[keyLabel] ?? ''), model = modelLabel ? String(s.metric?.[modelLabel] ?? '') : '';
     for (const [t, v] of s.values || (s.value ? [s.value] : [])) {
       const n = Number(v), day = dayOf(Number(t));
-      if (!day || !Number.isFinite(n) || n <= 0) continue;
-      out.push({ day, keyValue, model, value: Math.round(n) });
+      if (!day || !Number.isFinite(n)) continue;
+      const value = Math.round(n); // increase() 外推可能得到 0.3 这样的值：四舍五入为 0 的不生成“0 次调用”的行
+      if (value <= 0) continue;
+      out.push({ day, keyValue, model, value });
     }
   }
   return out;
@@ -293,16 +315,20 @@ export function buildUsageRows(cells, { keys, billTokens }) {
     row.requests += c.requests; row.fails += Math.min(c.fails, c.requests);
     rows.set(k, row);
   }
-  // 模型名对不上的行：把该 Key 当日未被其他模型认领的账单 Token 按调用次数比例分给它们，保证 Key 级单次平均与账单一致
+  // 模型名对不上的行：把该 Key 当日未被其他模型认领的账单 Token 按调用次数比例分给它们，保证 Key 级单次平均与账单一致。
+  // 没有模型名的行（未配置模型标签，或个别序列缺少该标签）只有在该 Key 当日没有其他带模型名的行时才取整个 Key 的 Token，
+  // 否则与模型行重复计算，按剩余未认领的 Token 分配
+  const withModel = new Set();
+  for (const row of rows.values()) if (row.model) withModel.add(`${row.day}\u0001${row.api_key_id}`);
   const pending = new Map(), claimedBy = new Map();
   for (const row of rows.values()) {
     const dk = `${row.day}\u0001${row.api_key_id}`;
-    const a = row.model ? tok.get(`${dk}\u0001${normModel(row.model)}`) : tokKey.get(dk);
+    const a = row.model ? tok.get(`${dk}\u0001${normModel(row.model)}`) : (withModel.has(dk) ? null : tokKey.get(dk));
     if (a) {
       Object.assign(row, { input_tokens: a.input, output_tokens: a.output, cache_tokens: a.cache, total_tokens: a.total });
       const c = claimedBy.get(dk) || { input: 0, output: 0, cache: 0, total: 0 };
       c.input += a.input; c.output += a.output; c.cache += a.cache; c.total += a.total; claimedBy.set(dk, c);
-    } else if (row.model) { if (!pending.has(dk)) pending.set(dk, []); pending.get(dk).push(row); }
+    } else if (row.model || withModel.has(dk)) { if (!pending.has(dk)) pending.set(dk, []); pending.get(dk).push(row); }
   }
   for (const [k, list] of pending) {
     const all = tokKey.get(k);
@@ -310,9 +336,10 @@ export function buildUsageRows(cells, { keys, billTokens }) {
     const claimed = claimedBy.get(k) || { input: 0, output: 0, cache: 0, total: 0 };
     const rest = { input: all.input - claimed.input, output: all.output - claimed.output, cache: all.cache - claimed.cache, total: all.total - claimed.total };
     if (rest.total <= 0) continue;
-    const req = list.reduce((s, r) => s + r.requests, 0) || list.length;
+    // 权重合计必须为 1：按调用次数分配；全部为 0 次时平均分配
+    const req = list.reduce((s, r) => s + r.requests, 0);
     for (const row of list) {
-      const w = (row.requests || (req === list.length ? 1 : 0)) / req;
+      const w = req > 0 ? row.requests / req : 1 / list.length;
       Object.assign(row, { input_tokens: Math.max(0, rest.input * w), output_tokens: Math.max(0, rest.output * w), cache_tokens: Math.max(0, rest.cache * w), total_tokens: rest.total * w });
     }
   }

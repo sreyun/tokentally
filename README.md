@@ -224,10 +224,13 @@ flowchart LR
 | `HTTP_PORT` / `BIND_ADDR` | 8080 / 0.0.0.0 | 对外端口与绑定地址 |
 | `TRUST_PROXY` / `COOKIE_SECURE` | false / auto | 反向代理（true 或可信代理层数，客户端 IP 取 X-Forwarded-For 右起第 N 个）与 Cookie Secure |
 | `DOMAIN` | — | `https` profile（Caddy 自动证书）使用的域名 |
-| `ALLOW_CIDRS` | — | IP 白名单（健康检查不受限） |
+| `ALLOW_CIDRS` | — | IP 白名单（健康检查不受限；格式错误时拒绝启动） |
+| `RATE_LIMIT_PER_MIN` | 600 | 每个 IP 每分钟的接口请求上限（静态资源不计入） |
+| `TRUSTED_PROXIES` | 本机 / 内网 / 100.64.0.0/10 | 只信任来自这些地址的 X-Forwarded-* 头（配合 `TRUST_PROXY`） |
 | `SESSION_IDLE_MINUTES` / `SESSION_MAX_HOURS` | 120 / 12 | 会话超时 |
 | `LOGIN_MAX_FAILURES` / `LOGIN_LOCK_MINUTES` / `LOGIN_MAX_PER_IP` | 5 / 15 / 20 | 登录防暴力破解 |
-| `BILL_TZ` | Asia/Shanghai | 账单自然日时区 |
+| `BILL_TZ` | Asia/Shanghai | 账单自然日时区：须与阿里云出账时区一致（中国站为北京时间，一般不要修改；无效时区拒绝启动；腾讯云固定按北京时间） |
+| `MAX_DATA_LINES` | 100000 | 日期范围查询返回的按日账单行上限（本期 + 对比期） |
 | `ALIBABA_CLOUD_ACCESS_KEY_ID` / `_SECRET` | — | 可选：首次启动导入阿里云密钥后加密存库 |
 | `TENCENTCLOUD_SECRET_ID` / `_KEY` | — | 可选：首次启动导入腾讯云密钥后加密存库 |
 | `PUBLIC_URL` | — | 告警消息中的跳转链接 |
@@ -292,11 +295,13 @@ app/public   index.html · login.html · app.css · js/（main · core · charts
 docs/        DEPLOYMENT.md · images/
 ```
 
-不用 Docker 也能运行（Node.js ≥ 22.13）：
+不用 Docker 也能运行（Node.js ≥ 22.16，需要 node:sqlite 的在线备份接口）：
 
 ```bash
-cd app && APP_MASTER_KEY=$(openssl rand -base64 32) DATA_DIR=./data DEMO_DATA=true node --disable-warning=ExperimentalWarning src/server.mjs
+cd app && DATA_DIR=./data DEMO_DATA=true node --disable-warning=ExperimentalWarning src/server.mjs
 ```
+
+未设置 `APP_MASTER_KEY` 时主密钥自动生成并保存在 `DATA_DIR/.master.key`。生产环境请用 `openssl rand -base64 32` **生成一次**后固定写入环境变量（不要每次启动重新生成，否则已保存的访问密钥与告警地址都无法解密）。
 
 ## 🤝 参与贡献
 
