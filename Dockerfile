@@ -11,6 +11,8 @@ WORKDIR /app
 COPY --chown=root:root app/package.json ./
 COPY --chown=root:root app/src ./src
 COPY --chown=root:root app/public ./public
+# IP 归属地离线库（ip2region，Apache-2.0 / MIT），只读查询，不联网
+COPY --chown=root:root app/geo ./geo
 
 # 应用代码只读；数据目录归 node 用户（uid 1000）
 RUN mkdir -p /data && chown node:node /data && chmod 700 /data \

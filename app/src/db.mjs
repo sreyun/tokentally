@@ -144,7 +144,7 @@ const INSERT_COLS = ['provider', 'granularity', 'period', 'cycle', 'product_code
 export const DEFAULT_ALIYUN = { msRegion: 'cn-beijing', bssSite: 'cn', productCode: '' };
 export const DEFAULT_TENCENT = { region: 'ap-guangzhou', site: 'cn', businessCode: '', estimate: true };
 export const DEFAULT_SYNC = { metaIntervalMin: 5, billIntervalMin: 60, backfillMonths: 3, perWorkspaceKeys: true, concurrency: 3 };
-export const DEFAULT_BRANDING = { name: '大模型费用分析', subtitle: 'TokenTally · 多云 LLM 成本' };
+export const DEFAULT_BRANDING = { name: '大模型费用分析', subtitle: 'TokenTally · 多云 LLM 成本', accent: 'blue' };
 
 const n0 = v => (v == null || v === '' ? null : v);
 const shiftDay = (d, n) => { const t = new Date(d + 'T00:00:00Z'); t.setUTCDate(t.getUTCDate() + n); return t.toISOString().slice(0, 10); };

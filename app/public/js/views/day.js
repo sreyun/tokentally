@@ -1,7 +1,7 @@
 /* 当日明细抽屉：从每日费用图表 / 热力图 / 明细下钻，查看某一天（可限定 Key、业务空间、模型等范围）的费用构成 */
 import { $, esc, state, ui, app, money, compact, intFmt, pct, sum, metricVal, METRICS, NONE_KEY, DIMS, keyShort,
   aggregate, aggAll, sortedAggs, totalTokens, deltaPill, icon, ioInfo, WEEK, weekday, addDays, scopeLines, scopeUsage, scopeLabel, scopeFilter,
-  dimVal, dimName, groupHash, callsOn, usageAgg } from '../core.js';
+  dimVal, dimName, groupHash, callsOn, usageAgg, toneOf } from '../core.js';
 import { rankList } from '../charts.js';
 import { table } from '../table.js';
 
@@ -88,6 +88,6 @@ export function openDay(date, scope = null) {
 }
 
 function tile(ic, label, value, delta, cmp, meta) {
-  return `<section class="kpi"><div class="kpi-h"><span class="kpi-ico">${icon(ic)}</span><span>${esc(label)}</span></div><div class="value">${value}</div>
+  return `<section class="kpi" data-tone="${toneOf(ic)}"><div class="kpi-h"><span class="kpi-ico">${icon(ic)}</span><span>${esc(label)}</span></div><div class="value">${value}</div>
     <div class="trend">${delta || ''}${delta && cmp ? `<span class="cmp">${esc(cmp)}</span>` : ''}</div><div class="meta" title="${esc(meta)}">${esc(meta)}</div></section>`;
 }

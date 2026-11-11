@@ -7,8 +7,7 @@ import {
   $, esc, state, ui, app, LS, http, money, moneyShort, compact, intFmt, pct, sum, uniq, metricVal, METRICS, NONE_KEY, DIMS,
   keyObj, keyShort, filterLines, aggregate, addAgg, aggAll, sortedAggs, newAgg, totalTokens, topModels, deltaPill, icon, help, segCtl,
   fmtTime, periodTag, copyBtn, PROVIDERS, provTag, multiCloud, hasTags, NO_WS, NO_CC, NO_OWNER, dimVal, keyDimVal, dimName, DIM_LABEL,
-  scopeLines, scopeUsage, groupHash, dimLink, isSet, keyMatch, usageFiltered, usageAgg, callsOn, perCallCovered, perCall, coveredCost, daysBetween, WEEK, weekday, channelLabel,
-} from '../core.js';
+  scopeLines, scopeUsage, groupHash, dimLink, isSet, keyMatch, usageFiltered, usageAgg, callsOn, perCallCovered, perCall, coveredCost, daysBetween, WEEK, weekday, channelLabel, toneOf } from '../core.js';
 import { columnChart, rankList, divergingList, segbar, legendList, legendHtml, bindLegend, bindActivate } from '../charts.js';
 import { table, dataBar } from '../table.js';
 import { billDimsHtml, keyModelMatrix } from './models.js';
@@ -473,6 +472,6 @@ function notFound(msg) {
   return `<button class="back" data-back="#/workspaces">${icon('chevL')}返回</button><div class="panel empty"><h2>没有可显示的数据</h2><div>${esc(msg)}</div><div class="row" style="justify-content:center;margin-top:14px"><button class="btn primary" data-go="#/workspaces">查看业务分析</button></div></div>`;
 }
 function tile(ic, label, value, delta, cmp, meta) {
-  return `<section class="kpi"><div class="kpi-h"><span class="kpi-ico">${icon(ic)}</span><span>${esc(label)}</span></div><div class="value">${value}</div>
+  return `<section class="kpi" data-tone="${toneOf(ic)}"><div class="kpi-h"><span class="kpi-ico">${icon(ic)}</span><span>${esc(label)}</span></div><div class="value">${value}</div>
     <div class="trend">${delta || ''}${delta && cmp ? `<span class="cmp">${esc(cmp)}</span>` : ''}</div><div class="meta" title="${esc(meta)}">${esc(meta)}</div></section>`;
 }

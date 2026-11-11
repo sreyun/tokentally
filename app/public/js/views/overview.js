@@ -3,7 +3,7 @@ import {
   $, esc, state, ui, app, money, moneyShort, compact, intFmt, pct, sum, uniq, metricVal, METRICS, NONE_KEY, DIMS, keyShort, wsName,
   filterLines, aggregate, aggAll, sortedAggs, totalTokens, topModels, deltaPill, tipRows, icon, help, segCtl, forecastOf, budgetOf,
   budgetBar, activeFilterCount, channelLabel, addDays, daysBetween, WEEK, weekday, isCurrentMonth, lastDayOf as lastDayOfCycle,
-  multiCloud, hasTags, PROVIDERS, usageFiltered, usageAgg, callsOn, NO_WS, NO_CC, NO_OWNER, groupHash, dimVal, dimName,
+  multiCloud, hasTags, PROVIDERS, usageFiltered, usageAgg, callsOn, NO_WS, NO_CC, NO_OWNER, groupHash, dimVal, dimName, toneOf,
 } from '../core.js';
 import { sparkline, columnChart, lineChart, rankList, divergingList, segbar, legendList, topParts, legendHtml, bindActivate, bindLegend } from '../charts.js';
 import { computeInsights, cacheSavings } from '../insights.js';
@@ -45,6 +45,12 @@ export function render(v) {
   const prevFullCost = sum(filterLines(state.prevFull), metricVal);
   // 仅当筛选后的账单全部来自有调用次数数据源的云厂商时，Token 卡片附带请求数与单次平均（否则会低估单次平均，不展示以免误导）
   const uf = usageFiltered(), ua = uf && lines.length && lines.every(l => callsOn(l.provider)) ? usageAgg(uf, () => "a").get("a") : null;
+  // KPI 迷你趋势：按日计算各指标（与卡片口径一致），比率类指标按最小 ~ 最大值缩放只看走势
+  const ds = dailySeries(daily, days);
+  const spk = (tone, vals, title, fmt, opts = {}) => (days.length > 1 ? `<div class="kspark" data-tip="${esc(sparkTip(title, days, vals, fmt))}">${sparkline(vals, `var(--t-${tone})`, { height: 36, ...opts })}</div>` : '');
+  const cum = cumulative(days, dayCost, p.from);
+  const monthDays = p.mode === 'month' ? daysBetween(p.from, lastDayOfCycle(p.cycle)) : cum.length;
+  const cnt = v => `${v} 个`, pctF = v => (v * 100).toFixed(1) + '%';
 
   v.innerHTML = `
   <div class="kpis">
@@ -59,15 +65,16 @@ export function render(v) {
         <div><span>日均</span><b>${moneyShort(avgDay)}</b></div>
       </div>
       ${budget ? budgetBar(sum(lines, l => l.pretax), budget, fc ? forecastOf(daily, l => l.pretax).value : null) : ''}
-      <div class="spark" data-tip="${esc(tipRows('每日费用', [['天数', days.length], ['日均', money(avgDay)]]))}">${sparkline(days.map(x => dayCost.get(x) || 0))}</div>
+      <div class="spark" data-tip="${esc(sparkTip('每日费用', days, days.map(x => dayCost.get(x) || 0), v => money(v)))}">${sparkline(days.map(x => dayCost.get(x) || 0), 'var(--accent)')}</div>
     </section>
-    ${fc ? kpi('forecast', '预计本月费用', moneyShort(fc.value), deltaPill(fc.value, prevFullCost), '较上月全月', `按 ${fc.fullDays} 个完整日的日均推算`)
-      : kpi('calendar', '日均费用', money(avgDay), '', '', `${calDays} 天 · 峰值 ${peakText(days, dayCost)}`)}
-    ${kpi('key', '活跃 API Key', `${active}<small>/ ${state.apiKeys.size}</small>`, deltaPill(active, pActive, { neutral: true }), state.compareLabel, top1 ? `最高：${keyShort(top1.key)} 占 ${pct(top1.cost, cur.cost)}` : '—', '', '#/keys', '查看 Key 分析')}
-    ${kpi('token', 'Token 总量', noTok ? '—' : compact(tokens), noTok ? '' : deltaPill(tokens, pTokens, { neutral: true }), noTok ? '' : state.compareLabel, noTok ? '当前数据无用量' : ua && ua.requests ? `请求 ${compact(ua.requests)} 次 · 单次 ${intFmt(ua.tokens / ua.requests)} Token` : `输入 ${compact(cur.tIn)} · 输出 ${compact(cur.tOut)}`, intFmt(tokens), '#/models', '查看模型 Token 结构')}
-    ${kpi('unit', '每百万 Token 成本', perM == null ? '—' : money(perM), perM == null ? '' : deltaPill(perM, pPerM), perM == null ? '' : state.compareLabel, '费用 ÷ 总 Token × 10⁶')}
-    ${kpi('cache', '缓存命中率', hit == null ? '—' : (hit * 100).toFixed(1) + '%', hit == null ? '' : deltaPill(hit, pHit, { pp: true, goodWhenUp: true }), hit == null ? '' : state.compareLabel, saved > 0.01 ? `估算节省 ${moneyShort(saved)}` : hit == null ? '—' : `命中 ${compact(cur.tCache)} Token`)}
-    ${kpi('model', '使用模型', String([...byModel.values()].filter(a => a.cost > 0).length), '', '', byModel.size ? `主力：${sortedAggs(byModel)[0].key}` : '—', '', '#/models', '查看模型分析')}
+    ${fc ? kpi('forecast', '预计本月费用', moneyShort(fc.value), deltaPill(fc.value, prevFullCost), '较上月全月', `按 ${fc.fullDays} 个完整日的日均推算`, '', '', '',
+        cum.length ? `<div class="kspark" data-tip="${esc(tipRows('本月累计与预测', [['已累计', money(cum.at(-1))], ['月末预测', money(fc.value)], ['剩余天数', `${Math.max(0, monthDays - cum.length)} 天`]]))}">${sparkline(cum, 'var(--t-violet)', { height: 36, proj: { n: monthDays, end: fc.value } })}</div>` : '')
+      : kpi('calendar', '日均费用', money(avgDay), '', '', `${calDays} 天 · 峰值 ${peakText(days, dayCost)}`, '', '', '', spk('violet', ds.map(d => d.cost), '每日费用', v => money(v)))}
+    ${kpi('key', '活跃 API Key', `${active}<small>/ ${state.apiKeys.size}</small>`, deltaPill(active, pActive, { neutral: true }), state.compareLabel, top1 ? `最高：${keyShort(top1.key)} 占 ${pct(top1.cost, cur.cost)}` : '—', '', '#/keys', '查看 Key 分析', spk('teal', ds.map(d => d.keys), '每日有消费的 API Key', cnt))}
+    ${kpi('token', 'Token 总量', noTok ? '—' : compact(tokens), noTok ? '' : deltaPill(tokens, pTokens, { neutral: true }), noTok ? '' : state.compareLabel, noTok ? '当前数据无用量' : ua && ua.requests ? `请求 ${compact(ua.requests)} 次 · 单次 ${intFmt(ua.tokens / ua.requests)} Token` : `输入 ${compact(cur.tIn)} · 输出 ${compact(cur.tOut)}`, intFmt(tokens), '#/models', '查看模型 Token 结构', noTok ? '' : spk('sky', ds.map(d => d.tok), '每日 Token', compact))}
+    ${kpi('unit', '每百万 Token 成本', perM == null ? '—' : money(perM), perM == null ? '' : deltaPill(perM, pPerM), perM == null ? '' : state.compareLabel, '费用 ÷ 总 Token × 10⁶', '', '', '', perM == null ? '' : spk('amber', ds.map(d => d.perM), '每日每百万 Token 成本', v => money(v), { zero: false }))}
+    ${kpi('cache', '缓存命中率', hit == null ? '—' : (hit * 100).toFixed(1) + '%', hit == null ? '' : deltaPill(hit, pHit, { pp: true, goodWhenUp: true }), hit == null ? '' : state.compareLabel, saved > 0.01 ? `估算节省 ${moneyShort(saved)}` : hit == null ? '—' : `命中 ${compact(cur.tCache)} Token`, '', '', '', hit == null ? '' : spk('indigo', ds.map(d => d.hit), '每日缓存命中率', pctF, { zero: false }))}
+    ${kpi('model', '使用模型', String([...byModel.values()].filter(a => a.cost > 0).length), '', '', byModel.size ? `主力：${sortedAggs(byModel)[0].key}` : '—', '', '#/models', '查看模型分析', spk('fuchsia', ds.map(d => d.models), '每日使用的模型', cnt))}
   </div>
 
   <div class="bi">
@@ -154,11 +161,39 @@ export function render(v) {
 }
 
 /** KPI 卡片；go 不为空时整张卡片可点击跳转（沿用当前筛选） */
-function kpi(ic, label, value, delta, cmp, meta, title, go = '', goTip = '') {
-  return `<section class="kpi ${go ? 'kpi-go' : ''}" ${go ? `data-go="${esc(go)}" role="link" tabindex="0" title="${esc(goTip)}"` : ''}><div class="kpi-h"><span class="kpi-ico">${icon(ic)}</span><span>${esc(label)}</span>${go ? `<span class="kpi-arrow" aria-hidden="true">${icon('chevR')}</span>` : ''}</div>
+function kpi(ic, label, value, delta, cmp, meta, title, go = '', goTip = '', spark = '') {
+  return `<section class="kpi ${go ? 'kpi-go' : ''}" data-tone="${toneOf(ic)}" ${go ? `data-go="${esc(go)}" role="link" tabindex="0" title="${esc(goTip)}"` : ''}><div class="kpi-h"><span class="kpi-ico">${icon(ic)}</span><span>${esc(label)}</span>${go ? `<span class="kpi-arrow" aria-hidden="true">${icon('chevR')}</span>` : ''}</div>
     <div class="value" ${title ? `title="${esc(title)}"` : ''}>${value}</div>
-    <div class="trend">${delta || ''}${delta && cmp ? `<span class="cmp">${esc(cmp)}</span>` : ''}</div>
+    <div class="trend">${delta || ''}${delta && cmp ? `<span class="cmp">${esc(cmp)}</span>` : ''}</div>${spark}
     <div class="meta" title="${esc(meta)}">${esc(meta)}</div></section>`;
+}
+/** 按日指标：费用、有消费的 Key 数、模型数、Token、每百万 Token 成本、缓存命中率 */
+function dailySeries(daily, days) {
+  const m = new Map(days.map(d => [d, { cost: 0, keys: new Map(), models: new Map(), tok: 0, tIn: 0, tCache: 0 }]));
+  for (const l of daily) {
+    const o = m.get(l.date); if (!o) continue;
+    const c = metricVal(l); o.cost += c;
+    const k = l.apiKeyId || NONE_KEY;
+    if (k !== NONE_KEY) o.keys.set(k, (o.keys.get(k) || 0) + c);
+    o.models.set(l.model, (o.models.get(l.model) || 0) + c);
+    if (l.tokens != null) { o.tok += l.tokens; if (l.ioi.dir === 'in') { o.tIn += l.tokens; if (l.ioi.cache === 'hit') o.tCache += l.tokens; } }
+  }
+  const pos = mp => [...mp.values()].filter(v => v > 0).length;
+  return days.map(d => { const o = m.get(d); return { cost: o.cost, keys: pos(o.keys), models: pos(o.models), tok: o.tok, perM: o.tok ? o.cost / o.tok * 1e6 : null, hit: o.tIn ? o.tCache / o.tIn : null }; });
+}
+/** 本期累计费用（按自然日，无账单的日期沿用前一日累计值） */
+function cumulative(days, dayCost, from) {
+  if (!days.length) return [];
+  const out = []; let acc = 0;
+  for (let d = from; d <= days.at(-1); d = addDays(d, 1)) { acc += dayCost.get(d) || 0; out.push(acc); }
+  return out;
+}
+/** 迷你趋势提示：最高 / 最低 / 最近 */
+function sparkTip(title, days, vals, fmt) {
+  const pts = days.map((d, i) => [d, vals[i]]).filter(x => x[1] != null && Number.isFinite(x[1]));
+  if (!pts.length) return tipRows(title, [['暂无数据', '']]);
+  const hi = pts.reduce((a, b) => (b[1] > a[1] ? b : a)), lo = pts.reduce((a, b) => (b[1] < a[1] ? b : a)), last = pts.at(-1);
+  return tipRows(title, [['最高', `${fmt(hi[1])}（${hi[0].slice(5)}）`], ['最低', `${fmt(lo[1])}（${lo[0].slice(5)}）`], ['最近', `${fmt(last[1])}（${last[0].slice(5)}）`]]);
 }
 function peakText(days, dayCost) {
   if (!days.length) return '-';

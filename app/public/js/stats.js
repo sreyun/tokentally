@@ -3,7 +3,7 @@
  *  - Token：总量与结构（输入非缓存 / 缓存命中 / 输出 / 向量）、输出/输入比、日均、峰值日、消耗天数、按次计费用量
  *  - 调用（腾讯云 TokenHub 用量统计；阿里云百炼监控投递的云监控 Prometheus）：请求次数、成功率、单次平均 Token（输入 / 输出 / 缓存命中）、单次平均费用、每千次费用
  * ========================================================================= */
-import { esc, state, ui, money, compact, intFmt, uniq, sum, METRICS, WEEK, weekday, daysBetween, totalTokens, deltaPill, unitsText, icon, help, perCallCovered, perCall, coveredCost, REQ_SRC } from './core.js';
+import { esc, state, ui, money, compact, intFmt, uniq, sum, WEEK, weekday, daysBetween, totalTokens, deltaPill, unitsText, icon, help, perCallCovered, perCall, coveredCost, REQ_SRC } from './core.js';
 import { columnChart, legendHtml } from './charts.js';
 
 export const periodDays = p => Math.max(1, daysBetween(p.from, p.to < state.today ? p.to : state.today));
@@ -41,7 +41,6 @@ export function tokenStatsHtml({ a, pa, daily, us, period, scope = 'key', provid
         ${cell('日均 Token', compact(tokens / calDays), `按 ${calDays} 个自然日`)}
         ${cell('峰值日', peak ? compact(peak[1]) : '—', peak ? `${peak[0].slice(5)}（周${WEEK[weekday(peak[0])]}）` : '')}
         ${cell('消耗天数', `${active}<small>/ ${calDays}</small>`, active ? `活跃日均 ${compact(tokens / active)}` : '')}
-        ${cell('每百万 Token 成本', tokens ? money(a.cost / tokens * 1e6) : '—', `${METRICS[ui.f.metric]} ÷ Token × 10⁶`)}
         ${units ? cell('按次 / 其他计费用量', esc(units), '非 Token 计费项') : ''}
       </div></div>
       <div class="tok-group"><h4>调用</h4>${pc ? `<div class="tok-cells">

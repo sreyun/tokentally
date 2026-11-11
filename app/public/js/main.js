@@ -251,11 +251,49 @@ function render(extraNotices = [], { layoutOnly = false } = {}) {
     if (route.name === 'admin') r.view.render(v, route.arg || 'aliyun');
     else if (r.arg) r.view.render(v, route.arg);
     else r.view.render(v);
+    playEnter(v);
   } catch (e) {
     console.error(e);
     v.innerHTML = `<div class="notice err">${icon('warn')}<div><b>页面渲染出错</b><span class="why">${esc(e.message)}</span></div></div>`;
   }
 }
+/* ---------------- 动效 ---------------- */
+let animKey = '', animTimer = 0;
+const reducedMotion = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
+/** 页面进入动效（卡片依次浮现、图表生长、数字滚动）；同一页面的后台刷新、筛选与窗口缩放重绘不重复播放 */
+function playEnter(v) {
+  const k = `${route.name}/${route.arg || ''}`;
+  if (k === animKey) return;
+  animKey = k;
+  if (reducedMotion()) return;
+  v.classList.remove('anim'); void v.offsetWidth; v.classList.add('anim');
+  clearTimeout(animTimer); animTimer = setTimeout(() => v.classList.remove('anim'), 1400);
+  countUp(v);
+}
+/** KPI 数值从 0 滚动到目标值（保持原有前后缀、小数位与千分位） */
+function countUp(root) {
+  const items = [];
+  for (const el of root.querySelectorAll('.kpi .value')) {
+    const tn = [...el.childNodes].find(n => n.nodeType === 3 && /\d/.test(n.nodeValue));
+    const m = tn && tn.nodeValue.match(/^([^\d-]*)(-?[\d,]*\.?\d+)(.*)$/s);
+    if (!m) continue;
+    const target = parseFloat(m[2].replace(/,/g, ''));
+    if (!Number.isFinite(target) || target === 0) continue;
+    items.push({ tn, pre: m[1], suf: m[3], target, dec: (m[2].split('.')[1] || '').length, grp: m[2].includes(','), final: tn.nodeValue });
+  }
+  if (!items.length) return;
+  const t0 = performance.now(), D = 700;
+  const fmt = (x, it) => (it.grp ? x.toLocaleString('zh-CN', { minimumFractionDigits: it.dec, maximumFractionDigits: it.dec }) : x.toFixed(it.dec));
+  const step = now => {
+    const p = Math.min(1, (now - t0) / D), e = 1 - (1 - p) ** 3;
+    for (const it of items) it.tn.nodeValue = p >= 1 ? it.final : it.pre + fmt(it.target * e, it) + it.suf;
+    if (p < 1) requestAnimationFrame(step);
+  };
+  requestAnimationFrame(step);
+}
+/* 顶栏：页面滚动后显示分隔线与阴影 */
+addEventListener('scroll', () => $('#topbar').classList.toggle('scrolled', scrollY > 4), { passive: true });
+
 function renderSkeleton() {
   $('#view').innerHTML = `<div class="kpis">${'<div class="kpi skeleton" style="height:120px"></div>'.repeat(4)}</div><div class="bi"><div class="panel c8 skeleton" style="height:320px"></div><div class="panel c4 skeleton" style="height:320px"></div></div>`;
 }
@@ -284,6 +322,7 @@ function renderSideFoot() {
   const s = state.status;
   if (!s) return;
   const b = s.branding || {};
+  applyAccent(b.accent);
   $('#brandName').textContent = b.name || '大模型费用分析';
   $('#brandSub').textContent = b.subtitle || '';
   const d = s.data;
@@ -689,6 +728,15 @@ $('#btnCollapse').onclick = () => { $('#app').classList.toggle('collapsed'); LS.
 $('#drawer').addEventListener('click', e => { if (e.target === $('#drawer')) $('#drawer').close(); });
 
 /* ---------------- 主题 ---------------- */
+const ACCENTS = ['blue', 'indigo', 'violet', 'teal', 'graphite'];
+/** 界面主题色（系统管理 → 品牌与备份）；图表数据颜色不随主题色变化 */
+function applyAccent(a) {
+  const v = ACCENTS.includes(a) && a !== 'blue' ? a : '';
+  if ((document.documentElement.dataset.accent || '') === v) return;
+  if (v) document.documentElement.dataset.accent = v; else delete document.documentElement.dataset.accent;
+  try { localStorage.setItem('bc.accent', v || 'blue'); } catch { /* ignore */ }
+}
+app.applyAccent = applyAccent;
 const THEMES = ['auto', 'light', 'dark'];
 const getTheme = () => { try { const t = localStorage.getItem('bc.theme'); return THEMES.includes(t) ? t : 'auto'; } catch { return 'auto'; } };
 function applyTheme(t) {
@@ -700,6 +748,8 @@ function applyTheme(t) {
 $('#btnTheme').onclick = () => {
   const next = THEMES[(THEMES.indexOf(getTheme()) + 1) % THEMES.length];
   try { localStorage.setItem('bc.theme', next); } catch { /* ignore */ }
+  const html = document.documentElement;
+  if (!reducedMotion()) { html.classList.add('theme-anim'); setTimeout(() => html.classList.remove('theme-anim'), 450); }
   applyTheme(next);
   toast(`已切换为${{ auto: '跟随系统', light: '浅色', dark: '深色' }[next]}主题`, '', 1500);
 };

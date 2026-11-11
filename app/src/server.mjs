@@ -16,9 +16,10 @@ import { selfTest, AliyunClient, explainAliyunError, callLog, MS_REGIONS, BSS_EN
 import { tc3SelfTest, TencentClient, explainTencentError, TC_REGIONS, TC_SITES } from './tencent.mjs';
 import { seedDemo, clearDemo, demoStale } from './demo.mjs';
 import { PromClient, validateCalls, discover, fetchCalls, buildUsageRows, buildQuery, DEFAULT_CALLS, MAPPING_FIELDS, PROM_AUTH } from './prom.mjs';
+import { configureIpLoc, ipLoc, ipLocInfo } from './iploc.mjs';
 import { loadMasterKey, hashPassword, verifyPassword, burnPasswordCheck, checkPasswordPolicy, randomPassword, maskId, sha256 } from './crypto.mjs';
 
-const VERSION = '1.5.3';
+const VERSION = '1.6.0';
 
 /* ===================================================================
  * 系统日志：所有运行日志同时输出到控制台并写入数据库（system_log，保留 SYSTEM_LOG_DAYS 天），
@@ -49,9 +50,13 @@ for (const w of config.warnings) log('配置警告：' + w);
 
 {
   const a = selfTest(), t = tc3SelfTest();
+  configureIpLoc({ dataDir: config.dataDir });
   if (process.argv.includes('--selftest')) {
     console.log(a ? 'ACS3-HMAC-SHA256（阿里云）签名自检通过' : 'ACS3-HMAC-SHA256（阿里云）签名自检失败');
     console.log(t ? 'TC3-HMAC-SHA256（腾讯云）签名自检通过' : 'TC3-HMAC-SHA256（腾讯云）签名自检失败');
+    // IP 归属地离线库：缺失或损坏只影响归属地显示，不影响构建
+    const g = ipLoc('114.114.114.114'), gi = ipLocInfo();
+    console.log(g ? `IP 归属地离线库自检通过（${gi.v4.file}）` : `IP 归属地离线库不可用，将只区分内网 / 公网${gi.errors.length ? '：' + gi.errors.join('；') : ''}`);
     process.exit(a && t ? 0 : 1);
   }
   if (!a || !t) { console.error('云 API 签名自检失败，服务未启动'); process.exit(1); }
@@ -196,7 +201,7 @@ if (config.backupKeep > 0) {
  * =================================================================== */
 const PUBLIC_DIR = path.join(import.meta.dirname, '..', 'public');
 const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml' };
-const PUBLIC_ROUTES = { '/login': 'login.html', '/login.js': 'login.js', '/app.css': 'app.css', '/favicon.svg': 'favicon.svg' };
+const PUBLIC_ROUTES = { '/login': 'login.html', '/login.js': 'login.js', '/boot.js': 'boot.js', '/app.css': 'app.css', '/favicon.svg': 'favicon.svg' };
 const PRIVATE_ROUTES = { '/': 'index.html', '/index.html': 'index.html' };
 /** 前端 ES 模块：仅允许 /js/xxx.js 与 /js/views/xxx.js，需登录 */
 const MODULE_RE = /^\/js\/(?:views\/)?[a-z0-9-]+\.js$/;
@@ -252,6 +257,8 @@ const trustedProxies = (() => {
  *  - realip：代理设置的 X-Real-IP（Nginx / OpenResty 常用 proxy_set_header X-Real-IP $remote_addr）
  * 转发头只在连接来自可信代理（TRUSTED_PROXIES）时采用
  */
+/** 界面主题色预设（与 app.css 中 [data-accent] 对应） */
+const ACCENTS = ['blue', 'indigo', 'violet', 'teal', 'graphite'];
 const IP_SOURCES = { env: '跟随环境变量 TRUST_PROXY', direct: '直连：使用连接地址', xff: 'X-Forwarded-For（按可信代理层数）', realip: 'X-Real-IP' };
 let netCfg = { ipSource: 'env', hops: 1, ...(store.getSetting('network', null) || {}) };
 function ipMode() {
@@ -277,7 +284,7 @@ function clientIp(req) {
 function ipDiagnose(req) {
   const peer = peerOf(req), trusted = peerTrusted(req), list = xffList(req), real = firstIp(req.headers['x-real-ip']), m = ipMode();
   const isPub = ip => !!net.isIP(ip) && !isPrivateIp(ip);
-  const candidates = list.map((ip, i) => ({ hops: list.length - i, ip, public: isPub(ip) })).reverse(); // 右起：第 1 个是最近一层代理追加的地址
+  const candidates = list.map((ip, i) => ({ hops: list.length - i, ip, public: isPub(ip), loc: ipLoc(ip) })).reverse(); // 右起：第 1 个是最近一层代理追加的地址
   let suggest;
   if (!list.length && !real) {
     suggest = isPub(peer) ? { source: 'direct', ip: peer, text: '请求直接到达本服务，使用连接地址即可' }
@@ -291,7 +298,7 @@ function ipDiagnose(req) {
     else suggest = { source: m.source, hops: m.hops, ip: list.at(-1) || real, text: '转发头中都是内网地址：如果你正在内网访问，这是正常的；否则请检查代理链是否把真实客户端地址传递下来' };
   }
   return {
-    peer, trusted, xff: list, xRealIp: real, forwardedProto: String(req.headers['x-forwarded-proto'] || ''), forwardedHost: String(req.headers['x-forwarded-host'] || ''), host: String(req.headers.host || ''),
+    peer, peerLoc: ipLoc(peer), xRealIpLoc: ipLoc(real), resolvedLoc: ipLoc(clientIp(req)), trusted, xff: list, xRealIp: real, forwardedProto: String(req.headers['x-forwarded-proto'] || ''), forwardedHost: String(req.headers['x-forwarded-host'] || ''), host: String(req.headers.host || ''),
     resolved: clientIp(req), mode: m, sources: IP_SOURCES, saved: netCfg, candidates, suggest, envTrustProxy: config.trustProxy, envHops: config.proxyHops,
     trustedProxies: config.trustedProxies.length ? config.trustedProxies : ['127.0.0.0/8', '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '100.64.0.0/10', '::1/128', 'fc00::/7'],
   };
@@ -604,6 +611,7 @@ function adminSettingsOut() {
       masterKeySource: master.source, encryption: 'AES-256-GCM', passwordHash: 'scrypt (N=32768, r=8, p=1)',
       sessionIdleMinutes: config.sessionIdleMinutes, sessionMaxHours: config.sessionMaxHours, trustProxy: ipMode().source !== 'direct', proxyHops: ipMode().hops, ipSource: ipMode().source, ipSourceFrom: ipMode().from,
       cookieSecure: config.cookieSecure, allowCidrs: config.allowCidrs, loginMaxFailures: config.login.maxFailuresPerUser, lockMinutes: config.login.lockMinutes,
+      ipDb: ipLocInfo(),
     },
   };
 }
@@ -784,7 +792,7 @@ async function putSettings(body, ctx) {
   if (body.branding) {
     const b = body.branding, cur = store.branding();
     const txt = (v, max, d) => (typeof v === 'string' ? v.replace(/[<>"'`\\\u0000-\u001f]/g, '').trim().slice(0, max) || d : d);
-    const next = { name: txt(b.name, 24, cur.name), subtitle: txt(b.subtitle, 48, '') };
+    const next = { name: txt(b.name, 24, cur.name), subtitle: txt(b.subtitle, 48, ''), accent: ACCENTS.includes(b.accent) ? b.accent : (cur.accent || 'blue') };
     applies.push(() => { store.setSetting('branding', next); diff('branding', cur, next); });
   }
   if (body.sync) {
@@ -898,7 +906,7 @@ async function testConnection(body) {
 const USER_RE = /^[A-Za-z0-9_.@-]{3,32}$/;
 const userOut = u => ({
   id: u.id, username: u.username, role: u.role, disabled: !!u.disabled, mustChange: !!u.must_change, locked: !!(u.locked_until && u.locked_until > Date.now()),
-  lastLoginAt: u.last_login_at, lastLoginIp: u.last_login_ip, pwChangedAt: u.pw_changed_at, createdAt: u.created_at, sessions: u.sessions ?? 0,
+  lastLoginAt: u.last_login_at, lastLoginIp: u.last_login_ip, lastLoginLoc: ipLoc(u.last_login_ip), pwChangedAt: u.pw_changed_at, createdAt: u.created_at, sessions: u.sessions ?? 0,
 });
 
 /* ===================================================================
@@ -1293,7 +1301,7 @@ route('PUT', '/api/admin/network', async (req, res, ctx) => {
   return json(req, res, 200, ipDiagnose(req));
 }, { admin: true });
 route('GET', '/api/admin/calls', async (req, res) => json(req, res, 200, { calls: callLog }), { admin: true });
-route('GET', '/api/admin/audit', async (req, res) => json(req, res, 200, { audit: store.listAudit(1000) }), { admin: true });
+route('GET', '/api/admin/audit', async (req, res) => json(req, res, 200, { audit: store.listAudit(1000).map(r => ({ ...r, loc: ipLoc(r.ip) })) }), { admin: true });
 route('GET', '/api/admin/users', async (req, res) => json(req, res, 200, { users: store.listUsers().map(userOut) }), { admin: true });
 /*
  * 用户管理：创建管理员、提升为管理员、重置他人密码属于提权 / 接管账号的敏感操作，与更换密钥一样需要当前登录密码确认；

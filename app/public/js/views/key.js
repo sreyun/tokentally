@@ -3,8 +3,7 @@ import {
   $, esc, state, ui, app, http, money, moneyShort, compact, intFmt, pct, sum, uniq, metricVal, METRICS, NONE_KEY, DIMS, keyObj, keyShort, keyDesc, wsName,
   aggregate, aggAll, sortedAggs, totalTokens, deltaPill, tipRows, icon, help, segCtl, fmtTime, budgetOf, budgetLevel, forecastOf, channelLabel,
   WEEK, weekday, ioInfo, num, periodTag, daysBetween, copyBtn, PROVIDERS, provTag, isAdmin, usageAgg, normModel, REQ_SRC,
-  dimLink, NO_WS, groupHash, callsOn, perCallCovered, coveredCost, failRateOf, perCall,
-} from '../core.js';
+  dimLink, NO_WS, groupHash, callsOn, perCallCovered, coveredCost, failRateOf, perCall, toneOf } from '../core.js';
 import { columnChart, rankList, segbar, legendList, legendHtml, bindLegend, bindActivate } from '../charts.js';
 import { table, dataBar } from '../table.js';
 import { billDimsHtml, itemKey, itemUsage } from './models.js';
@@ -203,7 +202,7 @@ function budgetTile(used, budget, fcv) {
   const p = used / budget * 100, lv = budgetLevel(used, budget), fl = fcv != null ? budgetLevel(fcv, budget) : '';
   const color = lv === 'bad' ? 'var(--crit)' : lv === 'warn' ? 'var(--warn)' : 'var(--accent)';
   const cls = x => (x === 'bad' ? 'bad-text' : x === 'warn' ? 'warn-text' : '');
-  return `<section class="kpi"><div class="kpi-h"><span class="kpi-ico">${icon('wallet')}</span><span>月度预算 ${esc(moneyShort(budget))}</span></div>
+  return `<section class="kpi" data-tone="blue"><div class="kpi-h"><span class="kpi-ico">${icon('wallet')}</span><span>月度预算 ${esc(moneyShort(budget))}</span></div>
     <div class="value ${cls(lv)}">${p.toFixed(1)}%<small>已用</small></div>
     <div class="progress" style="margin:6px 0 2px"><i style="width:${Math.min(100, p).toFixed(1)}%;background:${color}"></i></div>
     <div class="meta ${cls(fl)}" title="${fcv != null ? esc(`预计月末 ${money(fcv)}`) : ''}">${fcv != null ? `预计月末 ${esc(moneyShort(fcv))}（${(fcv / budget * 100).toFixed(0)}%）${fcv > budget ? ' · 将超支' : ''}` : `剩余 ${esc(moneyShort(Math.max(0, budget - used)))}`}</div></section>`;
@@ -212,7 +211,7 @@ function segMetric() {
   return `<div class="seg sm" role="group" aria-label="费用口径">${Object.entries(METRICS).map(([k, l]) => `<button type="button" data-metric="${k}" aria-pressed="${ui.f.metric === k}">${l.replace('金额', '')}</button>`).join('')}</div>`;
 }
 function tile(ic, label, value, delta, cmp, meta) {
-  return `<section class="kpi"><div class="kpi-h"><span class="kpi-ico">${icon(ic)}</span><span>${esc(label)}</span></div><div class="value">${value}</div>
+  return `<section class="kpi" data-tone="${toneOf(ic)}"><div class="kpi-h"><span class="kpi-ico">${icon(ic)}</span><span>${esc(label)}</span></div><div class="value">${value}</div>
     <div class="trend">${delta || ''}${delta && cmp ? `<span class="cmp">${esc(cmp)}</span>` : ''}</div><div class="meta" title="${esc(meta)}">${esc(meta)}</div></section>`;
 }
 const FIELD = { remark: '备注', description: '描述', workspace_id: '业务空间ID', workspace_name: '业务空间', disabled: '禁用', auth_type: '授权类型', allow_all_models: '全部模型', accessible_models: '可访问模型', access_ips: 'IP 白名单', api_key_masked: 'API Key' };

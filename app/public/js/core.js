@@ -105,6 +105,9 @@ export const I = {
 };
 /** 复制按钮（行内小图标），点击由 main.js 统一处理 */
 export const copyBtn = (text, label = '复制') => (text ? `<button type="button" class="copy" data-copy="${esc(text)}" title="${esc(label)}：${esc(text)}" aria-label="${esc(label)} ${esc(text)}">${icon('copy')}</button>` : '');
+/** KPI 图标点缀色（界面色，不用于图表数据） */
+export const TONE = { wallet: 'blue', forecast: 'violet', calendar: 'violet', key: 'teal', token: 'sky', unit: 'amber', cache: 'indigo', model: 'fuchsia', layers: 'fuchsia', activity: 'teal' };
+export const toneOf = ic => TONE[ic] || '';
 export const icon = (n, cls = 'ico') => `<svg class="${cls}" viewBox="0 0 24 24" aria-hidden="true">${I[n] || ''}</svg>`;
 
 /* =========================================================================

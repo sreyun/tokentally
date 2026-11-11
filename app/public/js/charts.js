@@ -26,17 +26,28 @@ export const bindLegend = (el, fn) => bindActivate(el, '[data-lid]', t => fn(t.d
 const uid = () => 'g' + Math.random().toString(36).slice(2, 8);
 const width = el => Math.max(300, Math.floor(el.clientWidth || el.parentElement?.clientWidth || 800));
 
-export function sparkline(values, color = 'var(--s1)') {
-  if (values.length < 2) return '';
-  const W = 300, H = 60, pad = 4;
-  const max = Math.max(...values, 0) || 1;
-  const xs = i => pad + i * (W - pad * 2) / (values.length - 1);
-  const ys = v => H - pad - v / max * (H - pad * 2);
-  const pts = values.map((v, i) => `${xs(i).toFixed(1)},${ys(v).toFixed(1)}`);
-  const last = values.length - 1;
-  return `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-hidden="true">
-    <path d="M${pts[0]} L${pts.join(' L')} L${xs(last)},${H - pad} L${xs(0)},${H - pad}Z" fill="${color}" fill-opacity=".1"/>
-    <polyline points="${pts.join(' ')}" fill="none" stroke="${color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/></svg>`;
+/**
+ * 迷你趋势线（单一系列，无坐标轴）
+ * zero：纵轴从 0 开始并填充面积（数量类指标）；false 时按最小 ~ 最大值缩放、只画线（比率类指标看走势）
+ * proj：{ n, end } 在实际值之后以虚线延伸到第 n 个点的预测值 end（如月末预测）
+ */
+export function sparkline(values, color = 'var(--s1)', { zero = true, proj = null, height = 60 } = {}) {
+  const vals = values.filter(v => v != null && Number.isFinite(v));
+  if (vals.length < 2 && !(proj && vals.length)) return '';
+  const W = 300, H = height, pad = 4;
+  const n = Math.max(values.length, proj?.n || 0);
+  const all = proj ? vals.concat(proj.end) : vals;
+  let lo = zero ? 0 : Math.min(...all), hi = Math.max(...all, zero ? 0 : -Infinity);
+  if (!(hi > lo)) { hi = lo + (Math.abs(lo) || 1); if (!zero) lo -= (hi - lo) / 2; }
+  const xs = i => pad + i * (W - pad * 2) / Math.max(1, n - 1);
+  const ys = v => H - pad - (v - lo) / (hi - lo) * (H - pad * 2);
+  const pts = []; let lastI = -1;
+  values.forEach((v, i) => { if (v != null && Number.isFinite(v)) { pts.push(`${xs(i).toFixed(1)},${ys(v).toFixed(1)}`); lastI = i; } });
+  const id = uid();
+  const area = zero && pts.length > 1 ? `<path d="M${pts[0]} L${pts.join(' L')} L${xs(lastI).toFixed(1)},${H - pad} L${pts[0].split(',')[0]},${H - pad}Z" fill="url(#${id})"/>` : '';
+  const pj = proj && lastI >= 0 ? `<line x1="${xs(lastI).toFixed(1)}" y1="${ys(values[lastI]).toFixed(1)}" x2="${xs(n - 1).toFixed(1)}" y2="${ys(proj.end).toFixed(1)}" stroke="${color}" stroke-width="2" stroke-dasharray="4 4" stroke-linecap="round" opacity=".65" vector-effect="non-scaling-stroke"/>` : '';
+  return `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-hidden="true"><defs><linearGradient id="${id}" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="${color}" stop-opacity=".24"/><stop offset="1" stop-color="${color}" stop-opacity="0"/></linearGradient></defs>
+    ${area}${pj}<polyline points="${pts.join(' ')}" fill="none" stroke="${color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/></svg>`;
 }
 
 /**
@@ -52,7 +63,7 @@ export function columnChart(el, { xs, series, cell, avg = null, height = 260, xL
   const maxT = Math.max(...totals, avg || 0, 0);
   const step = niceStep(maxT), top = Math.max(step, Math.ceil(maxT / step) * step);
   const band = pw / xs.length, cw = Math.max(2, Math.min(24, band * 0.62)), base = m.t + ph, id = uid();
-  let defs = '', body = '';
+  let defs = '', body = '', bars = '';
   const segPos = new Map(); // x → [{ id, top, bottom }]，用于按点击位置判定柱段
   if (weekend) xs.forEach((x, i) => { if (x.length === 10 && isWeekend(x)) body += `<rect class="weekend" x="${m.l + band * i}" y="${m.t}" width="${band}" height="${ph}"/>`; });
   for (let v = 0; v <= top + step / 2; v += step) {
@@ -66,17 +77,18 @@ export function columnChart(el, { xs, series, cell, avg = null, height = 260, xL
     defs += `<clipPath id="${id}c${i}"><path d="M${bx},${base}V${yt + r}Q${bx},${yt} ${bx + r},${yt}H${bx + cw - r}Q${bx + cw},${yt} ${bx + cw},${yt + r}V${base}Z"/></clipPath>`;
     let y0 = base;
     const segs = series.map(sr => ({ sr, v: Math.max(0, cell(x, sr.id)) })).filter(z => z.v > 0);
-    body += `<g clip-path="url(#${id}c${i})">`;
+    bars += `<g clip-path="url(#${id}c${i})">`;
     const pos = [];
     segs.forEach((z, j) => {
       const h = z.v / top * ph, y = y0 - h, gap = j < segs.length - 1 ? 2 : 0;
-      if (h - gap > 0.3) body += `<rect x="${bx}" y="${y + gap}" width="${cw}" height="${h - gap}" fill="${z.sr.color}"/>`;
+      if (h - gap > 0.3) bars += `<rect x="${bx}" y="${y + gap}" width="${cw}" height="${h - gap}" fill="${z.sr.color}"/>`;
       pos.push({ id: z.sr.id, top: y, bottom: y0 });
       y0 = y;
     });
     segPos.set(x, pos);
-    body += '</g>';
+    bars += '</g>';
   });
+  body += `<g class="bars" style="transform-origin:0 ${base}px">${bars}</g>`;
   if (avg > 0) {
     const y = base - avg / top * ph;
     body += `<line class="avgline" x1="${m.l}" x2="${W - m.r}" y1="${y}" y2="${y}"/><text class="ann" x="${m.l + 6}" y="${y - 6}">日均 ${esc(vf(avg))}</text>`;
@@ -128,9 +140,9 @@ export function lineChart(el, { xs, lines, height = 260, xLabel = x => x, tipTit
     let d = '', started = false, lastI = -1;
     ln.values.forEach((v, i) => { if (v == null) { started = false; return; } d += `${started ? 'L' : 'M'}${X(i).toFixed(1)},${Y(v).toFixed(1)}`; started = true; lastI = i; });
     if (!d) continue;
-    body += `<path d="${d}" fill="none" stroke="${ln.color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" ${ln.dashed ? 'stroke-dasharray="5 5" opacity=".75"' : ''}/>`;
+    body += `<path ${ln.dashed ? '' : 'class="ln" pathLength="1"'} d="${d}" fill="none" stroke="${ln.color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" ${ln.dashed ? 'stroke-dasharray="5 5" opacity=".75"' : ''}/>`;
     if (lastI >= 0 && !ln.noEnd) {
-      body += `<circle cx="${X(lastI)}" cy="${Y(ln.values[lastI])}" r="4" fill="${ln.color}" stroke="var(--surface)" stroke-width="2"/>`;
+      body += `<circle class="end" cx="${X(lastI)}" cy="${Y(ln.values[lastI])}" r="4" fill="${ln.color}" stroke="var(--surface)" stroke-width="2"/>`;
       labels.push({ y: Y(ln.values[lastI]), x: X(lastI), text: ln.endLabel || money(ln.values[lastI]) });
     }
   }

@@ -2,8 +2,7 @@
 import {
   $, esc, state, ui, app, money, moneyShort, compact, intFmt, pct, sum, uniq, metricVal, METRICS, NONE_KEY, DIMS, keyShort,
   filterLines, aggregate, aggAll, sortedAggs, totalTokens, unitsText, deltaPill, tipRows, icon, help, segCtl, ioInfo, num, periodTag, WEEK, weekday, copyBtn, PROVIDERS, provTag, multiCloud, usageFiltered, usageAgg, normModel, REQ_SRC,
-  scopeLines, scopeUsage, scopeLabel, scopeFilter, dimVal, dimName, groupHash, NO_WS, callsOn, hasTags, perCall, perCallCovered, coveredCost, failRateOf, scopeColors,
-} from '../core.js';
+  scopeLines, scopeUsage, scopeLabel, scopeFilter, dimVal, dimName, groupHash, NO_WS, callsOn, hasTags, perCall, perCallCovered, coveredCost, failRateOf, scopeColors, toneOf } from '../core.js';
 import { tokenStatsHtml, drawDailyTokens, drawDailyRequests, periodDays, reqHelp } from '../stats.js';
 import { columnChart, rankList, stackRank, segbar, legendHtml, bindLegend } from '../charts.js';
 import { table, dataBar } from '../table.js';
@@ -299,6 +298,6 @@ export function openModel(model, scope = null) {
   }).setRows([...byItem.values()].map(x => { const [io, price, unit] = x.key.split('\u0001'); return { io, label: ioInfo(io).label, price, unit, tokens: totalTokens(x), cost: x.cost, share: a.cost ? x.cost / a.cost : 0 }; }));
 }
 function tile(ic, label, value, delta, cmp, meta) {
-  return `<section class="kpi"><div class="kpi-h"><span class="kpi-ico">${icon(ic)}</span><span>${esc(label)}</span></div><div class="value">${value}</div>
+  return `<section class="kpi" data-tone="${toneOf(ic)}"><div class="kpi-h"><span class="kpi-ico">${icon(ic)}</span><span>${esc(label)}</span></div><div class="value">${value}</div>
     <div class="trend">${delta || ''}${delta && cmp ? `<span class="cmp">${esc(cmp)}</span>` : ''}</div><div class="meta">${esc(meta)}</div></section>`;
 }

@@ -1,6 +1,7 @@
 /* 系统管理：云厂商接入（阿里云 / 腾讯云）、数据同步、预算、告警通知、用户、品牌与备份、安全审计、接口日志 */
 import { $, esc, state, ui, app, http, toast, money, fmtTime, ago, p2, addMonths, opt, icon, help, keyShort, wsName, NONE_KEY, NO_WS, NO_CC, sum, PROVIDERS, provTag, modal } from '../core.js';
 import { table } from '../table.js';
+import { actLabel, actBad, auditHtml, auditText, ipHtml, ipText, API, apiParams } from '../labels.js';
 
 export const ADMIN_TABS = { aliyun: '阿里云接入', tencent: '腾讯云接入', sync: '数据同步', budgets: '预算管理', alerts: '告警通知', users: '用户管理', system: '品牌与备份', security: '安全与审计', logs: '系统日志', calls: '接口日志' };
 const POLICY = {
@@ -390,7 +391,7 @@ async function sync(el) {
       { key: 'id', label: '#', align: 'r' },
       { key: 'provider', label: '云厂商', fmt: x => provTag(x || 'aliyun', true) },
       { key: 'kind', label: '类型', fmt: x => (x === 'meta' ? 'Key / 空间' : '账单') },
-      { key: 'trig', label: '触发', fmt: x => esc(String(x || '').replace('manual:', '手动 · ').replace('schedule', '定时').replace('ak-changed', 'Key 变更').replace('key-changed', '密钥变更')) },
+      { key: 'trig', label: '触发', fmt: x => esc(trigLabel(x)) },
       { key: 'started_at', label: '开始', fmt: x => fmtTime(x) },
       { key: 'dur', label: '耗时', align: 'r', fmt: (x, r) => (r.finished_at ? ((r.finished_at - r.started_at) / 1000).toFixed(1) + 's' : '-'), sortVal: r => (r.finished_at || 0) - r.started_at },
       { key: 'status', label: '结果', fmt: x => `<span class="pill ${RUN[x]?.[1] || 'neutral'}">${RUN[x]?.[0] || esc(x)}</span>` },
@@ -419,6 +420,8 @@ async function sync(el) {
     } catch (ex) { toast('保存失败：' + ex.message, 'err', 4000); }
   };
 }
+/** 同步触发来源 */
+const trigLabel = t => { t = String(t || ''); return t.startsWith('manual:') ? `手动 · ${t.slice(7)}` : { schedule: '定时', 'key-changed': '更换密钥后', 'ak-changed': '更换密钥后', startup: '服务启动', retry: '失败重试' }[t] || t; };
 function runSummary(r) {
   if (r.status === 'error') return r.error || '';
   try {
@@ -725,7 +728,7 @@ async function users(el) {
       { key: 'username', label: '用户名', fmt: (x, r) => `<b style="font-weight:600">${esc(x)}</b>${r.id === state.me.id ? '<span class="tag">我</span>' : ''}` },
       { key: 'role', label: '角色', fmt: x => `<span class="role ${x}">${x === 'admin' ? '管理员' : '只读'}</span>` },
       { key: 'st', label: '状态', sortable: false, fmt: (x, r) => (r.disabled ? '<span class="state off">已禁用</span>' : r.locked ? '<span class="state warn">已锁定</span>' : r.mustChange ? '<span class="state warn">待改密</span>' : '<span class="state on">正常</span>') },
-      { key: 'lastLoginAt', label: '最近登录', fmt: (x, r) => `${fmtTime(x)}<span class="sub mono">${esc(r.lastLoginIp || '')}</span>` },
+      { key: 'lastLoginAt', label: '最近登录', fmt: (x, r) => (x ? `${fmtTime(x)}<span class="sub">${r.lastLoginIp ? `<span class="mono">${esc(r.lastLoginIp)}</span>${r.lastLoginLoc ? ` · ${esc(r.lastLoginLoc)}` : ''}` : ''}</span>` : '<span class="muted">从未登录</span>'), csv: r => (r.lastLoginAt ? `${fmtTime(r.lastLoginAt)} ${ipText(r.lastLoginIp, r.lastLoginLoc)}` : '') },
       { key: 'sessions', label: '会话', align: 'r' },
       { key: 'ops', label: '操作', sortable: false, fmt: (x, r) => `<div class="row" style="gap:4px;flex-wrap:nowrap">
         <button class="btn sm" data-u="role" data-id="${r.id}" data-v="${r.role === 'admin' ? 'viewer' : 'admin'}">设为${r.role === 'admin' ? '只读' : '管理员'}</button>
@@ -779,6 +782,7 @@ export function genPassword() {
 }
 
 /* ---------------- 品牌与备份 ---------------- */
+const ACCENT_OPTS = [['blue', '蓝', '#2563eb'], ['indigo', '靛蓝', '#4f46e5'], ['violet', '紫', '#7c3aed'], ['teal', '青', '#0f766e'], ['graphite', '石墨', '#334155']];
 const fmtSize = n => (n >= 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(n / 1024)) + ' KB');
 async function system(el) {
   const s = await http('GET', '/api/admin/settings');
@@ -788,6 +792,8 @@ async function system(el) {
       <form id="brForm" class="form-grid" style="grid-template-columns:1fr">
         <label class="field"><span>产品名称（≤ 24 字）</span><input class="inp" name="name" maxlength="24" value="${esc(b.name)}" required></label>
         <label class="field"><span>副标题（≤ 48 字，可留空）</span><input class="inp" name="subtitle" maxlength="48" value="${esc(b.subtitle)}"></label>
+        <div class="field"><span>界面主题色</span><div class="accent-pick" role="radiogroup" aria-label="界面主题色">${ACCENT_OPTS.map(([k, l, c]) => `<label title="${esc(l)}"><input type="radio" name="accent" value="${k}" ${(b.accent || 'blue') === k ? 'checked' : ''}><i style="background:${c}"></i>${esc(l)}</label>`).join('')}</div>
+          <small class="hint">用于按钮、导航、链接与登录页等界面元素，所有用户生效；图表的数据颜色保持不变，各页面颜色含义一致</small></div>
         <div class="brand-prev"><div class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke-width="2.2" stroke-linecap="round"><path d="M4 19V11M10 19V5M16 19v-6M22 19H2"/></svg></div><div class="brand-text"><b data-bp="name">${esc(b.name)}</b><span data-bp="subtitle">${esc(b.subtitle)}</span></div></div>
         <div class="row"><button class="btn primary" type="submit">保存品牌设置</button></div>
       </form></section>
@@ -808,7 +814,7 @@ async function system(el) {
         <div><span>指标内容</span><b>同步状态与最近成功时间、本月各云厂商应付金额、预算使用率、Key 数量、告警渠道状态、会话数</b></div>
       </div></section></div>`;
   const form = $('#brForm', el);
-  form.addEventListener('input', e => { const k = e.target.name; const t = el.querySelector(`[data-bp="${k}"]`); if (t) t.textContent = e.target.value; markDirty(form); });
+  form.addEventListener('input', e => { const k = e.target.name; if (k === 'accent') app.applyAccent(e.target.value); const t = el.querySelector(`[data-bp="${k}"]`); if (t) t.textContent = e.target.value; markDirty(form); });
   form.onsubmit = async e => {
     e.preventDefault();
     try { await http('PUT', '/api/admin/settings', { branding: Object.fromEntries(new FormData(form)) }); markClean(form); toast('品牌设置已保存'); await app.refreshStatus(); app.render(); }
@@ -871,32 +877,32 @@ async function security(el) {
         <div><span>Cookie</span><b>HttpOnly · SameSite=Strict · Secure=${esc(sec.cookieSecure)}</b></div>
         <div><span>客户端 IP 来源</span><b>${sec.ipSource === 'xff' ? `X-Forwarded-For 右起第 ${sec.proxyHops || 1} 个地址（${sec.proxyHops || 1} 层可信代理）` : sec.ipSource === 'realip' ? 'X-Real-IP' : '直连（使用连接地址）'}${sec.ipSourceFrom === 'ui' ? ' · 页面设置' : ' · 环境变量 TRUST_PROXY'}</b></div>
         <div><span>IP 白名单</span><b class="mono">${esc(sec.allowCidrs.join(', ') || '未启用')}</b></div>
+        <div><span>IP 归属地库</span><b>${ipDbText(sec.ipDb)}</b></div>
         <div><span>其他</span><b>CSP · CSRF 令牌 · 防点击劫持 · 请求限流 · 敏感操作二次验证 · 审计日志</b></div>
       </div></section>
     <div id="ipBox"></div>
     <section class="panel"><div class="panel-h"><h3>审计日志</h3><span class="sub">登录、配置变更、预算、标签、告警、备份、用户管理、同步触发等（最近 1000 条）</span><div class="actions"><button class="btn sm" id="csv">${icon('download')}导出</button></div></div><div id="aTbl"></div></section>`;
-  const ACT = {
-    'login.success': '登录成功', 'login.fail': '登录失败', logout: '退出登录', 'password.change': '修改密码', 'password.change.fail': '修改密码失败', 'password.change.lock': '改密错误过多强制退出',
-    'user.create': '创建用户', 'user.update': '修改用户', 'user.delete': '删除用户', 'user.bootstrap': '初始化管理员', 'settings.update': '修改设置',
-    'aliyun.ak.update': '更新阿里云 AccessKey', 'aliyun.ak.update.fail': '更新 AccessKey 验证失败', 'aliyun.ak.bootstrap': '导入阿里云 AccessKey', 'aliyun.test': '测试阿里云连接', 'aliyun.calls.secret': '修改调用次数 Prometheus 地址 / 认证', 'aliyun.calls.secret.fail': '修改 Prometheus 认证验证失败', 'aliyun.calls.secret.lock': '修改 Prometheus 认证多次验证失败', 'aliyun.calls.sync': '同步阿里云调用次数',
-    'tencent.key.update': '更新腾讯云密钥', 'tencent.key.update.fail': '更新腾讯云密钥验证失败', 'tencent.key.bootstrap': '导入腾讯云密钥', 'tencent.test': '测试腾讯云连接',
-    'sync.trigger': '触发同步', 'budgets.update': '修改预算', 'keytags.update': '修改成本中心 / 负责人', 'alert.update': '修改告警设置', 'alert.test': '发送测试消息', 'alert.test.fail': '测试消息失败',
-    'alert.sent': '告警 / 报表已发送', 'alert.report.send': '手动发送报表', 'backup.create': '创建备份', 'backup.download': '下载备份', 'backup.download.fail': '下载备份验证失败', 'demo.clear': '清除演示数据',
-    'network.update': '修改客户端 IP 来源', 'network.update.fail': '修改客户端 IP 来源验证失败', 'network.update.lock': '修改客户端 IP 来源多次验证失败', 'user.unlock.cli': '命令行解除锁定',
-    'user.promote.fail': '设为管理员验证失败', 'user.reset.fail': '重置密码验证失败', 'user.create.fail': '创建管理员验证失败', 'backup.download.lock': '下载备份多次验证失败',
-  };
   ipPanel($('#ipBox', el), ipd, () => refresh(el, () => security(el)));
   const t = table('audit', $('#aTbl', el), {
     sort: 'id', pageSize: 50, stickyFirst: false, caption: '审计日志',
     columns: [
       { key: 'id', label: '时间', fmt: (x, r) => fmtTime(r.ts) + ':' + p2(new Date(r.ts).getSeconds()), csv: r => fmtTime(r.ts) },
-      { key: 'username', label: '用户' },
-      { key: 'ip', label: 'IP', cls: 'mono' },
-      { key: 'action', label: '操作', fmt: x => `<span class="${/fail|lock/.test(x) ? 'bad-text' : ''}">${esc(ACT[x] || x)}</span><span class="sub mono">${esc(x)}</span>` },
-      { key: 'detail', label: '详情', cls: 'wrap-cell' },
+      { key: 'username', label: '用户', fmt: x => (x === 'system' ? '<span class="pill neutral">系统</span>' : x.startsWith('?') ? `<span class="muted" title="${esc(`输入的用户名不存在（摘要 ${x.slice(1)}）`)}">不存在的用户</span>` : esc(x)), csv: r => (r.username === 'system' ? '系统' : r.username) },
+      { key: 'ip', label: 'IP / 归属地', fmt: (x, r) => (r.username === 'system' && !x ? '<span class="muted">—</span>' : ipHtml(x, r.loc)), csv: r => r.ip },
+      { key: 'action', label: '操作', sortVal: r => actLabel(r.action), fmt: x => `<span class="${actBad(x) ? 'bad-text' : ''}" title="${esc(x)}">${esc(actLabel(x))}</span>`, csv: r => actLabel(r.action) },
+      { key: 'detail', label: '详情', cls: 'wrap-cell wide-cell', sortable: false, fmt: (x, r) => auditHtml(r.action, x), csv: r => auditText(r.action, r.detail) },
     ],
+    csvExtra: [{ label: '归属地', val: r => r.loc || '' }, { label: '操作代码', val: r => r.action }, { label: '原始详情', val: r => r.detail || '' }],
   }).setRows(audit);
   $('#csv', el).onclick = () => t.csv('审计日志.csv');
+}
+
+/** IP 归属地离线库状态 */
+function ipDbText(db) {
+  if (!db) return '-';
+  if (!db.v4 && !db.v6) return `<span class="warn-text">未安装</span>，只区分内网 / 公网${db.errors?.length ? `（${esc(db.errors.join('；'))}）` : ''}`;
+  const one = (x, v) => (x ? `IPv${v} ${x.builtin ? '内置' : esc(x.file)}（数据 ${fmtTime(x.createdAt, false)}）` : `IPv${v} 未安装`);
+  return `ip2region 离线库 · ${one(db.v4, 4)} · ${one(db.v6, 6)}`;
 }
 
 /* ---------------- 客户端 IP 识别 ----------------
@@ -909,17 +915,18 @@ function ipPanel(box, d, reload) {
   box.innerHTML = `<section class="panel"><div class="panel-h"><h3>客户端 IP 识别</h3>${help('登录记录、审计日志、IP 白名单与登录限流使用的客户端地址。经反向代理（Nginx / OpenResty / SLB）访问时，需要按代理链设置 IP 来源，否则记录的是代理的内网地址。设置保存后立即生效，无需重启。')}
       <span class="sub">当前请求解析为 <b class="mono ${bad ? 'warn-text' : ''}">${esc(d.resolved)}</b></span></div>
     <div class="kv" style="margin-bottom:12px">
-      <div><span>连接来源地址</span><b class="mono">${esc(d.peer)}</b><span class="hint ${d.trusted ? '' : 'warn-text'}">${d.trusted ? '在可信代理范围内' : '不在可信代理范围内（不采用转发头）'}</span></div>
+      <div><span>解析结果（记录到日志的 IP）</span><b>${ipHtml(d.resolved, d.resolvedLoc)}</b></div>
+      <div><span>连接来源地址</span><b>${ipHtml(d.peer, d.peerLoc)}</b><span class="hint ${d.trusted ? '' : 'warn-text'}">${d.trusted ? '在可信代理范围内' : '不在可信代理范围内（不采用转发头）'}</span></div>
       <div><span>X-Forwarded-For</span><b class="mono">${esc(d.xff.join(', ') || '（无）')}</b></div>
-      <div><span>X-Real-IP</span><b class="mono">${esc(d.xRealIp || '（无）')}</b></div>
+      <div><span>X-Real-IP</span><b>${d.xRealIp ? ipHtml(d.xRealIp, d.xRealIpLoc) : '（无）'}</b></div>
       <div><span>当前 IP 来源</span><b>${esc(label)}</b><span class="hint">${d.mode.from === 'ui' ? '页面设置' : `环境变量 TRUST_PROXY=${d.envTrustProxy ? (d.envHops > 1 ? d.envHops : 'true') : 'false'}`}</span></div>
     </div>
-    ${d.candidates.length ? `<div class="tbl-wrap" style="margin-bottom:12px"><table class="dt compact"><thead><tr><th>X-Forwarded-For（从右往左）</th><th>地址</th><th>类型</th></tr></thead><tbody>${d.candidates.map(c => `<tr><td>可信代理 ${c.hops} 层时取此地址</td><td class="mono">${esc(c.ip)}</td><td>${c.public ? '<span class="pill good">公网</span>' : '<span class="pill neutral">内网</span>'}</td></tr>`).join('')}</tbody></table></div>` : ''}
+    ${d.candidates.length ? `<div class="tbl-wrap" style="margin-bottom:12px"><table class="dt compact"><thead><tr><th>X-Forwarded-For（从右往左）</th><th>地址</th><th>归属地</th><th>类型</th></tr></thead><tbody>${d.candidates.map(c => `<tr><td>可信代理 ${c.hops} 层时取此地址</td><td class="mono">${esc(c.ip)}</td><td>${esc(c.loc || '未知')}</td><td>${c.public ? '<span class="pill good">公网</span>' : '<span class="pill neutral">内网</span>'}</td></tr>`).join('')}</tbody></table></div>` : ''}
     <div class="notice ${bad ? 'warn' : 'info'}" style="margin-bottom:12px">${icon(bad ? 'warn' : 'info')}<div><b>${bad ? '当前设置识别到的是代理的内网地址' : '检测结果'}</b><span class="why">${esc(d.suggest?.text || '')}</span>${d.suggest && ['xff', 'realip', 'direct'].includes(d.suggest.source) && (d.suggest.source !== d.mode.source || (d.suggest.hops || 1) !== (d.mode.hops || 1)) ? '<button class="link" type="button" data-ip-apply>按建议填写 →</button>' : ''}</div></div>
     <form id="ipForm" class="form-grid" autocomplete="off">
       <label class="field"><span>客户端 IP 来源</span><select class="inp" name="ipSource">${Object.entries(d.sources).map(([k, l]) => opt(k, l, d.saved.ipSource || 'env')).join('')}</select></label>
       <label class="field" data-hops><span>可信代理层数</span><input class="inp" type="number" name="hops" min="1" max="10" value="${esc(d.saved.hops || d.mode.hops || 1)}"></label>
-      <label class="field full"><span>当前登录密码</span><input class="inp" type="password" name="confirmPassword" autocomplete="current-password" maxlength="256"><small class="hint">修改客户端 IP 来源属于安全设置，需要再次验证身份</small></label>
+      <label class="field"><span>当前登录密码</span><input class="inp" type="password" name="confirmPassword" autocomplete="current-password" maxlength="256"><small class="hint">安全设置，需要再次验证身份</small></label>
       <div class="row full"><button class="btn primary" type="submit">保存</button><button class="btn" type="button" data-ip-recheck>${icon('sync')}重新检测</button></div>
     </form>
     <p class="hint" style="margin:10px 0 0">只有连接来自可信代理（${esc(d.trustedProxies.join('、'))}，可用环境变量 TRUSTED_PROXIES 修改）时才采用转发头。可信代理层数 = 请求经过的代理数量，例如 SLB → OpenResty → 本服务为 2。</p>
@@ -1009,8 +1016,8 @@ async function calls(el) {
     sort: 'ts', pageSize: 50, stickyFirst: false, empty: '暂无调用',
     columns: [
       { key: 'ts', label: '时间', fmt: x => fmtTime(x) + ':' + p2(new Date(x).getSeconds()) },
-      { key: 'action', label: '接口', fmt: (x, r) => `<span class="mono">${esc(x)}</span><span class="sub">${esc(PRODUCT[r.product] || r.product)}</span>` },
-      { key: 'query', label: '参数', cls: 'mono wrap-cell', sortable: false },
+      { key: 'action', label: '接口', sortVal: r => API[r.action] || r.action, fmt: (x, r) => `<span title="${esc(x)}">${esc(API[x] || x)}</span><span class="sub">${esc(PRODUCT[r.product] || r.product)} · <span class="mono">${esc(x)}</span></span>` },
+      { key: 'query', label: '参数', cls: 'wrap-cell wide-cell', sortable: false, fmt: x => { const ps = apiParams(x); return ps.length ? `<div class="ad" title="${esc(x)}">${ps.map(([k, v]) => `<span class="ad-i"><em>${esc(k)}</em>${esc(v)}</span>`).join('')}</div>` : '<span class="muted">—</span>'; }, csv: r => r.query },
       { key: 'ok', label: '结果', fmt: (x, r) => (x ? '<span class="pill good">成功</span>' : `<span class="pill bad">${esc(r.code || '失败')}</span>`) },
       { key: 'message', label: '错误信息', cls: 'wrap-cell' },
       { key: 'ms', label: '耗时', align: 'r', fmt: x => x + ' ms' },

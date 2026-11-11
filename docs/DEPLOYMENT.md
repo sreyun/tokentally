@@ -73,6 +73,8 @@ location / {
 
 **客户端 IP 显示为内网地址**：说明 IP 来源与代理链不一致。打开“系统管理 → 安全与审计 → 客户端 IP 识别”，面板会显示服务端收到的连接地址、X-Forwarded-For、X-Real-IP 与推荐设置（例如 SLB → OpenResty → 本服务应选“X-Forwarded-For，可信代理 2 层”），点“按建议填写”并输入当前密码保存即可，立即生效、无需重启。页面设置优先于 `TRUST_PROXY`。
 
+**IP 归属地显示“未知归属地”或数据较旧**：镜像内置 ip2region IPv4 离线库（只在本机查询，不联网）。到 https://github.com/lionsoul2014/ip2region 的 data 目录下载新版 `ip2region_v4.xdb` 放到数据卷（`/data/ip2region_v4.xdb`）后重启即可覆盖内置版本；IPv6 地址需要另外放入 `ip2region_v6.xdb`（约 37 MB）。当前使用的库与数据日期见“系统管理 → 安全与审计 → 安全策略 → IP 归属地库”。
+
 **账号被锁定**：连续输错密码会临时锁定账号（`LOGIN_LOCK_MINUTES`，默认 15 分钟），管理员可在“用户管理”中解锁其他用户。唯一的管理员被锁定时，在服务器上执行：
 
 ```bash
