@@ -109,6 +109,7 @@ export class AliyunClient {
     Object.assign(this, { accessKeyId, accessKeySecret, securityToken, msRegion, bssSite });
     this.calls = 0;
     this.msNext = 0;
+    this.msLast = 0; // 上一次百炼请求实际发出的时间
   }
 
   async call(product, action, query = {}, attempt = 0) {
@@ -138,6 +139,12 @@ export class AliyunClient {
     const headers = { Accept: 'application/json', 'User-Agent': 'tokentally/1.2', Authorization: s.authorization };
     for (const [k, v] of Object.entries(s.headers)) if (k !== 'host') headers[k] = v;
     const url = `https://${host}${path}${s.query ? '?' + s.query : ''}`;
+    if (product === 'modelstudio') {
+      // 时间片只保证排队顺序：机器繁忙时上一个请求可能比它的时间片晚十几毫秒才真正发出，
+      // 下一个按时发出时两者实际间隔不足 250ms。发出前再按上一次的实际发出时间补足间隔
+      while (Date.now() < this.msLast + MS_GAP_MS) await sleep(this.msLast + MS_GAP_MS - Date.now());
+      this.msLast = Date.now();
+    }
     const t0 = Date.now();
     const entry = { ts: t0, provider: 'aliyun', product, action, query: summarize(q), status: 0, ms: 0, ok: false, code: '', message: '', requestId: '' };
     this.calls++;

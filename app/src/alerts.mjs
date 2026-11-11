@@ -94,22 +94,26 @@ function postJson(url, body, headers, allowPrivate) {
     if (!allowPrivate && net.isIP(host) && isPrivateIp(host)) return reject(Object.assign(new Error(`目标地址 ${host} 属于内网或保留地址，已拒绝`), { code: 'EPRIVATE' }));
     const data = Buffer.from(JSON.stringify(body));
     // 总时限：timeout 只是空闲超时，持续缓慢回传数据的地址会让请求一直挂起，阻塞所有渠道的告警队列
-    let done = false;
-    const finish = (fn, v) => { if (done) return; done = true; clearTimeout(timer); fn(v); };
-    const timer = setTimeout(() => { req.destroy(new Error('请求超时（15 秒）')); }, 15_000);
+    // req 先声明再启动计时器：此前计时器在 req 初始化之前创建，https.request 同步抛错（如地址协议不是 https）时，
+    // 15 秒后计时器访问未初始化的 req 抛出 ReferenceError，成为未捕获异常导致整个服务退出
+    let done = false, req = null;
+    const timer = setTimeout(() => { if (req) req.destroy(new Error('请求超时（15 秒）')); else finish(reject, new Error('请求超时（15 秒）')); }, 15_000);
     timer.unref?.();
-    const req = https.request(url, {
-      method: 'POST', timeout: 8000, lookup: allowPrivate ? undefined : safeLookup,
-      headers: { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': data.length, 'User-Agent': 'tokentally-alert/1.2', ...headers },
-    }, res => {
-      const chunks = []; let size = 0;
-      res.on('data', c => { size += c.length; if (size > 65536) req.destroy(new Error('响应内容过大')); else chunks.push(c); });
-      res.on('end', () => finish(resolve, { status: res.statusCode, text: Buffer.concat(chunks).toString('utf8') }));
-      res.on('error', e => finish(reject, e));
-    });
-    req.on('timeout', () => req.destroy(new Error('请求超时（8 秒）')));
-    req.on('error', e => finish(reject, e));
-    req.end(data);
+    const finish = (fn, v) => { if (done) return; done = true; clearTimeout(timer); fn(v); };
+    try {
+      req = https.request(url, {
+        method: 'POST', timeout: 8000, lookup: allowPrivate ? undefined : safeLookup,
+        headers: { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': data.length, 'User-Agent': 'tokentally-alert/1.2', ...headers },
+      }, res => {
+        const chunks = []; let size = 0;
+        res.on('data', c => { size += c.length; if (size > 65536) req.destroy(new Error('响应内容过大')); else chunks.push(c); });
+        res.on('end', () => finish(resolve, { status: res.statusCode, text: Buffer.concat(chunks).toString('utf8') }));
+        res.on('error', e => finish(reject, e));
+      });
+      req.on('timeout', () => req.destroy(new Error('请求超时（8 秒）')));
+      req.on('error', e => finish(reject, e));
+      req.end(data);
+    } catch (e) { finish(reject, e); }
   });
 }
 
@@ -565,7 +569,8 @@ export class AlertService {
       // 清理已删除渠道的状态；停用（或地址缺失）的渠道清除变更游标：重新启用时与首次启用一样不补发停用期间的历史变更
       const ids = new Set(s.channels.map(c => c.id));
       for (const k of ['sent', 'syncSent', 'reports', 'lastChangeId', 'channels']) for (const id of Object.keys(st[k] || {})) if (!ids.has(id)) delete st[k][id];
-      for (const id of Object.keys(st.lastChangeId || {})) if (!active.has(id)) delete st.lastChangeId[id];
+      // 服务退出时本轮提前结束，排在后面的渠道没有轮到（不在 active 中），不能当作“已停用”清除其游标，否则重启后会漏发这段时间的变更通知
+      if (!this.stopping) for (const id of Object.keys(st.lastChangeId || {})) if (!active.has(id)) delete st.lastChangeId[id];
       const old = Date.now() - 90 * 864e5;
       for (const m of Object.values(st.syncSent || {})) for (const [c, t] of Object.entries(m)) if (t < old) delete m[c];
       this.saveState(st);
