@@ -235,14 +235,16 @@ async function loadData({ silent = false, background = false } = {}) {
 
 /** 分享数据；分享会话过期（如服务重启）时用本标签页保存的令牌重新换取一次，链接失效时显示失效页 */
 async function shareData() {
-  try { return await http('GET', '/api/share/data'); }
+  const get = () => http('GET', '/api/share/data', undefined, { headers: SHARE.ref ? { 'X-Share-Ref': SHARE.ref } : null });
+  try { return await get(); }
   catch (e) {
-    if (e.status === 401) {
+    // 401：分享会话过期（如服务重启）；409：同一浏览器的其他标签页打开了另一个链接（会话 Cookie 已切换）
+    if (e.status === 401 || e.status === 409) {
       let t = null;
       try { t = sessionStorage.getItem('bc.share'); } catch { /* ignore */ }
       if (t) {
         const r = await fetch('/api/share/open', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: t }) }).catch(() => null);
-        if (r?.ok) return http('GET', '/api/share/data');
+        if (r?.ok) return get();
         if (r) { const j = await r.json().catch(() => ({})); Object.assign(e, { status: r.status, code: j.code, message: j.error || e.message }); }
       }
     }

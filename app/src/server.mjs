@@ -22,7 +22,7 @@ import { ShareService, filterData, SHARE_DAYS } from './share.mjs';
 import { scopePredicate } from './overview-mail.mjs';
 import { loadMasterKey, hashPassword, verifyPassword, burnPasswordCheck, checkPasswordPolicy, randomPassword, maskId, sha256 } from './crypto.mjs';
 
-const VERSION = '1.9.1';
+const VERSION = '1.9.2';
 
 /* ===================================================================
  * 系统日志：所有运行日志同时输出到控制台并写入数据库（system_log，保留 SYSTEM_LOG_DAYS 天），
@@ -1333,7 +1333,8 @@ const SHARE_REASON = { not_found: '链接无效', expired: '链接已过期', re
 const specLabel = s => (s?.mode === 'range' ? `${s.from} ~ ${s.to}` : `账期 ${s?.cycle || ''}`);
 const shareScopeLabel = scope => (scope && scope.type !== 'all' ? alerts.scopeOf({ scope })?.label || '指定范围' : '全部');
 function shareMeta(l) {
-  return { title: l.title, period: l.spec, periodLabel: specLabel(l.spec), scopeLabel: shareScopeLabel(l.scope), channel: l.channel_name || '', createdAt: l.created_at, expiresAt: l.expires_at, today: todayIn(config.billTz), tz: config.billTz, brand: store.branding() };
+  // ref：链接标识（不是令牌），数据请求带上它，用于发现同一浏览器的其他标签页打开了另一个链接、分享会话已被切换
+  return { ref: l.id.slice(0, 16), title: l.title, period: l.spec, periodLabel: specLabel(l.spec), scopeLabel: shareScopeLabel(l.scope), channel: l.channel_name || '', createdAt: l.created_at, expiresAt: l.expires_at, today: todayIn(config.billTz), tz: config.billTz, brand: store.branding() };
 }
 /** 访问记入操作日志（同一链接同一 IP 10 分钟内只记一次） */
 const shareSeen = new Map();
@@ -1353,10 +1354,21 @@ route('POST', '/api/share/open', async (req, res, ctx) => {
   recordShareView(r.link, ctx, req);
   return json(req, res, 200, shareMeta(r.link));
 }, { public: true });
-/** 分享数据：与 /api/data 结构相同，固定为链接的周期，并按链接的推送范围过滤 */
+/**
+ * 分享数据：与 /api/data 结构相同，固定为链接的周期，并按链接的推送范围过滤。
+ * 按“数据版本 + 日期 + 链接”缓存序列化结果（同一群消息被多人同时打开时不重复查询与过滤），总量不超过 32MB
+ */
+const shareDataCache = new Map();
+let shareDataBytes = 0;
 route('GET', '/api/share/data', async (req, res) => {
   const r = shares.session(shareSid(req));
   if (!r.link) return json(req, res, r.reason === 'no_session' ? 401 : 410, { error: SHARE_REASON[r.reason] || '链接无效', code: r.reason });
+  // 分享会话 Cookie 按浏览器共享：另一个标签页打开了其他链接时会话已切换，返回 409 由页面用自己的令牌重新打开
+  const want = String(req.headers['x-share-ref'] || '');
+  if (want && want !== r.link.id.slice(0, 16)) return json(req, res, 409, { error: '同一浏览器中打开了另一个分享链接', code: 'switched' });
+  const ck = `${dataVersionTag(store.dataVersion())}|${todayIn(config.billTz)}|${r.link.id}`;
+  const hit = shareDataCache.get(ck);
+  if (hit) return send(req, res, 200, hit, 'application/json; charset=utf-8', { 'Cache-Control': 'no-store' });
   const s = r.link.spec, u = new URL('http://localhost/');
   if (s.mode === 'range') { u.searchParams.set('mode', 'range'); u.searchParams.set('from', s.from); u.searchParams.set('to', s.to); }
   else { u.searchParams.set('mode', 'month'); u.searchParams.set('cycle', s.cycle); }
@@ -1368,16 +1380,24 @@ route('GET', '/api/share/data', async (req, res) => {
   out.workspaces = out.workspaces.map(({ apiHost, tenantId, ...w }) => w);
   delete out.dataVersion;
   out.share = shareMeta(r.link);
-  return json(req, res, 200, out);
+  const body = Buffer.from(JSON.stringify(out));
+  if (body.length <= 8 * 1024 * 1024) {
+    shareDataCache.set(ck, body); shareDataBytes += body.length;
+    while (shareDataCache.size > 16 || shareDataBytes > 32 * 1024 * 1024) { const [k, v] = shareDataCache.entries().next().value; shareDataBytes -= v.length; shareDataCache.delete(k); }
+  }
+  return send(req, res, 200, body, 'application/json; charset=utf-8', { 'Cache-Control': 'no-store' });
 }, { public: true });
-function shareOut(l) {
-  const now = Date.now();
-  return { id: l.id, title: l.title, periodLabel: specLabel(l.spec), scopeLabel: shareScopeLabel(l.scope), channel: l.channel_name || '', event: l.event || '', createdBy: l.created_by, createdAt: l.created_at, expiresAt: l.expires_at, revokedAt: l.revoked_at, revokedBy: l.revoked_by || '',
+function shareOut(l, labels = null) {
+  const now = Date.now(), sk = JSON.stringify(l.scope || null);
+  // 列表中大量链接共享少数几个推送范围：同一请求内按范围缓存名称（scopeOf 每次都要读取全部 Key）
+  const scopeLabel = labels ? (labels.get(sk) ?? labels.set(sk, shareScopeLabel(l.scope)).get(sk)) : shareScopeLabel(l.scope);
+  return { id: l.id, title: l.title, periodLabel: specLabel(l.spec), scopeLabel, channel: l.channel_name || '', event: l.event || '', createdBy: l.created_by, createdAt: l.created_at, expiresAt: l.expires_at, revokedAt: l.revoked_at, revokedBy: l.revoked_by || '',
     views: l.views, lastViewAt: l.last_view_at, lastViewIp: l.last_view_ip || '', lastViewLoc: l.last_view_ip ? ipLoc(l.last_view_ip) : '', status: l.revoked_at ? 'revoked' : l.expires_at <= now ? 'expired' : 'active' };
 }
 route('GET', '/api/admin/shares', async (req, res, ctx) => {
-  const status = ['active', 'expired', 'revoked'].includes(ctx.url.searchParams.get('status')) ? ctx.url.searchParams.get('status') : '';
-  return json(req, res, 200, { available: shares.available, days: alerts.settings().shareDays, limits: SHARE_DAYS, stats: store.shareStats(), links: store.listShares({ status }).map(shareOut) });
+  const q = ctx.url.searchParams.get('status'), status = ['active', 'expired', 'revoked', 'all'].includes(q) ? q : 'active';
+  const labels = new Map();
+  return json(req, res, 200, { available: shares.available, days: alerts.settings().shareDays, limits: SHARE_DAYS, stats: store.shareStats(), status, links: store.listShares({ status: status === 'all' ? '' : status }).map(l => shareOut(l, labels)) });
 }, { admin: true });
 /** 手动生成分享链接（全部范围）：指定账期或日期范围；链接只在本次响应中返回一次 */
 route('POST', '/api/admin/shares', async (req, res, ctx) => {

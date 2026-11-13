@@ -43,6 +43,14 @@ function kpiPanel(kpis) {
   };
 }
 
+/** 排行表头：与数据行相同的列宽，灰色小字标明单位（费用（元）/ Token 用量）与“占比” */
+function headRow(head, share) {
+  const h = t => md(font('grey', safe(t || '')), { text_size: 'notation' });
+  return {
+    tag: 'column_set', flex_mode: 'none', horizontal_spacing: 'small',
+    columns: [col(5, [h(head[0])]), col(3, [{ ...h(head[1]), text_align: 'right' }]), ...(share ? [col(2, [{ ...h(head[2]), text_align: 'right' }])] : [])],
+  };
+}
 /** 排行行：名称（带灰色排名）/ 金额（右对齐加粗）/ 占比（右对齐灰色）；每行一个分栏，名称折行也不会错位 */
 function rankRows(rows) {
   const share = rows.some(r => r.share);
@@ -99,8 +107,9 @@ export function feishuCard({ title, subtitle, level = 'info', doc = {}, footer, 
   const secs = (doc.sections || []).filter(s => s.rows?.length || s.items?.length);
   if (secs.length && E.length) E.push({ tag: 'hr' });
   for (const s of secs) {
-    E.push(md(`**${safe(s.title)}**`));
-    if (s.rows?.length) E.push(...rankRows(s.rows));
+    // 小标题后用灰色小字说明排序依据与占比的分母，避免把占比误读为涨跌幅
+    E.push(md(`**${safe(s.title)}**${s.note ? `　${font('grey', safe(s.note))}` : ''}`));
+    if (s.rows?.length) { if (s.head) E.push(headRow(s.head, s.rows.some(r => r.share))); E.push(...rankRows(s.rows)); }
     else E.push(md(itemsMd(s.items, 6000)));
   }
   if (at && !doc.items?.length) E.push(md(at.trim()));

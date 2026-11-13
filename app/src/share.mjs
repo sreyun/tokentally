@@ -44,7 +44,10 @@ export class ShareService {
     return { token, id, expiresAt, url: `${this.publicUrl}/share#${token}` };
   }
 
-  /** 链接状态：{ link } 或 { reason }（not_found / expired / revoked） */
+  /**
+   * 链接状态：有效时为 { link }；无效时带 reason（not_found / expired / revoked），过期 / 撤销时同时附带 link 记录（仅用于提示原因）。
+   * 判断是否有效必须看 reason，不能看 link 是否存在
+   */
   check(id) {
     const link = id ? this.store.getShare(id) : null;
     if (!link) return { reason: 'not_found' };

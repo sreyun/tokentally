@@ -190,8 +190,8 @@ export function modal({ title, body, submit = '确定', cancel = '取消', wide 
 /* =========================================================================
  * HTTP / Toast
  * ========================================================================= */
-export async function http(method, url, body, { background = false } = {}) {
-  const headers = { Accept: 'application/json' };
+export async function http(method, url, body, { background = false, headers: extra = null } = {}) {
+  const headers = { Accept: 'application/json', ...(extra || {}) };
   if (background) headers['X-Background'] = '1'; // 后台轮询：不刷新会话空闲计时
   if (body !== undefined) headers['Content-Type'] = 'application/json';
   if (method !== 'GET') headers['X-CSRF-Token'] = state.csrf;
