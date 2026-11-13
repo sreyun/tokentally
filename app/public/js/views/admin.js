@@ -1,9 +1,9 @@
 /* 系统管理：云厂商接入（阿里云 / 腾讯云）、数据同步、预算、告警通知、用户、品牌与备份、安全审计、接口日志 */
 import { $, esc, state, ui, app, http, toast, money, fmtTime, ago, p2, addMonths, opt, icon, help, keyShort, wsName, NONE_KEY, NO_WS, NO_CC, sum, PROVIDERS, provTag, modal } from '../core.js';
 import { table } from '../table.js';
-import { actLabel, actBad, auditHtml, auditText, ipHtml, ipText, API, apiParams } from '../labels.js';
+import { actLabel, actBad, auditHtml, auditText, ipHtml, ipText, API, apiParams, OP_CAT, OP_ACT, opPairs, uaText } from '../labels.js';
 
-export const ADMIN_TABS = { aliyun: '阿里云接入', tencent: '腾讯云接入', sync: '数据同步', budgets: '预算管理', alerts: '告警通知', users: '用户管理', system: '品牌与备份', security: '安全与审计', logs: '系统日志', calls: '接口日志' };
+export const ADMIN_TABS = { aliyun: '阿里云接入', tencent: '腾讯云接入', sync: '数据同步', budgets: '预算管理', alerts: '告警通知', users: '用户管理', system: '品牌与备份', security: '安全与审计', oplog: '操作日志', logs: '系统日志', calls: '接口日志' };
 const POLICY = {
   Version: '1',
   Statement: [
@@ -23,7 +23,7 @@ export async function render(v, tab) {
   if (!Object.hasOwn(ADMIN_TABS, tab)) tab = 'aliyun';
   v.innerHTML = `<div class="row" style="margin-bottom:14px"><div class="seg scroll" role="tablist" aria-label="系统管理">${Object.entries(ADMIN_TABS).map(([k, l]) => `<button type="button" role="tab" data-go="#/admin/${k}" aria-pressed="${tab === k}" aria-selected="${tab === k}">${l}</button>`).join('')}</div></div><div id="adm"><div class="nodata">加载中…</div></div>`;
   const el = $('#adm', v);
-  try { await ({ aliyun, tencent, sync, budgets, alerts, users, system, security, logs, calls })[tab](el); }
+  try { await ({ aliyun, tencent, sync, budgets, alerts, users, system, security, oplog, logs, calls })[tab](el); }
   catch (e) { el.innerHTML = `<div class="notice err">${icon('warn')}<div><b>加载失败</b><span class="why">${esc(e.message)}</span></div></div>`; }
 }
 
@@ -804,6 +804,7 @@ async function users(el) {
       { key: 'username', label: '用户名', fmt: (x, r) => `<b style="font-weight:600">${esc(x)}</b>${r.id === state.me.id ? '<span class="tag">我</span>' : ''}` },
       { key: 'role', label: '角色', fmt: x => `<span class="role ${x}">${x === 'admin' ? '管理员' : '只读'}</span>` },
       { key: 'st', label: '状态', sortable: false, fmt: (x, r) => (r.disabled ? '<span class="state off">已禁用</span>' : r.locked ? '<span class="state warn">已锁定</span>' : r.mustChange ? '<span class="state warn">待改密</span>' : '<span class="state on">正常</span>') },
+      { key: 'lastActiveAt', label: '最近活动', fmt: x => (x ? `${esc(ago(x))}<span class="sub">${esc(fmtTime(x))}</span>` : '<span class="muted">—</span>'), csv: r => (r.lastActiveAt ? fmtTime(r.lastActiveAt) : '') },
       { key: 'lastLoginAt', label: '最近登录', fmt: (x, r) => (x ? `${fmtTime(x)}<span class="sub">${r.lastLoginIp ? `<span class="mono">${esc(r.lastLoginIp)}</span>${r.lastLoginLoc ? ` · ${esc(r.lastLoginLoc)}` : ''}` : ''}</span>` : '<span class="muted">从未登录</span>'), csv: r => (r.lastLoginAt ? `${fmtTime(r.lastLoginAt)} ${ipText(r.lastLoginIp, r.lastLoginLoc)}` : '') },
       { key: 'sessions', label: '会话', align: 'r' },
       { key: 'ops', label: '操作', sortable: false, fmt: (x, r) => `<div class="row" style="gap:4px;flex-wrap:nowrap">
@@ -1078,6 +1079,95 @@ async function logs(el) {
   $('#lgCsv', el).onclick = () => t?.csv(`系统日志_${new Date().toISOString().slice(0, 10)}.csv`);
   // 自动刷新：每 10 秒，离开本页后停止
   const timer = setInterval(() => { if (!el.isConnected) { clearInterval(timer); return; } if ($('#lgAuto', el).checked && !document.hidden) reload(); }, 10_000);
+  await load();
+}
+
+/* ---------------- 用户操作日志 ----------------
+ * 所有用户（含只读用户）的登录、页面访问、数据查询、导出 / 下载、配置变更与权限拒绝；按用户 / 分类 / 结果 / 日期 / 关键字筛选
+ */
+async function oplog(el) {
+  const st = { user: '', category: '', result: '', from: '', to: '', q: '' };
+  el.innerHTML = `<div class="stat-strip" id="opStats"></div>
+    <section class="panel"><div class="panel-h"><h3>用户活跃</h3><span class="sub">近 7 天 · 点击用户查看其操作</span></div><div id="opUsers"><div class="nodata">加载中…</div></div></section>
+    <section class="panel"><div class="panel-h"><h3>操作明细</h3><span class="sub" id="opSub"></span>
+      <div class="actions"><button class="btn sm" id="opCsv">${icon('download')}导出</button><button class="btn sm ghost" id="opRefresh">${icon('sync')}刷新</button></div></div>
+      <div class="row" style="margin-bottom:10px;gap:8px">
+        <select class="inp sm" id="opUser" aria-label="用户">${opt('', '全部用户', '')}</select>
+        <div class="seg sm scroll" role="group" aria-label="分类">${[['', '全部'], ...Object.entries(OP_CAT)].map(([k, l]) => `<button type="button" data-oc="${k}" aria-pressed="${k === ''}">${l}</button>`).join('')}</div>
+        <select class="inp sm" id="opRes" aria-label="结果">${opt('', '全部结果', '')}${opt('ok', '成功', '')}${opt('fail', '失败 / 拒绝', '')}</select>
+        <input class="inp sm" type="date" id="opFrom" aria-label="开始日期"><span class="muted">–</span><input class="inp sm" type="date" id="opTo" aria-label="结束日期">
+        <input class="inp sm" id="opQ" type="search" placeholder="搜索操作、对象、IP" style="width:180px" aria-label="搜索操作日志">
+      </div>
+      <div id="opTbl"></div><div class="row" style="justify-content:center;margin-top:10px"><button class="btn sm" id="opMore" hidden>加载更早的记录</button></div>
+      <p class="hint" style="margin:10px 0 0">记录内容不含任何密码、密钥或 Webhook；后台自动刷新不计入。安全相关的配置变更另见“安全与审计 → 审计日志”。</p></section>`;
+  let rows = [], t = null, users = [], retention = 0;
+  const params = before => new URLSearchParams(Object.entries({ ...st, user: st.user, limit: 200, ...(before ? { before } : {}) }).filter(([, v]) => v !== '' && v != null)).toString();
+  const resText = r => (r.status == null ? '<span class="pill neutral">已记录</span>' : r.status >= 400 ? `<span class="pill bad" title="HTTP ${r.status}">${r.status === 403 ? '拒绝' : '失败'}</span>` : '<span class="pill good">成功</span>');
+  const draw = () => {
+    t = table('oplog', $('#opTbl', el), {
+      sort: 'id', pageSize: 0, stickyFirst: false, empty: '暂无操作记录', caption: '操作明细',
+      columns: [
+        { key: 'id', label: '时间', fmt: (x, r) => fmtTime(r.ts) + ':' + p2(new Date(r.ts).getSeconds()), csv: r => fmtTime(r.ts) + ':' + p2(new Date(r.ts).getSeconds()) },
+        { key: 'username', label: '用户', fmt: (x, r) => (x.startsWith('?') ? '<span class="muted">不存在的用户</span>' : `<button class="lnk" data-op-user="${esc(x)}">${esc(x)}</button>${r.role === 'admin' ? '<span class="sub">管理员</span>' : r.role ? '<span class="sub">只读</span>' : ''}`), csv: r => r.username },
+        { key: 'ip', label: 'IP / 归属地', fmt: (x, r) => ipHtml(x, r.loc), csv: r => ipText(r.ip, r.loc) },
+        { key: 'category', label: '分类', fmt: x => `<span class="tag" style="margin-left:0">${esc(OP_CAT[x] || x)}</span>`, csv: r => OP_CAT[r.category] || r.category },
+        { key: 'action', label: '操作', fmt: (x, r) => `<span class="${r.status >= 400 ? 'bad-text' : ''}" title="${esc(x)}">${esc(OP_ACT[x] || x)}</span>`, csv: r => OP_ACT[r.action] || r.action },
+        { key: 'target', label: '对象', cls: 'wrap-cell', fmt: x => (x ? esc(x) : '<span class="muted">—</span>') },
+        { key: 'detail', label: '详情', cls: 'wrap-cell wide-cell', sortable: false, fmt: x => { const ps = opPairs(x); return ps.length ? `<div class="ad">${ps.map(([k, v]) => `<span class="ad-i">${k ? `<em>${esc(k)}</em>` : ''}${esc(v)}</span>`).join('')}</div>` : '<span class="muted">—</span>'; }, csv: r => opPairs(r.detail).map(([k, v]) => (k ? `${k}：${v}` : v)).join('；') },
+        { key: 'status', label: '结果', fmt: (x, r) => resText(r), csv: r => (r.status == null ? '' : r.status >= 400 ? `失败（${r.status}）` : '成功') },
+        { key: 'ms', label: '耗时', align: 'r', fmt: x => (x == null ? '' : x + ' ms') },
+        { key: 'ua', label: '设备', fmt: x => `<span title="${esc(x || '')}">${esc(uaText(x))}</span>`, csv: r => uaText(r.ua) },
+      ],
+      csvExtra: [{ label: '请求', val: r => (r.method ? `${r.method} ${r.path}` : r.path || '') }, { label: '会话', val: r => r.sid || '' }, { label: 'User-Agent', val: r => r.ua || '' }],
+    }).setRows(rows);
+    $('#opSub', el).textContent = `已加载 ${rows.length.toLocaleString()} 条${retention ? ` · 保留 ${retention} 天` : ''}`;
+  };
+  const drawUsers = () => {
+    const u = $('#opUsers', el);
+    if (!users.length) { u.innerHTML = '<div class="nodata">近 7 天无操作记录</div>'; return; }
+    table('opusers', u, {
+      sort: 'last', pageSize: 0, stickyFirst: false, caption: '用户活跃',
+      columns: [
+        { key: 'username', label: '用户', fmt: (x, r) => (x.startsWith('?') ? '<span class="muted">不存在的用户（登录尝试）</span>' : `<button class="lnk" data-op-user="${esc(x)}"><b style="font-weight:600">${esc(x)}</b></button>${r.role ? `<span class="sub">${r.role === 'admin' ? '管理员' : '只读'}</span>` : ''}`) },
+        { key: 'last', label: '最近活动', fmt: x => `${esc(ago(x))}<span class="sub">${esc(fmtTime(x))}</span>` },
+        { key: 'ip', label: '最近 IP / 归属地', fmt: (x, r) => ipHtml(x, r.loc) },
+        { key: 'ua', label: '最近设备', fmt: x => esc(uaText(x)) },
+        { key: 'sessions', label: '会话', align: 'r' }, { key: 'views', label: '页面访问', align: 'r' }, { key: 'queries', label: '数据查询', align: 'r' },
+        { key: 'exports', label: '导出 / 下载', align: 'r' }, { key: 'changes', label: '配置变更', align: 'r' },
+        { key: 'fails', label: '失败 / 拒绝', align: 'r', fmt: x => (x ? `<span class="bad-text">${x}</span>` : '0') },
+      ],
+    }).setRows(users);
+  };
+  const load = async (more = false) => {
+    const before = more && rows.length ? rows.at(-1).id : 0;
+    const r = await http('GET', '/api/admin/oplog?' + params(before));
+    rows = more ? rows.concat(r.ops) : r.ops;
+    if (!more) {
+      const s = r.stats24h, c = s.byCat || {};
+      $('#opStats', el).innerHTML = `<div><span>近 24 小时操作</span><b>${s.n.toLocaleString()}</b></div><div><span>活跃用户（24 小时）</span><b>${s.users}</b></div>
+        <div><span>页面访问</span><b>${(c.view || 0).toLocaleString()}</b></div><div><span>数据查询</span><b>${(c.query || 0).toLocaleString()}</b></div>
+        <div><span>导出 / 下载</span><b>${c.export || 0}</b></div><div><span>配置变更</span><b>${(c.config || 0) + (c.user || 0) + (c.alert || 0) + (c.sync || 0)}</b></div>
+        <div><span>失败 / 拒绝</span><b class="${s.fails ? 'bad-text' : ''}">${s.fails}</b></div>`;
+      retention = r.retentionDays;
+      users = r.users || [];
+      const sel = $('#opUser', el), names = [...new Set(users.map(x => x.username).filter(x => !x.startsWith('?')).concat(st.user ? [st.user] : []))].sort();
+      sel.innerHTML = opt('', '全部用户', st.user) + names.map(n => opt(n, n, st.user)).join('');
+      drawUsers();
+    }
+    $('#opMore', el).hidden = r.ops.length < 200;
+    draw();
+  };
+  const reload = () => load().catch(ex => toast(ex.message, 'err', 4000));
+  el.querySelectorAll('[data-oc]').forEach(b => b.onclick = () => { st.category = b.dataset.oc; el.querySelectorAll('[data-oc]').forEach(x => x.setAttribute('aria-pressed', String(x === b))); reload(); });
+  $('#opUser', el).onchange = e => { st.user = e.target.value; reload(); };
+  $('#opRes', el).onchange = e => { st.result = e.target.value; reload(); };
+  $('#opFrom', el).onchange = e => { st.from = e.target.value; reload(); };
+  $('#opTo', el).onchange = e => { st.to = e.target.value; reload(); };
+  let qt; $('#opQ', el).oninput = e => { clearTimeout(qt); qt = setTimeout(() => { st.q = e.target.value.trim(); reload(); }, 300); };
+  $('#opRefresh', el).onclick = reload;
+  $('#opMore', el).onclick = () => load(true).catch(ex => toast(ex.message, 'err', 4000));
+  $('#opCsv', el).onclick = () => t?.csv(`操作日志_${new Date().toISOString().slice(0, 10)}.csv`);
+  el.addEventListener('click', e => { const b = e.target.closest('[data-op-user]'); if (!b) return; st.user = b.dataset.opUser; $('#opUser', el).value = st.user; reload(); $('#opTbl', el).scrollIntoView({ behavior: 'smooth', block: 'start' }); });
   await load();
 }
 

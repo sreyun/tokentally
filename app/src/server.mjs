@@ -15,12 +15,12 @@ import { AlertService, ALERT_TYPES, EVENT_TYPES, MAX_CHANNELS, validateWebhook, 
 import { selfTest, AliyunClient, explainAliyunError, callLog, MS_REGIONS, BSS_ENDPOINTS } from './aliyun.mjs';
 import { tc3SelfTest, TencentClient, explainTencentError, TC_REGIONS, TC_SITES } from './tencent.mjs';
 import { seedDemo, clearDemo, demoStale } from './demo.mjs';
-import { PromClient, validateCalls, discover, fetchCalls, buildUsageRows, buildQuery, DEFAULT_CALLS, MAPPING_FIELDS, PROM_AUTH } from './prom.mjs';
+import { PromClient, dayStartSec, validateCalls, discover, fetchCalls, buildUsageRows, buildQuery, DEFAULT_CALLS, MAPPING_FIELDS, PROM_AUTH } from './prom.mjs';
 import { configureIpLoc, ipLoc, ipLocInfo } from './iploc.mjs';
 import { normalizeSmtp, parseRecipients } from './smtp.mjs';
 import { loadMasterKey, hashPassword, verifyPassword, burnPasswordCheck, checkPasswordPolicy, randomPassword, maskId, sha256 } from './crypto.mjs';
 
-const VERSION = '1.7.0';
+const VERSION = '1.8.0';
 
 /* ===================================================================
  * 系统日志：所有运行日志同时输出到控制台并写入数据库（system_log，保留 SYSTEM_LOG_DAYS 天），
@@ -70,6 +70,7 @@ fs.mkdirSync(config.dataDir, { recursive: true });
 const master = loadMasterKey(config.dataDir, config.masterKey);
 const store = new Store(path.join(config.dataDir, 'bailian-cost.db'), master.key);
 store.systemLogDays = config.systemLogDays;
+store.opLogDays = config.opLogDays;
 logSink = e => store.addSystemLog(e);
 for (const e of pendingLogs.splice(0)) { try { store.addSystemLog(e); } catch { /* ignore */ } }
 /* 运维：账号被锁定（如唯一的管理员被他人反复输错密码锁定）时，在服务器上执行 node src/server.mjs --unlock-user=<用户名> 解除 */
@@ -332,7 +333,7 @@ function send(req, res, status, body, type, extra = {}) {
   res.writeHead(status, { 'Content-Type': type, 'Content-Length': out.length, ...(gzip ? { 'Content-Encoding': 'gzip', Vary: 'Accept-Encoding' } : {}), ...extra });
   res.end(req.method === 'HEAD' ? undefined : out);
 }
-const json = (req, res, status, obj) => send(req, res, status, JSON.stringify(obj), 'application/json; charset=utf-8', { 'Cache-Control': 'no-store' });
+const json = (req, res, status, obj) => { if (status >= 400 && obj?.error) res.opError = String(obj.error).slice(0, 200); return send(req, res, status, JSON.stringify(obj), 'application/json; charset=utf-8', { 'Cache-Control': 'no-store' }); };
 
 function sendFile(req, res, name) {
   const f = getFile(name);
@@ -382,7 +383,7 @@ function readJson(req, limit = 64 * 1024) {
     req.on('end', () => {
       if (tooBig) return;
       if (!chunks.length) return resolve({});
-      try { const v = JSON.parse(Buffer.concat(chunks).toString('utf8')); resolve(v && typeof v === 'object' ? v : {}); }
+      try { const v = JSON.parse(Buffer.concat(chunks).toString('utf8')); const o = v && typeof v === 'object' ? v : {}; req.jsonBody = o; resolve(o); }
       catch { reject(new HttpError(400, 'JSON 格式错误')); }
     });
     req.on('error', reject);
@@ -905,9 +906,10 @@ async function testConnection(body) {
 }
 
 const USER_RE = /^[A-Za-z0-9_.@-]{3,32}$/;
+let lastActive = null;
 const userOut = u => ({
   id: u.id, username: u.username, role: u.role, disabled: !!u.disabled, mustChange: !!u.must_change, locked: !!(u.locked_until && u.locked_until > Date.now()),
-  lastLoginAt: u.last_login_at, lastLoginIp: u.last_login_ip, lastLoginLoc: ipLoc(u.last_login_ip), pwChangedAt: u.pw_changed_at, createdAt: u.created_at, sessions: u.sessions ?? 0,
+  lastActiveAt: lastActive?.get(u.username) || null, lastLoginAt: u.last_login_at, lastLoginIp: u.last_login_ip, lastLoginLoc: ipLoc(u.last_login_ip), pwChangedAt: u.pw_changed_at, createdAt: u.created_at, sessions: u.sessions ?? 0,
 });
 
 /* ===================================================================
@@ -1344,8 +1346,51 @@ route('PUT', '/api/admin/network', async (req, res, ctx) => {
   return json(req, res, 200, ipDiagnose(req));
 }, { admin: true });
 route('GET', '/api/admin/calls', async (req, res) => json(req, res, 200, { calls: callLog }), { admin: true });
+/* 前端上报的操作（页面访问、导出 CSV、打印 / 导出 PDF、复制链接）：每次最多 20 条，按白名单清洗 */
+const CLIENT_OPS = { 'page.view': 'view', 'export.csv': 'export', 'export.print': 'export', 'link.copy': 'view', 'drill.down': 'view' };
+/** 前端上报限流：每个用户每 10 分钟最多 300 条（操作日志有总条数上限，不能被刷屏挤掉正常的历史记录），超出时只记录一条提示 */
+const clientOpBudget = new Map(); // userId -> { t: 窗口开始, n: 已接受条数, warned }
+function takeClientOps(userId, want) {
+  const now = Date.now();
+  let b = clientOpBudget.get(userId);
+  if (!b || now - b.t > 10 * 60_000) { b = { t: now, n: 0, warned: false }; clientOpBudget.set(userId, b); }
+  if (clientOpBudget.size > 5000) for (const [k, v] of clientOpBudget) if (now - v.t > 10 * 60_000) clientOpBudget.delete(k);
+  const n = Math.max(0, Math.min(want, 300 - b.n));
+  b.n += n;
+  const throttled = n < want && !b.warned;
+  if (throttled) b.warned = true;
+  return { n, throttled };
+}
+route('POST', '/api/oplog', async (req, res, ctx) => {
+  const b = await readJson(req, 32 * 1024);
+  const all = Array.isArray(b.events) ? b.events.slice(0, 20) : [];
+  const quota = takeClientOps(ctx.user.id, all.length);
+  const events = all.slice(0, quota.n);
+  const now = Date.now();
+  if (quota.throttled) recordOp({ ts: now, userId: ctx.user.id, username: ctx.user.username, role: ctx.user.role, ip: ctx.ip, action: 'oplog.throttled', category: 'denied', target: '页面操作上报过于频繁，已暂停记录（10 分钟内超过 300 条）', detail: null, status: 429, ua: req.headers['user-agent'], sid: sidOf(ctx.session), source: 'server' });
+  let n = 0;
+  for (const e of events) {
+    if (!e || typeof e !== 'object' || !Object.hasOwn(CLIENT_OPS, e.action)) continue;
+    const ts = Number.isFinite(e.at) && e.at <= now && e.at > now - 10 * 60_000 ? e.at : now; // 只接受最近 10 分钟内的时间
+    let detail = null;
+    if (e.detail && typeof e.detail === 'object') detail = Object.fromEntries(Object.entries(e.detail).filter(([k]) => !SECRET_KEY.test(k)).slice(0, 12).map(([k, v]) => [ostr(k, 24), typeof v === 'number' || typeof v === 'boolean' ? v : ostr(v, 160)]));
+    recordOp({ ts, userId: ctx.user.id, username: ctx.user.username, role: ctx.user.role, ip: ctx.ip, action: e.action, category: CLIENT_OPS[e.action], target: ostr(e.target, 200), detail, method: null, path: ostr(e.route, 120) || null, status: null, ms: null, ua: req.headers['user-agent'], sid: sidOf(ctx.session), source: 'client' });
+    n++;
+  }
+  return json(req, res, 200, { ok: true, n });
+}, { allowMustChange: true });
+route('GET', '/api/admin/oplog', async (req, res, ctx) => {
+  const q = ctx.url.searchParams, day = s => (/^\d{4}-\d{2}-\d{2}$/.test(s || '') ? dayStartSec(s, config.billTz) * 1000 : 0);
+  const from = day(q.get('from')), to = q.get('to') && day(q.get('to')) ? day(q.get('to')) + 864e5 : 0;
+  const category = /^[a-z]{1,16}$/.test(q.get('category') || '') ? q.get('category') : '';
+  const result = ['ok', 'fail'].includes(q.get('result')) ? q.get('result') : '';
+  const rows = store.listOps({ username: ostr(q.get('user'), 64), category, result, from, to, q: ostr(q.get('q'), 100), before: Number(q.get('before')) || 0, limit: int(q.get('limit'), 1, 2000, 200) });
+  const out = { ops: rows.map(r => ({ ...r, loc: ipLoc(r.ip) })), retentionDays: config.opLogDays };
+  if (!Number(q.get('before'))) { const since = Date.now() - 864e5; out.stats24h = store.opStats(since); out.users = store.userActivity(Date.now() - 7 * 864e5).map(u => ({ ...u, loc: ipLoc(u.ip) })); }
+  return json(req, res, 200, out);
+}, { admin: true });
 route('GET', '/api/admin/audit', async (req, res) => json(req, res, 200, { audit: store.listAudit(1000).map(r => ({ ...r, loc: ipLoc(r.ip) })) }), { admin: true });
-route('GET', '/api/admin/users', async (req, res) => json(req, res, 200, { users: store.listUsers().map(userOut) }), { admin: true });
+route('GET', '/api/admin/users', async (req, res) => { lastActive = store.lastActiveByUser(); try { return json(req, res, 200, { users: store.listUsers().map(userOut) }); } finally { lastActive = null; } }, { admin: true });
 /*
  * 用户管理：创建管理员、提升为管理员、重置他人密码属于提权 / 接管账号的敏感操作，与更换密钥一样需要当前登录密码确认；
  * 修改自己的密码必须走 /api/me/password（校验原密码）。“至少保留一个管理员”只统计启用的管理员，已禁用的管理员可以删除或降级
@@ -1454,6 +1499,52 @@ function metricsText() {
  * 请求处理
  * =================================================================== */
 let proxyWarned = false;
+/* ===================================================================
+ * 用户操作日志：记录所有用户（含只读用户）的登录、数据查询、配置变更、下载与权限拒绝；页面访问与导出由前端上报。
+ * 只按白名单摘取请求中的非敏感字段（密码、密钥、Webhook、Token 一律不记录）；后台轮询（X-Background）不记录
+ * =================================================================== */
+const OPS = [ // [方法, 路径, 操作代码, 分类]
+  ['POST', /^\/api\/logout$/, 'auth.logout', 'auth'], ['POST', /^\/api\/me\/password$/, 'account.password', 'auth'],
+  ['GET', /^\/api\/data$/, 'data.query', 'query'],
+  ['PUT', /^\/api\/admin\/settings$/, 'settings.update', 'config'], ['POST', /^\/api\/admin\/test$/, 'provider.test', 'config'],
+  ['POST', /^\/api\/admin\/sync$/, 'sync.trigger', 'sync'], ['POST', /^\/api\/admin\/aliyun-calls\/discover$/, 'calls.discover', 'config'],
+  ['POST', /^\/api\/admin\/aliyun-calls\/preview$/, 'calls.preview', 'config'], ['POST', /^\/api\/admin\/aliyun-calls\/sync$/, 'calls.sync', 'sync'],
+  ['PUT', /^\/api\/admin\/budgets$/, 'budget.update', 'config'], ['PUT', /^\/api\/admin\/key-tags$/, 'keytags.update', 'config'],
+  ['PUT', /^\/api\/admin\/alerts$/, 'alert.update', 'alert'], ['POST', /^\/api\/admin\/alerts\/test$/, 'alert.test', 'alert'], ['POST', /^\/api\/admin\/alerts\/report$/, 'alert.report', 'alert'],
+  ['PUT', /^\/api\/admin\/smtp$/, 'smtp.update', 'alert'], ['POST', /^\/api\/admin\/smtp\/test$/, 'smtp.test', 'alert'],
+  ['POST', /^\/api\/admin\/backups$/, 'backup.create', 'config'], ['POST', /^\/api\/admin\/backups\/download$/, 'backup.download', 'export'],
+  ['PUT', /^\/api\/admin\/network$/, 'network.update', 'config'],
+  ['POST', /^\/api\/admin\/users$/, 'user.create', 'user'], ['PUT', /^\/api\/admin\/users\/[^/]+$/, 'user.update', 'user'], ['DELETE', /^\/api\/admin\/users\/[^/]+$/, 'user.delete', 'user'],
+];
+const SECRET_KEY = /pass|secret|token|webhook|key(secret|value)?$|^confirm|authorization|cookie/i;
+const ostr = (v, n = 80) => (v == null ? '' : String(v).replace(/[\u0000-\u001f]/g, ' ').slice(0, n));
+/** 请求摘要（白名单）：对象（target）与详情（detail），不含任何敏感值 */
+function opDescribe(action, req, ctx, b = req.jsonBody || {}) {
+  const q = ctx.url.searchParams;
+  switch (action) {
+    case 'data.query': return { target: q.get('mode') === 'range' ? `${ostr(q.get('from'), 10)} ~ ${ostr(q.get('to'), 10)}` : `账期 ${ostr(q.get('cycle'), 7) || '本月'}`, detail: null };
+    case 'sync.trigger': return { target: b.kind === 'bills' ? '账单' : 'API Key 与业务空间', detail: { provider: ostr(b.provider, 16) || 'all', cycles: Array.isArray(b.cycles) ? b.cycles.slice(0, 18).map(c => ostr(c, 7)) : undefined, force: !!b.force } };
+    case 'alert.report': return { target: ostr(b.kind, 16), detail: { send: !!b.send } };
+    case 'settings.update': case 'smtp.update': case 'network.update': case 'budget.update': case 'alert.update':
+      return { target: null, detail: { fields: Object.keys(b).filter(k => !SECRET_KEY.test(k)).slice(0, 20), ...(action === 'network.update' ? { ipSource: ostr(b.ipSource, 10), hops: b.hops } : {}), ...(action === 'budget.update' ? { monthly: b.monthly ?? null, keys: b.keys && typeof b.keys === 'object' ? Object.keys(b.keys).length : 0 } : {}) } };
+    case 'keytags.update': return { target: null, detail: { count: Array.isArray(b.items) ? b.items.length : 0 } };
+    case 'backup.download': return { target: ostr(b.name, 120), detail: null };
+    case 'smtp.test': return { target: ostr(b.to, 200), detail: null };
+    case 'provider.test': return { target: ostr(b.provider, 16) || 'aliyun', detail: null };
+    case 'user.create': return { target: ostr(b.username, 64), detail: { role: ostr(b.role, 10) } };
+    case 'user.update': return { target: null, detail: { fields: Object.keys(b).filter(k => !SECRET_KEY.test(k) || k === 'password').map(k => (k === 'password' ? 'password' : k)).slice(0, 10) } };
+    default: return { target: null, detail: null };
+  }
+}
+const sidOf = session => (session?.id_hash ? sha256(session.id_hash).slice(0, 10) : null);
+function recordOp(e) { try { store.addOp(e); } catch (err) { if (!recordOp.warned) { recordOp.warned = true; log('写入操作日志失败：' + err.message); } } }
+/** 登录（公开接口）：成功与失败都记录；不存在的用户名只记录摘要 */
+function recordLogin(req, res, ctx, t0) {
+  const name = ostr(req.jsonBody?.username, 64).trim();
+  const u = name ? store.userByName(name) : null;
+  recordOp({ ts: t0, userId: u?.id, username: u ? u.username : name ? `?${sha256(name.toLowerCase()).slice(0, 8)}` : '?', role: u?.role, ip: ctx.ip, action: res.statusCode < 400 ? 'auth.login' : 'auth.login.fail', category: 'auth', target: null, detail: res.statusCode >= 400 && res.opError ? { error: res.opError } : null, method: 'POST', path: '/api/login', status: res.statusCode, ms: Date.now() - t0, ua: req.headers['user-agent'], source: 'server' });
+}
+
 async function handle(req, res) {
   const ip = clientIp(req);
   // 经反向代理访问、却仍按直连识别 IP：登录记录 / 审计 / 白名单 / 限流都会使用代理地址，记录一次提示
@@ -1508,6 +1599,20 @@ async function handle(req, res) {
   const r = routes.find(x => x.method === method && x.re.test(p));
   if (!r) return json(req, res, 404, { error: '接口不存在' });
   const ctx = { ip, url, params: p.match(r.re).groups || {}, session };
+  const t0 = Date.now();
+  if (p === '/api/login' && method === 'POST') res.once('close', () => recordLogin(req, res, ctx, t0));
+  else if (session && req.headers['x-background'] !== '1') {
+    const spec = OPS.find(o => o[0] === method && o[1].test(p));
+    const targetUser = spec && /^user\.(update|delete)$/.test(spec[2]) && ctx.params.id ? store.userById(ctx.params.id)?.username || `#${ostr(ctx.params.id, 12)}` : null;
+    res.once('close', () => {
+      if (!res.writableFinished) res.statusCode = 499; // 客户端在响应完成前断开（如取消下载）
+      const denied = res.statusCode === 403 && !spec;
+      if (!spec && !denied) return;
+      const d = spec ? opDescribe(spec[2], req, ctx) : { target: `${method} ${p}`, detail: null };
+      recordOp({ ts: t0, userId: session.user_id, username: session.username, role: session.role, ip, action: spec ? spec[2] : 'access.denied', category: spec ? spec[3] : 'denied', target: targetUser || d.target,
+        detail: res.statusCode >= 400 && res.opError ? { ...(d.detail || {}), error: res.opError } : d.detail, method, path: p, status: res.statusCode, ms: Date.now() - t0, ua: req.headers['user-agent'], sid: sidOf(session) });
+    });
+  }
   if (method !== 'GET' && !sameOrigin(req)) return json(req, res, 403, { error: '跨站请求被拒绝' });
   if (!r.opts.public) {
     if (!session) return json(req, res, 401, { error: '未登录或会话已过期', code: 'Unauthorized' });

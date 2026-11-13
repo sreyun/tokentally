@@ -186,7 +186,7 @@ export function render(v) {
   v.querySelectorAll('[data-pvshow]').forEach(el => el.onclick = () => { pv.show = el.dataset.pvshow; save(); });
   v.querySelectorAll('[data-preset]').forEach(el => el.onclick = () => { const p = PRESETS[+el.dataset.preset]; pv.rows = p.rows; pv.cols = p.cols; save(); });
   $('#swap', v).onclick = () => { if (pv.cols === 'none') return; [pv.rows, pv.cols] = [pv.cols, pv.rows]; save(); };
-  $('#print', v).onclick = () => window.print();
+  $('#print', v).onclick = () => { app.track('export.print', '成本分摊（打印 / 导出 PDF）'); window.print(); };
   $('#csv', v).onclick = () => t.csv(`成本分摊_${rd.label}x${cd.label}_${periodTag()}.csv`);
   $('#tbl', v).addEventListener('click', e => { const b = e.target.closest('.pv-btn'); if (b) drill(b.dataset.pr, b.dataset.pc); });
 }

@@ -1,7 +1,7 @@
 /* =========================================================================
  * 数据表格：排序、分页、合计行、首列冻结、键盘操作、CSV 导出
  * ========================================================================= */
-import { esc, money, ui, LS, toast } from './core.js';
+import { esc, money, ui, LS, toast, app } from './core.js';
 /** 文本排序：共用一个排序器（localeCompare 带参数时每次比较都会新建排序器，大表格排序会卡顿十几秒） */
 const COLL = new Intl.Collator('zh-CN', { numeric: true });
 
@@ -92,6 +92,7 @@ export class DataTable {
 }
 
 export function downloadCsv(name, lines) {
+  app.track('export.csv', name, { rows: Math.max(0, lines.length - 1) }); // 操作日志：记录导出的文件与行数
   const cell = v => {
     let s = v == null ? '' : String(v);
     if (/^[=+\-@\t\r]/.test(s) && !/^-?\d+(\.\d+)?$/.test(s)) s = "'" + s; // 防 CSV 公式注入

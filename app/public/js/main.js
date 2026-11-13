@@ -29,7 +29,7 @@ const ROUTES = {
   detail: { label: '账单明细', icon: 'list', sub: '逐条账单，与云厂商费用中心账单对应（腾讯云 Key 级费用按用量分摊）', view: Detail, filters: true },
   governance: { label: 'Key 治理', icon: 'shield', sub: '描述、归属、闲置、权限、费用异常与预算检查', view: Gov },
   changes: { label: '变更记录', icon: 'history', sub: '与云厂商同步时检测到的 API Key / 业务空间变化', view: Changes, noData: true, noPeriod: true },
-  admin: { label: '系统管理', icon: 'settings', sub: '云厂商接入、数据同步、预算与告警、用户、品牌与备份、安全审计、系统日志', view: Admin, admin: true, noData: true, noPeriod: true, arg: true },
+  admin: { label: '系统管理', icon: 'settings', sub: '云厂商接入、数据同步、预算与告警、用户、品牌与备份、安全审计、操作日志、系统日志', view: Admin, admin: true, noData: true, noPeriod: true, arg: true },
 };
 const NAV = [{ sec: '成本分析' }, 'overview', 'keys', 'models', 'workspaces', 'pivot', 'detail', { sec: '治理' }, 'governance', 'changes', { sec: '系统', admin: true }, 'admin'];
 let route = { name: 'overview', arg: '' };
@@ -252,11 +252,42 @@ function render(extraNotices = [], { layoutOnly = false } = {}) {
     else if (r.arg) r.view.render(v, route.arg);
     else r.view.render(v);
     playEnter(v);
+    trackView(r);
   } catch (e) {
     console.error(e);
     v.innerHTML = `<div class="notice err">${icon('warn')}<div><b>页面渲染出错</b><span class="why">${esc(e.message)}</span></div></div>`;
   }
 }
+/* ---------------- 操作日志上报 ----------------
+ * 页面访问、导出等前端操作批量上报（每 5 秒或满 10 条发送一次；页面隐藏 / 关闭时用 keepalive 补发），失败不重试、不影响使用
+ */
+const opQueue = [];
+let opTimer = 0, viewKey = '', viewTimer = 0;
+function flushOps(keepalive = false) {
+  clearTimeout(opTimer); opTimer = 0;
+  if (!opQueue.length || !state.csrf) return;
+  const events = opQueue.splice(0, 20);
+  fetch('/api/oplog', { method: 'POST', keepalive, credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': state.csrf }, body: JSON.stringify({ events }) }).catch(() => { /* ignore */ });
+  if (opQueue.length) opTimer = setTimeout(flushOps, 1000);
+}
+app.track = (action, target, detail = null) => {
+  opQueue.push({ action, target: String(target || '').slice(0, 200), detail, route: location.hash.slice(0, 120), at: Date.now() });
+  if (opQueue.length >= 10) flushOps(); else if (!opTimer) opTimer = setTimeout(flushOps, 5000);
+};
+addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') flushOps(true); });
+addEventListener('pagehide', () => flushOps(true));
+/** 页面访问：路由、子页签、统计周期或筛选变化时记录一次（停留不足 1 秒的中间跳转不记录） */
+function trackView(r) {
+  const title = $('#pageTitle')?.textContent || r.label;
+  const f = Object.entries(ui.f).filter(([k, v]) => k !== 'metric' && k !== 'q' && (k === 'channel' ? v && v !== '__all' : v));
+  const period = r.noPeriod ? '' : ui.period.mode === 'month' ? `账期 ${ui.period.cycle}` : `${ui.period.from} ~ ${ui.period.to}`;
+  const key = [route.name, route.arg, period, JSON.stringify(f)].join('|');
+  if (key === viewKey) return;
+  viewKey = key;
+  clearTimeout(viewTimer);
+  viewTimer = setTimeout(() => app.track('page.view', title, { page: r.label, ...(period ? { period } : {}), ...(f.length ? { filters: f.map(([k, v]) => `${FILTER_LABEL[k] || k}：${filterValueLabel(k, v)}`).join('，').slice(0, 160) } : {}), ...(ui.f.metric !== 'pretax' ? { metric: ui.f.metric } : {}) }), 1000);
+}
+
 /* ---------------- 动效 ---------------- */
 let animKey = '', animTimer = 0;
 const reducedMotion = () => matchMedia('(prefers-reduced-motion: reduce)').matches;

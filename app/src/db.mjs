@@ -208,6 +208,15 @@ export class Store {
         CREATE INDEX IF NOT EXISTS idx_syslog_ts ON system_log(ts);
         PRAGMA user_version = 5;`);
     }
+    if (v < 6) {
+      // v6：用户操作日志（所有用户的登录、页面访问、数据查询、导出 / 下载、配置变更、权限拒绝），在“系统管理 → 操作日志”中查看
+      this.db.exec(`CREATE TABLE IF NOT EXISTS op_log (id INTEGER PRIMARY KEY, ts INTEGER NOT NULL, user_id INTEGER, username TEXT NOT NULL, role TEXT,
+          ip TEXT, action TEXT NOT NULL, category TEXT NOT NULL, target TEXT, detail TEXT, method TEXT, path TEXT, status INTEGER, ms INTEGER, ua TEXT, sid TEXT, source TEXT);
+        CREATE INDEX IF NOT EXISTS idx_oplog_ts ON op_log(ts);
+        CREATE INDEX IF NOT EXISTS idx_oplog_user ON op_log(username, ts);
+        CREATE INDEX IF NOT EXISTS idx_oplog_cat ON op_log(category, ts);
+        PRAGMA user_version = 6;`);
+    }
   }
 
   /* ---------------- 系统日志 ---------------- */
@@ -224,6 +233,44 @@ export class Store {
     if (before > 0) { where.push('id < ?'); args.push(before); }
     return this.db.prepare(`SELECT id, ts, level, category, message FROM system_log ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY id DESC LIMIT ?`).all(...args, Math.min(2000, Math.max(1, limit)));
   }
+  /* ---------------- 操作日志 ---------------- */
+  addOp(e) {
+    this.q(`INSERT INTO op_log(ts, user_id, username, role, ip, action, category, target, detail, method, path, status, ms, ua, sid, source)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(e.ts || Date.now(), e.userId ?? null, String(e.username || '').slice(0, 64), e.role || null, e.ip || '', String(e.action).slice(0, 48), e.category,
+      e.target == null ? null : String(e.target).slice(0, 300), e.detail == null ? null : (typeof e.detail === 'string' ? e.detail : JSON.stringify(e.detail)).slice(0, 2000),
+      e.method || null, e.path ? String(e.path).slice(0, 200) : null, e.status ?? null, e.ms ?? null, e.ua ? String(e.ua).slice(0, 300) : null, e.sid || null, e.source || 'server');
+  }
+  /** 操作日志查询：用户 / 分类 / 结果（ok | fail）/ 时间范围 / 关键字（操作、对象、详情、IP）/ 分页（before id） */
+  listOps({ username = '', category = '', result = '', from = 0, to = 0, q = '', before = 0, limit = 200 } = {}) {
+    const where = [], args = [];
+    if (username) { where.push('username = ?'); args.push(username); }
+    if (category) { where.push('category = ?'); args.push(category); }
+    if (result === 'fail') where.push('status >= 400');
+    else if (result === 'ok') where.push('(status IS NULL OR status < 400)');
+    if (from > 0) { where.push('ts >= ?'); args.push(from); }
+    if (to > 0) { where.push('ts < ?'); args.push(to); }
+    if (q) { const like = '%' + String(q).replace(/[\\%_]/g, c => '\\' + c) + '%'; where.push("(action LIKE ? ESCAPE '\\' OR target LIKE ? ESCAPE '\\' OR detail LIKE ? ESCAPE '\\' OR ip LIKE ? ESCAPE '\\' OR username LIKE ? ESCAPE '\\')"); args.push(like, like, like, like, like); }
+    if (before > 0) { where.push('id < ?'); args.push(before); }
+    return this.db.prepare(`SELECT id, ts, username, role, ip, action, category, target, detail, method, path, status, ms, ua, sid, source FROM op_log ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY id DESC LIMIT ?`).all(...args, Math.min(2000, Math.max(1, limit)));
+  }
+  /** 近期统计：总数、活跃用户、失败与拒绝、各分类数量 */
+  opStats(since) {
+    const t = this.q('SELECT COUNT(*) AS n, COUNT(DISTINCT username) AS users, SUM(CASE WHEN status >= 400 THEN 1 ELSE 0 END) AS fails FROM op_log WHERE ts >= ?').get(since);
+    const byCat = Object.fromEntries(this.q('SELECT category, COUNT(*) AS n FROM op_log WHERE ts >= ? GROUP BY category').all(since).map(r => [r.category, r.n]));
+    return { n: t.n || 0, users: t.users || 0, fails: t.fails || 0, byCat };
+  }
+  /** 用户活跃：每个用户的最近活动、最近 IP / 设备、各分类操作数（since 之后） */
+  userActivity(since) {
+    const rows = this.q(`SELECT username, MAX(role) AS role, MAX(ts) AS last, COUNT(*) AS n, SUM(CASE WHEN status >= 400 THEN 1 ELSE 0 END) AS fails,
+        SUM(CASE WHEN category = 'view' THEN 1 ELSE 0 END) AS views, SUM(CASE WHEN category = 'query' THEN 1 ELSE 0 END) AS queries,
+        SUM(CASE WHEN category = 'export' THEN 1 ELSE 0 END) AS exports, SUM(CASE WHEN category IN ('config', 'user', 'alert', 'sync') THEN 1 ELSE 0 END) AS changes,
+        COUNT(DISTINCT sid) AS sessions
+      FROM op_log WHERE ts >= ? GROUP BY username ORDER BY last DESC LIMIT 200`).all(since);
+    const lastOf = this.q('SELECT ip, ua FROM op_log WHERE username = ? ORDER BY id DESC LIMIT 1');
+    return rows.map(r => ({ ...r, ...(lastOf.get(r.username) || {}) }));
+  }
+  /** 每个用户的最近活动时间（用户管理列表） */
+  lastActiveByUser() { return new Map(this.q('SELECT username, MAX(ts) AS t FROM op_log GROUP BY username').all().map(r => [r.username, r.t])); }
   systemLogStats(since) {
     return this.q('SELECT level, COUNT(*) AS n FROM system_log WHERE ts >= ? GROUP BY level').all(since);
   }
@@ -321,6 +368,9 @@ export class Store {
     // 系统日志保留 SYSTEM_LOG_DAYS 天（默认 30），且最多 20 万条
     this.q('DELETE FROM system_log WHERE ts < ?').run(Date.now() - (this.systemLogDays || 30) * 864e5);
     this.q('DELETE FROM system_log WHERE id <= (SELECT id FROM system_log ORDER BY id DESC LIMIT 1 OFFSET 200000)').run();
+    // 操作日志保留 OPLOG_DAYS 天（默认 180），且最多 100 万条
+    this.q('DELETE FROM op_log WHERE ts < ?').run(Date.now() - (this.opLogDays || 180) * 864e5);
+    this.q('DELETE FROM op_log WHERE id <= (SELECT id FROM op_log ORDER BY id DESC LIMIT 1 OFFSET 1000000)').run();
     this.optimize();
   }
 

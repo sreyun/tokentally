@@ -109,6 +109,33 @@ export function auditHtml(action, raw) {
   return `<div class="ad">${pairs.map(([k, v]) => `<span class="ad-i">${k ? `<em>${esc(k)}</em>` : ''}${esc(v)}</span>`).join('')}</div>`;
 }
 
+/* ---------------- 用户操作日志 ---------------- */
+export const OP_CAT = { view: '页面访问', query: '数据查询', export: '导出与下载', config: '配置变更', alert: '告警通知', sync: '同步操作', user: '用户管理', auth: '登录与账号', denied: '权限拒绝' };
+export const OP_ACT = {
+  'page.view': '访问页面', 'export.csv': '导出 CSV', 'export.print': '打印 / 导出 PDF', 'link.copy': '复制链接', 'drill.down': '下钻查看',
+  'data.query': '查询账单数据', 'auth.login': '登录', 'auth.login.fail': '登录失败', 'auth.logout': '退出登录', 'account.password': '修改密码',
+  'settings.update': '修改系统设置', 'provider.test': '测试云厂商连接', 'sync.trigger': '触发同步', 'calls.discover': '发现调用次数指标', 'calls.preview': '预览调用次数', 'calls.sync': '同步调用次数',
+  'budget.update': '修改预算', 'keytags.update': '修改成本中心 / 负责人', 'alert.update': '修改告警设置', 'alert.test': '发送测试消息', 'alert.report': '预览 / 发送报表',
+  'smtp.update': '修改邮件服务器', 'smtp.test': '发送测试邮件', 'backup.create': '创建备份', 'backup.download': '下载备份', 'network.update': '修改客户端 IP 来源',
+  'user.create': '创建用户', 'user.update': '修改用户', 'user.delete': '删除用户', 'access.denied': '无权限访问', 'oplog.throttled': '操作上报过于频繁',
+};
+const OP_KEY = { page: '页面', period: '周期', filters: '筛选', metric: '口径', rows: '行数', fields: '修改项', provider: '云厂商', cycles: '账期', force: '强制', send: '立即发送', role: '角色', count: '数量', monthly: '月度预算', keys: 'Key 预算', ipSource: 'IP 来源', hops: '代理层数', error: '失败原因' };
+const OP_VAL = { metric: { gross: '原价', after: '优惠后' }, provider: { all: '全部', aliyun: '阿里云', tencent: '腾讯云' }, role: { admin: '管理员', viewer: '只读用户' } };
+/** 操作详情 → [[标签, 文本], ...] */
+export function opPairs(raw) {
+  let d; try { d = typeof raw === 'string' ? JSON.parse(raw) : raw; } catch { return raw ? [['', String(raw)]] : []; }
+  if (!d || typeof d !== 'object') return [];
+  return Object.entries(d).filter(([, v]) => v != null && v !== '' && !(Array.isArray(v) && !v.length)).map(([k, v]) => [OP_KEY[k] || k, OP_VAL[k]?.[v] ?? (k === 'fields' && Array.isArray(v) ? v.join('、') : val(v))]);
+}
+/** User-Agent → “浏览器 · 系统” */
+export function uaText(ua) {
+  const s = String(ua || '');
+  if (!s) return '';
+  const b = /Edg\//.test(s) ? 'Edge' : /DingTalk/i.test(s) ? '钉钉' : /Lark|Feishu/i.test(s) ? '飞书' : /wxwork/i.test(s) ? '企业微信' : /MicroMessenger/i.test(s) ? '微信' : /Firefox\//.test(s) ? 'Firefox' : /Chrome\//.test(s) ? 'Chrome' : /Safari\//.test(s) ? 'Safari' : /curl|python|node|axios|go-http/i.test(s) ? '脚本 / 程序' : '其他';
+  const o = /Windows/.test(s) ? 'Windows' : /iPhone|iPad|iOS/.test(s) ? 'iOS' : /Mac OS X|Macintosh/.test(s) ? 'macOS' : /Android/.test(s) ? 'Android' : /Linux/.test(s) ? 'Linux' : '';
+  return o ? `${b} · ${o}` : b;
+}
+
 /* ---------------- IP 与归属地 ---------------- */
 export const LOC_RESERVED = new Set(['本机', '内网', '运营商级 NAT', '链路本地', '未指定地址', '测试网段', '组播地址', '保留地址', '文档示例地址']);
 /** IP + 归属地两行显示；内网等保留地址显示为灰色标签 */

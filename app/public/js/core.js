@@ -133,7 +133,7 @@ export const ui = {
   density: LS.get('bc.density', 'normal'),
 };
 /** 由 main.js 注入，供各视图调用，避免循环依赖 */
-export const app = { render() {}, setFilter() {}, go() {}, openModel() {}, setPeriod() {}, reload: async () => {}, refreshStatus: async () => {} };
+export const app = { render() {}, setFilter() {}, go() {}, openModel() {}, setPeriod() {}, reload: async () => {}, refreshStatus: async () => {}, track() {} };
 export const METRICS = { pretax: '应付金额', gross: '原价', after: '优惠后金额' };
 export const metricVal = l => (ui.f.metric === 'gross' ? l.gross : ui.f.metric === 'after' ? l.after : l.pretax);
 export const NONE_KEY = '__none__';

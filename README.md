@@ -187,6 +187,7 @@ flowchart LR
 - 自动一致性备份（每天，保留 N 份）、管理页立即备份与验证下载
 - `/healthz`、`/readyz`、Prometheus `/metrics`（Bearer 令牌）
 - 品牌定制（产品名称 / 副标题 / 界面主题色）、管理员 / 只读两种角色、审计日志（中文说明 + IP 归属地）
+- 用户操作日志：所有用户（含只读用户）的登录、页面访问（含统计周期与筛选）、数据查询、导出 / 下载、配置变更、权限拒绝，记录 IP 与归属地、设备、结果与耗时；按用户 / 分类 / 结果 / 日期 / 关键字筛选，用户活跃统计，可导出；不记录任何密码与密钥
 - IP 归属地使用内置 ip2region 离线库，只在本机查询，不把客户端 IP 发给任何第三方
 - 升级：`git pull && docker compose up -d --build`，数据库自动迁移
 </details>
@@ -237,6 +238,7 @@ flowchart LR
 | `BILL_TZ` | Asia/Shanghai | 账单自然日时区：须与阿里云出账时区一致（中国站为北京时间，一般不要修改；无效时区拒绝启动；腾讯云固定按北京时间） |
 | `MAX_DATA_LINES` | 100000 | 日期范围查询返回的按日账单行上限（本期 + 对比期） |
 | `SYSTEM_LOG_DAYS` | 30 | 系统日志保留天数（系统管理 → 系统日志） |
+| `OPLOG_DAYS` | 180 | 用户操作日志保留天数（系统管理 → 操作日志，最多 100 万条） |
 | `IP_REGION_DB` / `IP_REGION_DB_V6` | 内置 IPv4 库 | IP 归属地离线库（ip2region xdb）路径；也可直接把 `ip2region_v4.xdb` / `ip2region_v6.xdb` 放到数据目录 |
 | `ALIBABA_CLOUD_ACCESS_KEY_ID` / `_SECRET` | — | 可选：首次启动导入阿里云密钥后加密存库 |
 | `TENCENTCLOUD_SECRET_ID` / `_KEY` | — | 可选：首次启动导入腾讯云密钥后加密存库 |
