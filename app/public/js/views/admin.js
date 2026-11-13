@@ -549,6 +549,7 @@ async function budgets(el) {
 const ALERT_HINT = {
   dingtalk: '钉钉群 → 群设置 → 机器人 → 添加“自定义”机器人，复制 Webhook。安全设置建议选择“加签”并填写密钥；如使用“自定义关键词”，请包含“费用”。可 @ 指定手机号或所有人。',
   feishu: '飞书群 → 设置 → 群机器人 → 添加“自定义机器人”，复制 Webhook。建议开启“签名校验”并填写密钥。自定义机器人仅支持 @所有人。',
+  email: '邮件会在消息内容之后附上完整的成本概览（日报为昨日所在账期、周报为上周、月报为上月、告警为本月）。需先在下方“邮件服务器（SMTP）”中配置发信服务器。',
   wecom: '企业微信群 → 添加群机器人，复制 Webhook 地址。企业微信机器人不支持加签，地址即凭据，请妥善保管；@ 提醒会额外发送一条文本消息。',
   generic: '以 POST JSON 发送 {event, title, level, items, text, link, mentions, sentAt}。填写密钥后附带 X-Alert-Timestamp 与 X-Alert-Signature 请求头（HMAC-SHA256，签名内容为 timestamp + "." + body）。',
 };
@@ -573,12 +574,12 @@ async function alerts(el) {
       <div class="actions"><button class="btn sm primary" id="addCh" ${al.channels.length >= al.maxChannels ? 'disabled' : ''}>${icon('plus')}添加渠道</button></div></div>
       ${al.channels.length ? `<div class="ch-list">${al.channels.map(c => `
         <div class="ch-card ${c.enabled ? '' : 'off'}">
-          <div class="ch-top"><span class="ch-ico">${icon('bell')}</span><div class="ch-t"><b>${esc(c.name)}</b><span class="muted">${esc(al.types[c.type]?.label || c.type)} · <span class="mono">${esc(c.webhookMasked || '未配置地址')}</span>${c.secretSet ? ' · 已加签' : ''}</span></div>
+          <div class="ch-top"><span class="ch-ico">${icon(c.type === 'email' ? 'mail' : 'bell')}</span><div class="ch-t"><b>${esc(c.name)}</b><span class="muted">${esc(al.types[c.type]?.label || c.type)} · <span class="mono">${esc(c.webhookMasked || '未配置地址')}</span>${c.secretSet ? ' · 已加签' : ''}</span></div>
             <span class="state ${c.enabled ? 'on' : 'off'}">${c.enabled ? '已启用' : '已停用'}</span></div>
-          <div class="ch-evs">${Object.keys(evs).filter(k => c.events[k]).map(k => `<span class="tag">${icon(EVENT_ICON[k] || 'bell')}${esc(evs[k].label)}</span>`).join('') || '<span class="muted">未订阅任何事件</span>'}${c.atAll || c.atMobiles.length ? `<span class="tag warn">@ ${c.atAll ? '所有人' : ''}${c.atAll && c.atMobiles.length ? ' + ' : ''}${c.atMobiles.length ? c.atMobiles.length + ' 人' : ''}</span>` : ''}</div>
+          <div class="ch-evs">${c.scopeLabel ? `<span class="tag info">${icon('filter')}范围：${esc(c.scopeLabel)}</span>` : ''}${Object.keys(evs).filter(k => c.events[k]).map(k => `<span class="tag">${icon(EVENT_ICON[k] || 'bell')}${esc(evs[k].label)}</span>`).join('') || '<span class="muted">未订阅任何事件</span>'}${c.atAll || c.atMobiles.length ? `<span class="tag warn">@ ${c.atAll ? '所有人' : ''}${c.atAll && c.atMobiles.length ? ' + ' : ''}${c.atMobiles.length ? c.atMobiles.length + ' 人' : ''}</span>` : ''}</div>
           <div class="ch-foot"><span class="${c.lastError && (!c.lastSentAt || c.lastErrorAt > c.lastSentAt) ? 'bad-text' : 'muted'}">${c.lastError && (!c.lastSentAt || c.lastErrorAt > c.lastSentAt) ? `${esc(fmtTime(c.lastErrorAt))} 发送失败：${esc(c.lastError)}` : c.lastSentAt ? `最近发送 ${esc(fmtTime(c.lastSentAt))}` : '尚未发送'}</span>
             <span class="sp"></span><button class="btn sm" data-ch-test="${esc(c.id)}">${icon('send')}测试</button><button class="btn sm" data-ch-edit="${esc(c.id)}">${icon('edit')}编辑</button><button class="btn sm danger" data-ch-del="${esc(c.id)}">${icon('trash')}删除</button></div>
-        </div>`).join('')}</div>` : `<div class="empty-mini">${icon('bell')}<div><b>尚未配置通知渠道</b><span class="muted">添加钉钉、飞书、企业微信群机器人或通用 Webhook，接收预算告警、费用异常、同步故障与日报 / 周报 / 月报。</span></div></div>`}
+        </div>`).join('')}</div>` : `<div class="empty-mini">${icon('bell')}<div><b>尚未配置通知渠道</b><span class="muted">添加钉钉、飞书、企业微信群机器人、通用 Webhook 或邮件，接收预算告警、费用异常、同步故障与日报 / 周报 / 月报；邮件会附上完整的成本概览。</span></div></div>`}
     </section>
     <section class="panel c4"><div class="panel-h"><h3>告警规则</h3>${help('预算告警：同一阈值（含预算金额）每个账期每个渠道只通知一次。费用异常：每天报表时间之后检查“昨日费用 ≥ 前 7 日日均 × 倍数，且增量 ≥ 最小金额”。同步故障：同一云厂商同类同步连续失败 3 次时告警，恢复后通知。')}</div>
       <form id="rForm" class="form-grid" style="grid-template-columns:1fr 1fr">
@@ -588,6 +589,20 @@ async function alerts(el) {
         <label class="chk full"><input type="checkbox" name="anomalyKeys" ${al.anomaly.keys ? 'checked' : ''}> 同时检测单个 API Key 的费用异常（最多列出 5 个）</label>
         <label class="field full"><span>报表与异常检查时间</span><select class="inp" name="reportHour">${Array.from({ length: 24 }, (_, h) => opt(h, `每天 ${p2(h)}:00 之后`, al.reportHour)).join('')}</select><small class="hint">账单通常延迟数小时入账，建议 9:00 之后发送，数据更完整</small></label>
         <div class="row full"><button class="btn primary" type="submit">保存规则</button></div>
+      </form></section>
+    <section class="panel c12" id="smtpBox"><div class="panel-h"><h3>邮件服务器（SMTP）</h3>${help('邮件通知渠道使用此服务器发信。密码（或邮箱授权码）使用 AES-256-GCM 加密保存、不回显；修改密码或服务器地址需要当前登录密码确认。连接前会拒绝解析到内网的服务器地址（内网邮件中继请设置 ALERT_ALLOW_PRIVATE=true）。')}
+      <span class="sub">${al.smtp.host ? `${esc(al.smtp.host)}:${al.smtp.port} · ${esc(al.smtp.securities[al.smtp.security] || al.smtp.security)}${al.smtp.passwordSet ? ' · 密码已加密保存' : ''}` : '尚未配置：配置后可添加“邮件”通知渠道'}</span></div>
+      <form id="smtpForm" class="form-grid" autocomplete="off">
+        <label class="field"><span>SMTP 服务器</span><input class="inp mono" name="host" maxlength="253" value="${esc(al.smtp.host)}" placeholder="smtp.qq.com / smtp.exmail.qq.com / smtpdm.aliyun.com"></label>
+        <label class="field"><span>加密方式</span><select class="inp" name="security">${Object.entries(al.smtp.securities).map(([k, l]) => opt(k, l, al.smtp.security)).join('')}</select></label>
+        <label class="field"><span>端口</span><input class="inp" type="number" name="port" min="1" max="65535" value="${esc(al.smtp.port)}"></label>
+        <label class="field"><span>用户名（通常为邮箱地址）</span><input class="inp mono" name="username" maxlength="254" value="${esc(al.smtp.username)}" autocomplete="off"></label>
+        <label class="field"><span>密码 / 授权码</span><input class="inp mono" type="password" name="password" maxlength="512" autocomplete="new-password" placeholder="${al.smtp.passwordSet ? '已加密保存，留空表示不修改' : 'QQ / 163 等邮箱请使用授权码'}"></label>
+        <label class="field"><span>发件人邮箱</span><input class="inp mono" name="fromAddr" maxlength="254" value="${esc(al.smtp.fromAddr)}" placeholder="留空则使用用户名"></label>
+        <label class="field"><span>发件人名称</span><input class="inp" name="fromName" maxlength="40" value="${esc(al.smtp.fromName)}" placeholder="如：大模型费用分析"></label>
+        <label class="field"><span>当前登录密码</span><input class="inp" type="password" name="confirmPassword" autocomplete="current-password" maxlength="256"><small class="hint">修改密码或服务器地址时需要</small></label>
+        ${al.smtp.passwordSet ? '<label class="chk"><input type="checkbox" name="clearPassword"> 清除已保存的密码</label>' : ''}
+        <div class="row full"><button class="btn primary" type="submit">保存邮件服务器</button><span class="sp"></span><input class="inp" name="testTo" type="email" placeholder="测试收件人邮箱" style="width:240px" aria-label="测试收件人邮箱"><button class="btn" type="button" data-smtp-test>${icon('mail')}发送测试邮件（含成本概览）</button></div>
       </form></section>
     <section class="panel c7"><div class="panel-h"><h3>报表预览</h3><span class="sub">预览日报 / 周报 / 月报内容，可立即发送到指定渠道（不影响定时发送）</span></div>
       <div class="row" style="margin-bottom:10px"><div class="seg sm" role="group" aria-label="报表类型">${[['daily', '日报'], ['weekly', '周报'], ['monthly', '月报']].map(([k, l], i) => `<button type="button" data-rk="${k}" aria-pressed="${i === 0}">${l}</button>`).join('')}</div>
@@ -601,7 +616,7 @@ async function alerts(el) {
     </section></div>`;
 
   const payload = (channels, extra = {}) => ({
-    channels: channels.map(c => ({ id: c.id, name: c.name, type: c.type, enabled: c.enabled, events: c.events, atAll: c.atAll, atMobiles: c.atMobiles, ...(c.webhook ? { webhook: c.webhook } : {}), ...(c.secret ? { secret: c.secret } : {}), ...(c.clearSecret ? { clearSecret: true } : {}) })),
+    channels: channels.map(c => ({ id: c.id, name: c.name, type: c.type, enabled: c.enabled, events: c.events, atAll: c.atAll, atMobiles: c.atMobiles, scope: c.scope, ...(c.webhook ? { webhook: c.webhook } : {}), ...(c.secret ? { secret: c.secret } : {}), ...(c.clearSecret ? { clearSecret: true } : {}) })),
     rules: al.rules, anomaly: al.anomaly, reportHour: al.reportHour, ...extra,
   });
   const save = async (channels, extra, okMsg) => {
@@ -655,23 +670,56 @@ async function alerts(el) {
   // 事件分发结束后 e.currentTarget 会变为 null：按钮必须在 await 之前取得
   $('#rSend', el).onclick = async e => { const btn = e.currentTarget; btn.disabled = true; try { await preview(true); } finally { btn.disabled = false; } };
   preview();
+  bindSmtp(el, al, () => refresh(el, () => alerts(el)));
+}
+
+/** 邮件服务器（SMTP）表单：保存（敏感修改需当前登录密码）与发送测试邮件 */
+function bindSmtp(el, al, reload) {
+  const form = $('#smtpForm', el);
+  if (!form) return;
+  const sec = form.elements.security, port = form.elements.port;
+  sec.addEventListener('change', () => { if (!port.dataset.touched) port.value = sec.value === 'ssl' ? 465 : sec.value === 'starttls' ? 587 : 25; });
+  port.addEventListener('input', () => { port.dataset.touched = '1'; });
+  form.addEventListener('input', e => { if (e.target.name !== 'testTo') markDirty(form); });
+  form.onsubmit = async e => {
+    e.preventDefault();
+    const fd = Object.fromEntries(new FormData(form));
+    const btn = form.querySelector('[type=submit]'); btn.disabled = true;
+    try {
+      await http('PUT', '/api/admin/smtp', { host: fd.host, port: fd.port, security: fd.security, username: fd.username, password: fd.password || '', clearPassword: fd.clearPassword === 'on', fromAddr: fd.fromAddr, fromName: fd.fromName, confirmPassword: fd.confirmPassword || '' });
+      markClean(form); toast('邮件服务器已保存'); await reload();
+    } catch (ex) { form.elements.confirmPassword.value = ''; toast('保存失败：' + ex.message, 'err', 5000); } finally { btn.disabled = false; }
+  };
+  $('[data-smtp-test]', form).onclick = async e => {
+    const btn = e.currentTarget, to = form.elements.testTo.value.trim();
+    if (!to) { form.elements.testTo.focus(); return toast('请填写测试收件人邮箱', 'err'); }
+    if (form.dataset.dirty) return toast('请先保存邮件服务器配置，再发送测试邮件', 'err', 4000);
+    btn.disabled = true;
+    try { await http('POST', '/api/admin/smtp/test', { to }); toast(`测试邮件已发送至 ${to}`, '', 4000); }
+    catch (ex) { toast(ex.message, 'err', 6000); } finally { btn.disabled = false; }
+  };
 }
 
 function editChannel(al, c, onSave) {
   const evs = al.eventTypes, isNew = !c;
   const cur = c || { name: '', type: 'dingtalk', enabled: true, events: { budget: true, anomaly: true, sync: true, keyChange: false, daily: false, weekly: false, monthly: true }, atAll: false, atMobiles: [] };
+  const sel = { type: cur.scope?.type || 'all', ids: { key: new Set(cur.scope?.type === 'key' ? cur.scope.ids : []), ws: new Set(cur.scope?.type === 'ws' ? cur.scope.ids : []) } };
+  const segScope = `<div class="seg sm" role="group" aria-label="推送范围">${[['all', '全部'], ['ws', '按业务空间'], ['key', '按 API Key']].map(([k, l]) => `<button type="button" data-scope-type="${k}" aria-pressed="${sel.type === k}">${l}</button>`).join('')}</div>`;
   const group = g => Object.entries(evs).filter(([, e]) => e.group === g).map(([k, e]) => `<label class="chk"><input type="checkbox" name="ev_${k}" ${cur.events[k] ? 'checked' : ''}> ${esc(e.label)}</label>`).join('');
   return modal({
     title: isNew ? '添加通知渠道' : `编辑通知渠道 · ${cur.name}`, submit: '保存', wide: true,
     body: `<div class="form-grid">
       <label class="field"><span>名称</span><input class="inp" name="name" maxlength="30" value="${esc(cur.name)}" placeholder="如：财务群、运维群"></label>
       <label class="field"><span>类型</span><select class="inp" name="type">${Object.entries(al.types).map(([k, t]) => opt(k, t.label, cur.type)).join('')}</select></label>
-      <label class="field full"><span>Webhook 地址</span><input class="inp mono" name="webhook" spellcheck="false" maxlength="1000" autocomplete="off"></label>
+      <label class="field full"><span data-addr-label>Webhook 地址</span><input class="inp mono" name="webhook" spellcheck="false" maxlength="1000" autocomplete="off"></label>
       <label class="field full" data-secret><span>加签密钥（可选）</span><input class="inp mono" name="secret" type="password" autocomplete="new-password" spellcheck="false" maxlength="256" placeholder="${c?.secretSet ? '已加密保存，留空表示不修改' : '未设置'}">${c?.secretSet ? '<label class="chk" style="margin-top:4px"><input type="checkbox" name="clearSecret"> 清除已保存的密钥</label>' : ''}</label>
       <p class="hint full" data-hint style="margin:0"></p>
+      <div class="field full"><span>推送范围</span><div class="row" style="gap:8px">${segScope}<input class="inp sm" data-scope-q placeholder="搜索" style="width:180px" aria-label="搜索推送范围"><span class="hint" data-scope-n></span></div>
+        <div class="scope-list" data-scope-list></div>
+        <small class="hint">限定范围后：成本概览与报表只统计范围内的数据；预算告警只推送范围内 API Key 的预算；费用异常检查范围合计与范围内的 Key；Key 变更只推送范围内的 Key。同步故障为系统事件，不受范围限制。</small></div>
       <div class="field full"><span>订阅告警</span><div class="row" style="gap:6px 16px">${group('告警')}</div></div>
       <div class="field full"><span>订阅报表</span><div class="row" style="gap:6px 16px">${group('报表')}</div></div>
-      <div class="field full"><span>@ 提醒（仅告警消息）</span><div class="row" style="gap:8px 16px;align-items:center"><label class="chk"><input type="checkbox" name="atAll" ${cur.atAll ? 'checked' : ''}> @所有人</label>
+      <div class="field full" data-mention><span>@ 提醒（仅告警消息）</span><div class="row" style="gap:8px 16px;align-items:center"><label class="chk"><input type="checkbox" name="atAll" ${cur.atAll ? 'checked' : ''}> @所有人</label>
         <input class="inp" name="atMobiles" data-mobiles value="${esc(cur.atMobiles.join(','))}" placeholder="@ 手机号，多个用逗号分隔（最多 10 个）" style="flex:1;min-width:220px"></div></div>
       <label class="chk full"><input type="checkbox" name="enabled" ${cur.enabled ? 'checked' : ''}> 启用该渠道</label>
       <div class="row full"><button type="button" class="btn" data-test>${icon('send')}用当前填写内容发送测试</button></div>
@@ -682,27 +730,55 @@ function editChannel(al, c, onSave) {
         $('[data-hint]', form).textContent = ALERT_HINT[t] || '';
         $('[data-secret]', form).hidden = !ty?.sign;
         $('[data-mobiles]', form).hidden = ty?.mention !== 'mobile';
-        form.elements.webhook.placeholder = c?.webhookSet && t === c.type ? c.webhookMasked + '（已加密保存，留空表示不修改）' : ty?.host ? `https://${ty.host}/…` : 'https://…';
+        $('[data-mention]', form).hidden = !ty?.mention;
+        $('[data-addr-label]', form).textContent = ty?.email ? '收件人邮箱（多个用逗号分隔，最多 20 个）' : 'Webhook 地址';
+        form.elements.webhook.classList.toggle('mono', !ty?.email);
+        form.elements.webhook.placeholder = c?.webhookSet && t === c.type ? c.webhookMasked + '（已加密保存，留空表示不修改）' : ty?.email ? 'ops@example.com, finance@example.com' : ty?.host ? `https://${ty.host}/…` : 'https://…';
       };
       syncUi();
       form.elements.type.addEventListener('change', syncUi);
+      // 推送范围：按业务空间 / API Key 勾选（列表来自当前数据，已选但已不存在的项仍保留）
+      const list = $('[data-scope-list]', form), q = $('[data-scope-q]', form), cnt = $('[data-scope-n]', form);
+      const options = t => (t === 'ws'
+        ? [...state.workspaces.values()].map(w => [w.workspaceId, w.workspaceName || w.workspaceId, w.workspaceId])
+        : [...state.apiKeys.values()].filter(k => !k.deletedAt || sel.ids.key.has(k.apiKeyId)).map(k => [k.apiKeyId, keyShort(k.apiKeyId), k.apiKeyId]));
+      const drawScope = () => {
+        form.querySelectorAll('[data-scope-type]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.scopeType === sel.type)));
+        const on = sel.type !== 'all';
+        list.hidden = q.hidden = !on; cnt.textContent = on ? `已选 ${sel.ids[sel.type].size} 个` : '';
+        if (!on) return;
+        const kw = q.value.trim().toLowerCase(), chosen = sel.ids[sel.type];
+        const opts = options(sel.type);
+        if (!opts.length && !state.data) { list.innerHTML = '<div class="hint">数据加载中，请稍后重新打开本窗口</div>'; return; }
+        for (const id of chosen) if (!opts.some(o => o[0] === id)) opts.push([id, id + '（已不存在）', id]);
+        const shown = opts.filter(o => !kw || (o[1] + ' ' + o[2]).toLowerCase().includes(kw)).sort((a, b) => (chosen.has(b[0]) - chosen.has(a[0])) || a[1].localeCompare(b[1], 'zh-CN'));
+        list.innerHTML = shown.length ? shown.map(([id, label, sub]) => `<label class="chk"><input type="checkbox" data-scope-id="${esc(id)}" ${chosen.has(id) ? 'checked' : ''}> <span>${esc(label)}${sub !== label ? ` <span class="muted mono">${esc(sub)}</span>` : ''}</span></label>`).join('') : '<div class="hint">没有匹配的项</div>';
+      };
+      form.querySelectorAll('[data-scope-type]').forEach(b => b.onclick = () => { sel.type = b.dataset.scopeType; drawScope(); });
+      q.oninput = drawScope;
+      list.addEventListener('change', e => { const id = e.target.dataset.scopeId; if (id == null) return; if (e.target.checked) sel.ids[sel.type].add(id); else sel.ids[sel.type].delete(id); cnt.textContent = `已选 ${sel.ids[sel.type].size} 个`; });
+      drawScope();
+      form._scope = () => ({ type: sel.type, ids: sel.type === 'all' ? [] : [...sel.ids[sel.type]] });
       $('[data-test]', form).onclick = async e => {
         const fd = new FormData(form), btn = e.currentTarget;
         btn.disabled = true;
-        try { await http('POST', '/api/admin/alerts/test', { channelId: c?.id, type: fd.get('type'), webhook: fd.get('webhook') || '', secret: fd.get('secret') || '', atAll: fd.get('atAll') === 'on', atMobiles: fd.get('atMobiles') || '' }); toast('测试消息已发送，请在群中查看'); }
+        try { await http('POST', '/api/admin/alerts/test', { channelId: c?.id, type: fd.get('type'), webhook: fd.get('webhook') || '', secret: fd.get('secret') || '', atAll: fd.get('atAll') === 'on', atMobiles: fd.get('atMobiles') || '', scope: form._scope() }); toast('测试消息已发送，请在群中查看'); }
         catch (ex) { toast(ex.message, 'err', 5000); } finally { btn.disabled = false; }
       };
     },
     onSubmit: async form => {
       const fd = new FormData(form);
       const type = fd.get('type'), webhook = String(fd.get('webhook') || '').trim();
-      if (isNew && !webhook) throw new Error('请填写 Webhook 地址');
-      if (!isNew && type !== c.type && !webhook) throw new Error('更换通知类型时请同时填写对应的 Webhook 地址');
+      const addr = al.types[type]?.email ? '收件人邮箱' : 'Webhook 地址';
+      if (isNew && !webhook) throw new Error(`请填写${addr}`);
+      if (!isNew && type !== c.type && !webhook) throw new Error(`更换通知类型时请同时填写对应的${addr}`);
       const ch = {
         id: c?.id, name: String(fd.get('name') || '').trim() || al.types[type].label, type, enabled: fd.get('enabled') === 'on',
         events: Object.fromEntries(Object.keys(evs).map(k => [k, fd.get('ev_' + k) === 'on'])), atAll: fd.get('atAll') === 'on',
         atMobiles: String(fd.get('atMobiles') || '').split(/[,，\s]+/).filter(Boolean), webhook, secret: String(fd.get('secret') || '').trim(), clearSecret: fd.get('clearSecret') === 'on',
+        scope: form._scope(),
       };
+      if (ch.scope.type !== 'all' && !ch.scope.ids.length) throw new Error(`请至少选择一个${ch.scope.type === 'key' ? ' API Key' : '业务空间'}，或将推送范围改为“全部”`);
       await onSave(ch);
       return true;
     },

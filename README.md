@@ -41,7 +41,7 @@
 | 📊 **多维分析** | Key / 模型 / 业务空间 / 成本中心 / 负责人 / 云厂商 / 计费项 / 日 / 周 / 星期，任意交叉透视，一键导出与打印 |
 | 🔗 **联动筛选与逐级下钻** | 选择业务空间，Key 与模型下拉只列出该空间关联的取值；业务空间 → Key → 模型层级钻取；图例、柱段、热力格、矩阵格、明细单元格都能点击下钻；筛选与周期写入地址，链接可分享、浏览器“后退”即撤销 |
 | 🔢 **Token 与调用统计** | 每个 Key、每个模型的 Token 结构、缓存命中率、单位成本、日均与峰值；请求数、成功率、单次平均 Token / 费用（腾讯云 TokenHub 用量；阿里云接入百炼监控投递的云监控 Prometheus） |
-| 🔔 **告警与报表推送** | 钉钉 / 飞书 / 企业微信 / Webhook，最多 5 个渠道：预算、费用异常、同步故障、Key 变更，以及日报 / 周报 / 月报 |
+| 🔔 **告警与报表推送** | 钉钉 / 飞书 / 企业微信 / Webhook / **邮件（附完整成本概览）**，最多 5 个渠道，可按业务空间或 API Key 限定推送范围：预算、费用异常、同步故障、Key 变更，以及日报 / 周报 / 月报 |
 | 🛡️ **Key 治理** | 自动发现已删除仍计费、权限过宽、无描述、闲置、费用突增、未分配成本中心等问题并给出建议 |
 | 🔒 **安全优先** | 访问密钥 AES-256-GCM 加密、只读权限、敏感操作二次验证、CSRF / CSP / 限流 / 审计日志、Webhook 防 SSRF |
 | 📦 **零依赖、易交付** | 纯 Node.js 24 内置模块，无 npm 依赖；`docker compose` 一键部署，自动备份、Prometheus 指标、品牌定制 |
@@ -148,12 +148,16 @@ flowchart LR
 | 事件 | 触发条件 | 去重 |
 |---|---|---|
 | 预算告警 | 总预算 / Key 预算达到阈值、超出、预计月末超出 | 每阈值每账期每渠道一次 |
-| 费用异常 | 昨日费用 ≥ 前 7 日日均 × 倍数且增量 ≥ 最小金额（整体与单个 Key） | 每天一次 |
+| 费用异常 | 昨日原价 ≥ 前 7 日原价日均 × 倍数且增量 ≥ 最小金额（整体与单个 Key；按原价判断，不受优惠集中抵扣影响） | 每天一次 |
 | 同步故障 | 同一云厂商同类同步连续失败 3 次；恢复后通知 | 每次故障一次 |
 | Key 变更 | 新增 / 删除 / 恢复 API Key | 每条一次 |
 | 日报 / 周报 / 月报 | 每天设定时间后；周一发周报；次月出账后发月报（含成本中心分摊） | 每周期一次 |
 
 支持 @ 手机号 / @所有人、钉钉与飞书加签、通用 Webhook HMAC 签名；渠道失败互不影响并自动重试；报表可预览与立即发送。Webhook 仅 HTTPS、官方域名白名单、连接阶段拦截内网地址。
+
+**邮件通知**：在“告警通知 → 邮件服务器（SMTP）”配置发信服务器（SSL / TLS 或 STARTTLS，密码或授权码加密保存；修改密码或服务器地址需当前登录密码确认），再添加“邮件”渠道填写收件人。每封邮件在消息内容之后附上**完整的成本概览**（本期费用与原价 / 折扣 / 优惠券分项、预算与预测、6 项指标、每日费用与 Token 趋势、API Key 与模型排行、费用构成、变动归因、Key 治理、关键发现），日报为昨日所在账期、周报为上周、月报为上月、告警为本月。
+
+**推送范围**：每个渠道可限定为指定业务空间或 API Key（如把某个项目的日报只发给该项目负责人）：成本概览与报表摘要只统计范围内的数据，预算告警只推送范围内 Key 的预算，费用异常检查范围合计与范围内的 Key，Key 变更只推送范围内的 Key；同步故障为系统事件，不受范围限制。
 </details>
 
 <details>
@@ -237,7 +241,7 @@ flowchart LR
 | `ALIBABA_CLOUD_ACCESS_KEY_ID` / `_SECRET` | — | 可选：首次启动导入阿里云密钥后加密存库 |
 | `TENCENTCLOUD_SECRET_ID` / `_KEY` | — | 可选：首次启动导入腾讯云密钥后加密存库 |
 | `PUBLIC_URL` | — | 告警消息中的跳转链接 |
-| `ALERT_ALLOW_PRIVATE` | false | 允许通用 Webhook 指向内网 |
+| `ALERT_ALLOW_PRIVATE` | false | 允许通用 Webhook / SMTP 服务器指向内网（内网邮件中继） |
 | `BACKUP_KEEP` / `BACKUP_HOUR` | 7 / 3 | 自动备份份数（0 关闭）与时间 |
 | `METRICS_TOKEN` | — | ≥16 位，开启 `/metrics` |
 | `DEMO_DATA` | false | 演示模式 |
@@ -301,7 +305,7 @@ flowchart LR
 纯 **Node.js 24** 内置模块（`node:http`、`node:sqlite`、`node:crypto`），前端为原生 ES 模块 + 手写 SVG 图表，**无任何 npm 依赖、无构建步骤、无外部 CDN**。
 
 ```
-app/src      server（HTTP / 鉴权 / 路由）· sync（多云同步）· aliyun · tencent · alerts · db · demo · crypto · config · iploc（IP 归属地）
+app/src      server（HTTP / 鉴权 / 路由）· sync（多云同步）· aliyun · tencent · alerts · db · demo · crypto · config · iploc（IP 归属地）· smtp（邮件发送）· overview-mail（成本概览邮件）
 app/public   index.html · login.html · boot.js · app.css · js/（main · core · charts · table · stats · insights · labels · views/）
 app/geo      ip2region_v4.xdb（IP 归属地离线库，Apache-2.0 / MIT，见 app/geo/NOTICE）
 docs/        DEPLOYMENT.md · images/

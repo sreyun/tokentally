@@ -14,6 +14,7 @@ export const ACT = {
   'sync.trigger': '触发同步', 'budgets.update': '修改预算', 'keytags.update': '修改成本中心 / 负责人', 'alert.update': '修改告警设置', 'alert.test': '发送测试消息', 'alert.test.fail': '测试消息发送失败',
   'alert.sent': '告警 / 报表已发送', 'alert.report.send': '手动发送报表', 'backup.create': '创建备份', 'backup.download': '下载备份', 'backup.download.fail': '下载备份验证失败', 'backup.download.lock': '下载备份多次验证失败', 'demo.clear': '清除演示数据',
   'network.update': '修改客户端 IP 来源', 'network.update.fail': '修改客户端 IP 来源验证失败', 'network.update.lock': '修改客户端 IP 来源多次验证失败', 'user.unlock.cli': '命令行解除锁定',
+  'smtp.update': '修改邮件服务器（SMTP）', 'smtp.update.fail': '修改邮件服务器验证失败', 'smtp.update.lock': '修改邮件服务器多次验证失败', 'smtp.test': '发送测试邮件', 'smtp.test.fail': '测试邮件发送失败',
   'user.promote.fail': '设为管理员验证失败', 'user.promote.lock': '设为管理员多次验证失败', 'user.reset.fail': '重置密码验证失败', 'user.reset.lock': '重置密码多次验证失败', 'user.create.fail': '创建管理员验证失败', 'user.create.lock': '创建管理员多次验证失败',
 };
 /** 未登记的操作：按后缀给出“验证失败 / 多次验证失败”，其余显示代码 */
@@ -23,7 +24,8 @@ export const actBad = a => /(^|\.)(fail|lock)$/.test(a);
 const PROV = { aliyun: '阿里云', tencent: '腾讯云' };
 const SYNC_KIND = { meta: 'API Key 与业务空间', bills: '账单' };
 const ROLE = { admin: '管理员', viewer: '只读用户' };
-const CH_TYPE = { dingtalk: '钉钉', feishu: '飞书', wecom: '企业微信', generic: '通用 Webhook' };
+const CH_TYPE = { dingtalk: '钉钉', feishu: '飞书', wecom: '企业微信', generic: '通用 Webhook', email: '邮件' };
+const SMTP_FIELD = { host: 'SMTP 服务器', port: '端口', security: '加密方式', username: '用户名', fromAddr: '发件人邮箱', fromName: '发件人名称', password: '密码 / 授权码', 'password.clear': '清除密码' };
 export const EVENT = { budget: '预算告警', anomaly: '费用异常', sync: '同步故障', keyChange: 'Key 变更', daily: '日报', weekly: '周报', monthly: '月报' };
 const RULE = { pct: '达到预警阈值', over: '超出预算', forecast: '预计月末超出总预算', keys: '包含 API Key 预算' };
 const TRIGGER = { sync: 'Key 同步后检查', bills: '账单同步后检查', schedule: '定时检查', budgets: '修改预算后检查', config: '修改告警设置后检查' };
@@ -74,7 +76,7 @@ const DESC = {
   'budgets.update': d => [['月度总预算', d.monthly == null ? '未设置' : money(d.monthly)], d.alertPct != null && ['预警阈值', `${d.alertPct}%`], d.keyBudgets != null && ['API Key 预算', `${d.keyBudgets} 个`]],
   'keytags.update': d => [['Key 数量', `${d.count ?? (d.keys || []).length} 个`], d.keys?.length && ['涉及', list(d.keys.slice(0, 5), keyName) + ((d.count || d.keys.length) > 5 ? ` 等 ${d.count || d.keys.length} 个` : '')]],
   'alert.update': d => [
-    ['通知渠道', (d.channels || []).length ? d.channels.map(c => `${c.name}（${CH_TYPE[c.type] || c.type}${c.enabled ? '' : '，已停用'}）：${list(c.events, e => EVENT[e] || e) || '未订阅事件'}`).join('；') : '无'],
+    ['通知渠道', (d.channels || []).length ? d.channels.map(c => `${c.name}（${CH_TYPE[c.type] || c.type}${c.enabled ? '' : '，已停用'}${c.scope ? `，范围：${c.scope.type === 'key' ? 'API Key' : '业务空间'} ${c.scope.n} 个` : ''}）：${list(c.events, e => EVENT[e] || e) || '未订阅事件'}`).join('；') : '无'],
     d.rules && ['预算规则', list(Object.keys(d.rules).filter(k => d.rules[k]), k => RULE[k] || k) || '全部关闭'],
     d.anomaly && ['费用异常', `日费用达到前 7 日日均的 ${d.anomaly.ratio} 倍且增量 ≥ ${money(d.anomaly.minAmount, 0)}${d.anomaly.keys ? '，含单个 API Key' : ''}`],
     d.reportHour != null && ['报表发送', `每天 ${p2(d.reportHour)}:00`],
@@ -84,6 +86,9 @@ const DESC = {
   'alert.test.fail': d => [['渠道类型', CH_TYPE[d.type] || d.type], ['错误', d.error]],
   'alert.sent': d => [['事件', EVENT[d.event] || d.event], ['渠道', d.channel], d.items != null && ['条目', `${d.items} 条`], d.trigger && ['触发', TRIGGER[d.trigger] || d.trigger]],
   'alert.report.send': d => [['报表', EVENT[d.kind] || d.kind], ['渠道', d.channel]],
+  'smtp.update': d => [['修改项', list(d.fields, f => SMTP_FIELD[f] || f)]],
+  'smtp.test': d => [['收件人', d.to]],
+  'smtp.test.fail': d => [['收件人', d.to], ['错误', d.error]],
 };
 
 /** 审计详情 → [[标签, 文本], ...]（已是中文说明的字符串直接返回） */

@@ -718,6 +718,10 @@ dialog.modal .dlg-b { max-height: calc(100vh - 140px); }
 .ch-t .muted { font-size: 12px; overflow-wrap: anywhere; }
 .ch-evs { display: flex; flex-wrap: wrap; gap: 6px; }
 .ch-evs .tag { margin-left: 0; }
+.ch-evs .tag.info { background: var(--accent-wash-2); color: var(--accent-text); }
+.scope-list { margin-top: 8px; max-height: 220px; overflow: auto; display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 4px 14px; padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--r); background: var(--surface-2); scrollbar-width: thin; }
+.scope-list .chk { white-space: normal; align-items: flex-start; line-height: 1.45; }
+.scope-list .chk input { margin-top: 2px; flex: none; }
 .ch-foot { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; font-size: 12px; }
 .ch-foot > span:first-child { min-width: 0; overflow-wrap: anywhere; }
 .empty-mini { display: flex; gap: 12px; align-items: flex-start; padding: 18px; border: 1px dashed var(--border-strong); border-radius: var(--r); color: var(--ink-2); font-size: 13px; }

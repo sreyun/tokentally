@@ -1,5 +1,6 @@
 /**
- * 告警与报表推送：钉钉 / 飞书 / 企业微信群机器人与通用 Webhook（最多 5 个渠道，按渠道订阅事件）
+ * 告警与报表推送：钉钉 / 飞书 / 企业微信群机器人、通用 Webhook 与邮件（SMTP）（最多 5 个渠道，按渠道订阅事件）
+ * 邮件渠道：消息内容之后附上完整的成本概览（日报为昨日所在账期、周报为上周、月报为上月、告警为本月）
  *
  * 事件：
  *  - budget   预算告警：达到预警阈值 / 超出预算 / 预计月末超出总预算 / API Key 预算（同一阈值每账期每渠道只通知一次）
@@ -17,12 +18,24 @@ import net from 'node:net';
 import crypto from 'node:crypto';
 import { todayIn, hourIn, addDays, addMonths, isCycleFinal, PROVIDER_NAMES } from './sync.mjs';
 import { dayStartSec } from './prom.mjs';
+import { sendMail, parseRecipients, normalizeSmtp, SMTP_SECURITY } from './smtp.mjs';
+import { renderOverviewHtml, renderEmail } from './overview-mail.mjs';
+
+/** 推送范围：全部 / 指定 API Key / 指定业务空间（最多 200 个） */
+export const SCOPE_TYPES = { all: '全部', key: '指定 API Key', ws: '指定业务空间' };
+export function cleanScope(s) {
+  if (!s || typeof s !== 'object') return { type: 'all', ids: [] };
+  const type = Object.hasOwn(SCOPE_TYPES, s.type) ? s.type : 'all';
+  const ids = type === 'all' ? [] : [...new Set((Array.isArray(s.ids) ? s.ids : []).map(String).filter(x => /^[\w:.@-]{1,128}$/.test(x)))].slice(0, 200);
+  return { type: ids.length ? type : 'all', ids };
+}
 
 export const ALERT_TYPES = {
   dingtalk: { label: '钉钉群机器人', hosts: ['oapi.dingtalk.com'], sign: true, mention: 'mobile' },
   feishu: { label: '飞书群机器人', hosts: ['open.feishu.cn', 'open.larksuite.com'], sign: true, mention: 'all' },
   wecom: { label: '企业微信群机器人', hosts: ['qyapi.weixin.qq.com'], sign: false, mention: 'mobile' },
   generic: { label: '通用 Webhook（JSON）', hosts: null, sign: true, mention: 'mobile' },
+  email: { label: '邮件（附成本概览）', hosts: null, sign: false, mention: null, email: true },
 };
 export const EVENT_TYPES = {
   budget: { label: '预算告警', group: '告警', mention: true },
@@ -64,6 +77,7 @@ function safeLookup(hostname, options, cb) {
 export function validateWebhook(type, raw, { allowPrivate = false } = {}) {
   const t = Object.hasOwn(ALERT_TYPES, type) ? ALERT_TYPES[type] : null;
   if (!t) throw new Error('不支持的通知类型');
+  if (t.email) return parseRecipients(raw).join(', '); // 邮件渠道：“地址”为收件人列表（同样加密保存）
   let u;
   try { u = new URL(String(raw || '').trim()); } catch { throw new Error('Webhook 地址格式不正确'); }
   if (u.protocol !== 'https:') throw new Error('Webhook 地址必须使用 HTTPS');
@@ -78,6 +92,11 @@ export function validateWebhook(type, raw, { allowPrivate = false } = {}) {
   return u.href;
 }
 /** 展示用：只显示协议、主机与路径前缀，隐藏 access_token / key 等凭据 */
+/** 收件人脱敏：ab***@example.com 等 N 个 */
+export function maskEmails(raw) {
+  const list = String(raw || '').split(/,\s*/).filter(Boolean);
+  return list.slice(0, 3).map(e => e.replace(/^(.{1,2})[^@]*(@.*)$/, '$1***$2')).join(', ') + (list.length > 3 ? ` 等 ${list.length} 个` : '');
+}
 export function maskWebhook(href) {
   try { const u = new URL(href); return `${u.protocol}//${u.host}${u.pathname.length > 18 ? u.pathname.slice(0, 18) + '…' : u.pathname}${u.search ? '?…' : ''}`; } catch { return ''; }
 }
@@ -243,7 +262,7 @@ export class AlertService {
   settings() {
     const s = this.store.getSetting('alerts', {}) || {};
     return {
-      channels: (Array.isArray(s.channels) ? s.channels : []).map(c => ({ ...c, events: { ...DEFAULT_EVENTS, ...(c.events || {}) }, atMobiles: cleanMobiles(c.atMobiles), atAll: !!c.atAll })),
+      channels: (Array.isArray(s.channels) ? s.channels : []).map(c => ({ ...c, events: { ...DEFAULT_EVENTS, ...(c.events || {}) }, atMobiles: cleanMobiles(c.atMobiles), atAll: !!c.atAll, scope: cleanScope(c.scope) })),
       rules: { ...DEFAULT_RULES, ...(s.rules || {}) },
       anomaly: { ...DEFAULT_ANOMALY, ...(s.anomaly || {}) },
       reportHour: Number.isInteger(s.reportHour) ? s.reportHour : 9,
@@ -272,14 +291,49 @@ export class AlertService {
       ...s,
       channels: s.channels.map(c => {
         const sec = this.secretsOf(c.id), cs = st.channels[c.id] || {};
-        return { ...c, webhookSet: !!sec.webhook, webhookMasked: maskWebhook(sec.webhook), secretSet: !!sec.secret, undecryptable: !!sec.undecryptable, lastSentAt: cs.lastSentAt || null, lastError: cs.lastError || null, lastErrorAt: cs.lastErrorAt || null };
+        return { ...c, scopeLabel: this.scopeOf(c)?.label || '', webhookSet: !!sec.webhook, webhookMasked: c.type === 'email' ? maskEmails(sec.webhook) : maskWebhook(sec.webhook), secretSet: !!sec.secret, undecryptable: !!sec.undecryptable, lastSentAt: cs.lastSentAt || null, lastError: cs.lastError || null, lastErrorAt: cs.lastErrorAt || null };
       }),
       enabled: s.channels.some(c => c.enabled),
-      types: Object.fromEntries(Object.entries(ALERT_TYPES).map(([k, v]) => [k, { label: v.label, sign: v.sign, host: v.hosts?.[0] || '', mention: v.mention }])),
+      types: Object.fromEntries(Object.entries(ALERT_TYPES).map(([k, v]) => [k, { label: v.label, sign: v.sign, host: v.hosts?.[0] || '', mention: v.mention, email: !!v.email }])),
       eventTypes: EVENT_TYPES, maxChannels: MAX_CHANNELS,
+      smtp: { ...this.smtpSettings(), passwordSet: this.smtpPasswordSet(), securities: SMTP_SECURITY },
       state: { cycle, history: (st.history || []).slice(0, 30) },
       pending: budgetItems.filter(i => subs.some(c => !st.sent[c.id]?.[i.code])).map(i => strip(i.text)),
     };
+  }
+
+  /* ---------- 推送范围 ---------- */
+  /** 渠道的推送范围：null 表示全部；否则 { type, ids, keys（范围内的 API Key）, label, sig（用于去重编码）} */
+  scopeOf(ch) {
+    const sc = cleanScope(ch.scope);
+    if (sc.type === 'all') return null;
+    const keys = this.keyMap(), ids = new Set(sc.ids);
+    const keySet = sc.type === 'key' ? ids : new Set([...keys.values()].filter(k => ids.has(k.workspace_id)).map(k => k.api_key_id));
+    let names;
+    if (sc.type === 'key') names = sc.ids.map(id => this.keyName(id, keys));
+    else { const ws = new Map(this.store.listWorkspaces().map(w => [w.workspace_id, w.name])); for (const k of keys.values()) if (k.workspace_id && k.workspace_name && !ws.get(k.workspace_id)) ws.set(k.workspace_id, k.workspace_name); names = sc.ids.map(id => clean(ws.get(id)) || id); }
+    const label = `${sc.type === 'key' ? 'API Key' : '业务空间'} ${names.slice(0, 3).join('、')}${names.length > 3 ? ` 等 ${names.length} 个` : ''}`;
+    return { type: sc.type, ids: sc.ids, keys: keySet, label, sig: crypto.createHash('sha1').update(sc.type + ':' + [...sc.ids].sort().join(',')).digest('hex').slice(0, 10) };
+  }
+  /** 限定范围的报表：摘要按范围重新计算（邮件中另附范围内的成本概览） */
+  scopedReport(kind, today, scope, globalReady = true) {
+    const keys = this.keyMap();
+    const o = renderOverviewHtml(this.overviewSpec(kind, today), { store: this.store, today, scope });
+    const st = o.stats, tag = `（${scope.label}）`;
+    const tops = (title, list) => (list.length ? ['', `#### ${title}`, ...list.map((x, i) => `${i + 1}. ${clean(x.name)} ${yuan(x.cost)}${st.cost ? `（${pct(x.cost / st.cost * 100)}）` : ''}`)] : []);
+    if (kind === 'daily') {
+      const day = addDays(today, -1);
+      const rows = this.store.dailyByKey(addDays(day, -1), day).filter(r => scope.keys.has(r.id));
+      const y = rows.filter(r => r.day === day), yc = y.reduce((s, r) => s + r.cost, 0), pc = rows.filter(r => r.day !== day).reduce((s, r) => s + r.cost, 0);
+      const byKey = new Map(); for (const r of y) byKey.set(r.id, (byKey.get(r.id) || 0) + r.cost);
+      const top = [...byKey.entries()].filter(e => e[1] > 0.005).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([id, cost]) => `${this.keyName(id, keys)} ${yuan(cost)}（${pct(yc ? cost / yc * 100 : 0)}）`);
+      const lines = [`**昨日（${day.slice(5)}）费用 ${yuan(yc)}**，较前一日 ${chg(yc, pc)}`, `${st.label} 合计 ${yuan(st.cost)}${st.forecast != null ? `，预计月末 ${yuan(st.forecast)}` : ''}${st.budget ? `，范围内 Key 预算 ${yuan(st.budget)}（已用 ${pct(st.cost / st.budget * 100)}）` : ''}`, `推送范围：${scope.label}`];
+      if (top.length) lines.push('', '#### 昨日 API Key Top 5', ...top.map((t, i) => `${i + 1}. ${t}`));
+      return { title: `费用日报 · ${day}${tag}`, level: 'info', lines, empty: yc < 0.005 && st.cost < 0.005, period: today, ready: true, path: '#/overview' };
+    }
+    const period = kind === 'weekly' ? isoWeek(addDays(isoWeek(today).from, -1)).key : addMonths(today.slice(0, 7), -1);
+    const lines = [`**${kind === 'weekly' ? '上周' : period + ' 账期'}费用 ${yuan(st.cost)}**，较${st.prevLabel} ${chg(st.cost, st.prevCost)}`, `推送范围：${scope.label}`, ...tops('API Key Top 5', st.topKeys), ...tops('模型 Top 3', st.topModels)];
+    return { title: `${kind === 'weekly' ? '费用周报' : '费用月报'} · ${period}${tag}`, level: 'info', lines, empty: st.cost < 0.005 && st.prevCost < 0.005, period, ready: kind === 'monthly' ? globalReady : true, path: '#/overview' };
   }
 
   /* ---------- 名称 ---------- */
@@ -344,10 +398,10 @@ export class AlertService {
    * 按原价（目录价，反映真实用量）判断：优惠券与折扣按云厂商实际抵扣的日期计入，常集中在某几天（当天应付为 0），
    * 若按应付判断，优惠用完后的第一个正常日会被误判为“费用异常”（如生产 10-19：原价只比前 7 日高约 30%，按应付却是 5 倍）
    */
-  evaluateAnomaly(today = todayIn(this.tz)) {
+  evaluateAnomaly(today = todayIn(this.tz), scope = null) {
     const a = this.settings().anomaly;
     const day = addDays(today, -1), from = addDays(day, -7);
-    const rows = this.store.dailyByKey(from, day);
+    const rows = this.store.dailyByKey(from, day).filter(r => !scope || scope.keys.has(r.id));
     const items = [];
     const check = (scope, vals, name) => {
       const yv = vals.get(day), y = yv?.g || 0;
@@ -368,7 +422,7 @@ export class AlertService {
       if (!byKey.has(r.id)) byKey.set(r.id, new Map());
       add(byKey.get(r.id), r.day, r);
     }
-    check('total', total, '整体');
+    check(scope ? `scope:${scope.sig}` : 'total', total, scope ? `范围合计（${scope.label}）` : '整体');
     if (a.keys) {
       const keys = this.keyMap(), list = [];
       for (const [id, vals] of byKey) { const before = items.length; check('key:' + (id || '__none__'), vals, `API Key「${this.keyName(id, keys)}」`); if (items.length > before) list.push(items.pop()); }
@@ -411,7 +465,7 @@ export class AlertService {
     const CH = { create: '新增', delete: '删除', restore: '恢复' };
     const rows = this.store.changesSince(sinceId);
     const items = rows.filter(c => c.entity === 'api_key' && CH[c.change]).map(c => ({
-      code: `chg:${c.id}`, id: c.id, level: c.change === 'delete' ? 'warn' : 'info', text: `${CH[c.change]} API Key「${clean(c.name) || '无描述'}」(${c.entity_id})`,
+      code: `chg:${c.id}`, id: c.id, entity: c.entity_id, level: c.change === 'delete' ? 'warn' : 'info', text: `${CH[c.change]} API Key「${clean(c.name) || '无描述'}」(${c.entity_id})`,
     }));
     return { items, scannedTo: rows.length ? Math.max(...rows.map(c => c.id)) : null };
   }
@@ -513,6 +567,10 @@ export class AlertService {
         st.syncSent[ch.id] ||= {};
         st.reports[ch.id] ||= {};
         const sentMap = code => (/^sync(ok)?:/.test(code) ? st.syncSent[ch.id] : st.sent[ch.id]);
+        // 推送范围：预算告警只保留范围内 Key 的预算（总预算属于全部范围）；费用异常按范围重新计算；Key 变更只推送范围内的 Key
+        const scope = this.scopeOf(ch);
+        const keyOf = code => { const m = /^key:([^:]*):/.exec(code); return m ? m[1] : null; };
+        const tag = scope ? `（${scope.label}）` : '';
         const msgs = [];
         const alertMsg = (event, title, items, path) => {
           const fresh = items.filter(i => !sentMap(i.code)[i.code]);
@@ -523,12 +581,13 @@ export class AlertService {
           msgs.push({ event, title, level, lines: show.map(i => i.text), codes: fresh.map(i => i.code), mention: EVENT_TYPES[event].mention && level !== 'good', path });
         };
         // 消息中的“查看详情”直达对应页面与统计周期（地址中带周期参数，打开即为下钻后的视图）
-        if (ch.events.budget) alertMsg('budget', `预算告警 · ${cycle}`, get('budget', () => this.evaluateBudget(today)), `#/keys?cycle=${cycle}`);
-        if (ch.events.anomaly && afterHour) alertMsg('anomaly', `费用异常提醒 · ${addDays(today, -1)}`, get('anomaly', () => this.evaluateAnomaly(today)), `#/keys?from=${addDays(today, -1)}&to=${addDays(today, -1)}`);
+        if (ch.events.budget) alertMsg('budget', `预算告警 · ${cycle}${tag}`, scope ? get('budget', () => this.evaluateBudget(today)).filter(i => scope.keys.has(keyOf(i.code))) : get('budget', () => this.evaluateBudget(today)), `#/keys?cycle=${cycle}`);
+        if (ch.events.anomaly && afterHour) alertMsg('anomaly', `费用异常提醒 · ${addDays(today, -1)}${tag}`, scope ? get('anomaly:' + scope.sig, () => this.evaluateAnomaly(today, scope)) : get('anomaly', () => this.evaluateAnomaly(today)), `#/keys?from=${addDays(today, -1)}&to=${addDays(today, -1)}`);
         if (ch.events.sync) alertMsg('sync', '数据同步告警', get('sync', () => this.evaluateSync()), '#/admin/sync');
         if (ch.events.keyChange) {
           if (st.lastChangeId[ch.id] == null) st.lastChangeId[ch.id] = this.store.maxChangeId(); // 首次启用不补发历史变更
-          const { items, scannedTo } = this.evaluateChanges(st.lastChangeId[ch.id]);
+          const ev = this.evaluateChanges(st.lastChangeId[ch.id]), scannedTo = ev.scannedTo;
+          const items = scope ? ev.items.filter(i => scope.keys.has(String(i.entity))) : ev.items;
           const MAX_LINES = 30; // 一次同步新增上百个 Key 时消息不能无限长（企业微信 4096 字节、钉钉 20KB 上限）
           if (items.length) {
             const lines = items.slice(0, MAX_LINES).map(i => i.text);
@@ -539,7 +598,7 @@ export class AlertService {
         if (afterHour) {
           for (const kind of ['daily', 'weekly', 'monthly']) {
             if (!ch.events[kind]) continue;
-            const r = get('report:' + kind, () => this.report(kind, today));
+            const r = scope ? get(`report:${kind}:${scope.sig}`, () => this.scopedReport(kind, today, scope, kind === 'monthly' ? get('report:monthly', () => this.report('monthly', today)).ready : true)) : get('report:' + kind, () => this.report(kind, today));
             if (kind === 'monthly' && !r.ready) continue;
             if (st.reports[ch.id][kind] === r.period) continue;
             // 空报表只有在该周期的账单确认已同步后才算“已发送”；否则（如刚配置密钥、回填尚未完成）稍后有数据时再发送
@@ -596,13 +655,42 @@ export class AlertService {
     return Promise.race([cur.then(() => true, () => true), new Promise(r => { t = setTimeout(() => r(false), ms); t.unref?.(); })]).finally(() => clearTimeout(t));
   }
 
-  async send(ch, { webhook, secret }, { title, level, lines, today = todayIn(this.tz), mention = false, path = '' }) {
+  /* ---------- 邮件（SMTP） ---------- */
+  smtpSettings() { try { return normalizeSmtp(this.store.getSetting('smtp', {}) || {}); } catch { return normalizeSmtp({}); } }
+  smtpPasswordSet() { try { return !!this.store.getSecret('smtp.password'); } catch { return false; } }
+  smtpConfig() {
+    let password = '';
+    try { password = this.store.getSecret('smtp.password') || ''; } catch { throw new Error('SMTP 密码无法解密（主密钥已变化），请重新填写'); }
+    return { ...this.smtpSettings(), password };
+  }
+  /** 邮件附带的成本概览周期：日报为昨日所在账期，周报为上周，月报为上月，其余为本月 */
+  overviewSpec(event, today = todayIn(this.tz)) {
+    if (event === 'daily') return { mode: 'month', cycle: addDays(today, -1).slice(0, 7) };
+    if (event === 'weekly') { const w = isoWeek(addDays(isoWeek(today).from, -1)); return { mode: 'range', from: w.from, to: w.to }; }
+    if (event === 'monthly') return { mode: 'month', cycle: addMonths(today.slice(0, 7), -1) };
+    return { mode: 'month', cycle: today.slice(0, 7) };
+  }
+  async sendEmail(recipients, { brand, title, level, lines, footer, event, today = todayIn(this.tz), scope = null }) {
+    const spec = this.overviewSpec(event, today);
+    const base = this.publicUrl ? this.publicUrl.replace(/\/+$/, '') + '/' : '';
+    const link = base ? base + (spec.mode === 'month' ? `#/overview?cycle=${spec.cycle}` : `#/overview?from=${spec.from}&to=${spec.to}`) : '';
+    let overview = null;
+    // 概览生成失败不能阻止告警送达：只发送消息内容并记录日志。同一轮检查中多个渠道 / 多条消息的相同周期与范围只生成一次（缓存 60 秒）
+    const ck = `${JSON.stringify(spec)}|${scope?.sig || 'all'}|${link}|${today}`, now = Date.now();
+    this._ov = (this._ov || new Map());
+    for (const [k, v] of this._ov) if (now - v.t > 60_000) this._ov.delete(k);
+    try { overview = this._ov.get(ck)?.o || renderOverviewHtml(spec, { store: this.store, today, link, scope }); this._ov.set(ck, { t: now, o: overview }); } catch (e) { this.log?.(`生成成本概览邮件内容失败：${e.message}`); }
+    const { html, text } = renderEmail({ brand, title, level, lines, overview, footer });
+    return sendMail(this.smtpConfig(), { to: parseRecipients(recipients), subject: title, html, text }, { allowPrivate: this.allowPrivate, isPrivateIp });
+  }
+  async send(ch, { webhook, secret }, { title, level, lines, today = todayIn(this.tz), mention = false, path = '', event = '' }) {
     const brand = clean(this.store.branding().name) || '大模型费用分析';
     const time = new Intl.DateTimeFormat('zh-CN', { timeZone: this.tz, hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date());
     const src = this.providers().map(p => PROVIDER_NAMES[p]).join(' / ') || '云厂商';
     const footer = `${brand} · 统计至 ${today} ${time} · 口径：应付金额（税前）· 数据来源：${src}费用中心`;
     const link = this.publicUrl ? this.publicUrl.replace(/\/+$/, '') + '/' + (/^#\/[\w/?&=.~%-]*$/.test(path) ? path : '#/overview') : '';
     const type = ch.type;
+    if (ALERT_TYPES[type]?.email) return this.sendEmail(webhook, { brand, title: `【${brand}】${title}`, level, lines, footer, event, today, scope: this.scopeOf(ch) });
     const mentions = mention && (ch.atAll || ch.atMobiles?.length) ? { all: !!ch.atAll, mobiles: ALERT_TYPES[type]?.mention === 'mobile' ? ch.atMobiles || [] : [] } : null;
     const fullTitle = `【${brand}】${title}`;
     const payload = buildMessage(type, { title: fullTitle, level, lines, footer, link, mentions });
@@ -617,6 +705,9 @@ export class AlertService {
     }
   }
   async test(ch, creds) {
+    if (ALERT_TYPES[ch.type]?.email) {
+      return this.send(ch, creds, { title: '测试邮件', level: 'info', lines: ['这是一封测试邮件，收到即表示邮件服务器（SMTP）与收件人配置正确。', '邮件通知会在消息内容之后附上完整的成本概览：日报为昨日所在账期、周报为上周、月报为上月、告警为本月。以下为本月的成本概览。'] });
+    }
     await this.send(ch, creds, { title: '测试消息', level: 'info', mention: true, lines: ['这是一条测试消息，收到即表示通知渠道配置正确。', '告警（预算、费用异常、同步故障）满足条件时发送，同一条件每账期只通知一次；报表在每天设定的时间之后发送。'] });
   }
 }

@@ -11,15 +11,16 @@ import crypto from 'node:crypto';
 import { config } from './config.mjs';
 import { Store, PROVIDERS } from './db.mjs';
 import { SyncService, todayIn, addDays, addMonths, isCycleFinal, hourIn, PROVIDER_LIST } from './sync.mjs';
-import { AlertService, ALERT_TYPES, EVENT_TYPES, MAX_CHANNELS, validateWebhook, cleanMobiles, isPrivateIp } from './alerts.mjs';
+import { AlertService, ALERT_TYPES, EVENT_TYPES, MAX_CHANNELS, validateWebhook, cleanMobiles, isPrivateIp, cleanScope } from './alerts.mjs';
 import { selfTest, AliyunClient, explainAliyunError, callLog, MS_REGIONS, BSS_ENDPOINTS } from './aliyun.mjs';
 import { tc3SelfTest, TencentClient, explainTencentError, TC_REGIONS, TC_SITES } from './tencent.mjs';
 import { seedDemo, clearDemo, demoStale } from './demo.mjs';
 import { PromClient, validateCalls, discover, fetchCalls, buildUsageRows, buildQuery, DEFAULT_CALLS, MAPPING_FIELDS, PROM_AUTH } from './prom.mjs';
 import { configureIpLoc, ipLoc, ipLocInfo } from './iploc.mjs';
+import { normalizeSmtp, parseRecipients } from './smtp.mjs';
 import { loadMasterKey, hashPassword, verifyPassword, burnPasswordCheck, checkPasswordPolicy, randomPassword, maskId, sha256 } from './crypto.mjs';
 
-const VERSION = '1.6.3';
+const VERSION = '1.7.0';
 
 /* ===================================================================
  * 系统日志：所有运行日志同时输出到控制台并写入数据库（system_log，保留 SYSTEM_LOG_DAYS 天），
@@ -1184,13 +1185,18 @@ route('PUT', '/api/admin/alerts', async (req, res, ctx) => {
     if (webhookIn) {
       try { webhook = validateWebhook(type, webhookIn, { allowPrivate: config.alertAllowPrivate }); } catch (e) { throw new HttpError(400, `渠道「${name}」：${e.message}`); }
     } else if (sec.webhook && old && type !== old.type) {
-      throw new HttpError(400, `渠道「${name}」已更换通知类型，请同时填写对应的 Webhook 地址`); // 不同渠道的地址与密钥不能混用
+      throw new HttpError(400, `渠道「${name}」已更换通知类型，请同时填写对应的${ALERT_TYPES[type].email ? '收件人邮箱' : ' Webhook 地址'}`); // 不同渠道的地址与密钥不能混用
     }
+    if (ALERT_TYPES[type].email && raw.enabled && !alerts.smtpSettings().host) throw new HttpError(400, `渠道「${name}」：请先在“邮件服务器（SMTP）”中配置发信服务器`);
     // 新渠道必须填写地址；已有渠道的地址丢失或无法解密（主密钥变化）时仍允许保存其他配置（规则、其他渠道、删除），但该渠道保持停用，直到重新填写地址
-    if (!webhook && !sec.webhook && !old) throw new HttpError(400, `渠道「${name}」请填写 Webhook 地址`);
+    if (!webhook && !sec.webhook && !old) throw new HttpError(400, `渠道「${name}」请填写${ALERT_TYPES[type].email ? '收件人邮箱' : ' Webhook 地址'}`);
     const usable = !!(webhook || sec.webhook);
     const events = Object.fromEntries(Object.keys(EVENT_TYPES).map(k => [k, raw.events?.[k] == null ? (old?.events?.[k] ?? false) : !!raw.events[k]]));
-    plan.push({ ch: { id, name, type, enabled: !!raw.enabled && usable, events, atAll: !!raw.atAll, atMobiles: cleanMobiles(raw.atMobiles) }, webhook, secretIn, clearSecret: !!raw.clearSecret, sec, isNew: !old });
+    // 推送范围：指定 API Key / 业务空间时必须至少选择一项（选择后为空视为配置错误，不能悄悄变成“全部”）
+    if (raw.scope != null && !obj(raw.scope)) throw new HttpError(400, `渠道「${name}」的推送范围格式不正确`);
+    const scope = raw.scope == null ? cleanScope(old?.scope) : cleanScope(raw.scope);
+    if (raw.scope && ['key', 'ws'].includes(raw.scope.type) && scope.type === 'all') throw new HttpError(400, `渠道「${name}」请至少选择一个${raw.scope.type === 'key' ? ' API Key' : '业务空间'}`);
+    plan.push({ ch: { id, name, type, enabled: !!raw.enabled && usable, events, atAll: !!raw.atAll, atMobiles: cleanMobiles(raw.atMobiles), scope }, webhook, secretIn, clearSecret: !!raw.clearSecret, sec, isNew: !old });
   }
   // 校验全部通过后再落库，避免部分保存
   for (const p of plan) {
@@ -1207,9 +1213,46 @@ route('PUT', '/api/admin/alerts', async (req, res, ctx) => {
   }
   const next = { channels: plan.map(p => p.ch), rules, anomaly, reportHour };
   store.setSetting('alerts', next);
-  store.audit(ctx.user.username, ctx.ip, 'alert.update', { channels: next.channels.map(c => ({ name: c.name, type: c.type, enabled: c.enabled, events: Object.keys(c.events).filter(k => c.events[k]) })), rules, anomaly, reportHour, fields });
+  store.audit(ctx.user.username, ctx.ip, 'alert.update', { channels: next.channels.map(c => ({ name: c.name, type: c.type, enabled: c.enabled, events: Object.keys(c.events).filter(k => c.events[k]), ...(c.scope?.type !== 'all' ? { scope: { type: c.scope.type, n: c.scope.ids.length } } : {}) })), rules, anomaly, reportHour, fields });
   const check = next.channels.some(c => c.enabled) ? await alerts.check('config') : null;
   return json(req, res, 200, { ...alerts.out(), check });
+}, { admin: true });
+/*
+ * 邮件服务器（SMTP）：密码（或授权码）只写不回显，AES-256-GCM 加密保存；
+ * 修改密码、清除密码，或在已保存密码时修改服务器 / 端口 / 加密方式 / 用户名，都需要当前登录密码确认（防止把凭据与邮件内容转发到其他服务器）
+ */
+route('PUT', '/api/admin/smtp', async (req, res, ctx) => {
+  const b = await readJson(req, 8192);
+  const cur = alerts.smtpSettings(), hadPw = alerts.smtpPasswordSet();
+  let next;
+  try { next = normalizeSmtp(b, cur); } catch (e) { throw new HttpError(400, e.message); }
+  const password = typeof b.password === 'string' ? b.password : '';
+  if (password.length > 512 || /[\r\n]/.test(password)) throw new HttpError(400, 'SMTP 密码格式不正确');
+  if (next.security === 'none' && (password || (hadPw && !b.clearPassword))) throw new HttpError(400, '未加密的连接不能使用密码：请改用 SSL / TLS 或 STARTTLS，或清除密码');
+  const sensitive = !!password || !!b.clearPassword || (hadPw && ['host', 'port', 'security', 'username'].some(k => next[k] !== cur[k]));
+  if (sensitive) {
+    if (!b.confirmPassword) throw new HttpError(400, '修改 SMTP 密码或服务器地址需要输入当前登录密码确认');
+    await confirmCurrentPassword(ctx, b.confirmPassword, 'smtp.update', '当前登录密码不正确');
+  }
+  const fields = Object.keys(next).filter(k => next[k] !== cur[k]);
+  store.setSetting('smtp', next);
+  if (password) { store.setSecret('smtp.password', password); fields.push('password'); } else if (b.clearPassword && hadPw) { store.setSecret('smtp.password', ''); fields.push('password.clear'); }
+  if (fields.length) { store.audit(ctx.user.username, ctx.ip, 'smtp.update', { fields }); log(`邮件服务器（SMTP）配置已修改：${fields.join(', ')}（${ctx.user.username}）`); }
+  return json(req, res, 200, { smtp: { ...alerts.smtpSettings(), passwordSet: alerts.smtpPasswordSet() } });
+}, { admin: true });
+/* 发送测试邮件（使用已保存的 SMTP 配置，内容包含本月成本概览） */
+route('POST', '/api/admin/smtp/test', async (req, res, ctx) => {
+  const b = await readJson(req, 4096);
+  let to;
+  try { to = parseRecipients(b.to); } catch (e) { throw new HttpError(400, e.message); }
+  if (to.length > 5) throw new HttpError(400, '测试邮件最多发送给 5 个收件人');
+  try { await alerts.test({ id: 'smtp-test', name: '邮件测试', type: 'email' }, { webhook: to.join(', ') }); }
+  catch (e) {
+    store.audit(ctx.user.username, ctx.ip, 'smtp.test.fail', { to: to.join(', '), error: String(e.message).slice(0, 200) });
+    throw new HttpError(502, '测试邮件发送失败：' + e.message);
+  }
+  store.audit(ctx.user.username, ctx.ip, 'smtp.test', { to: to.join(', ') });
+  return json(req, res, 200, { ok: true, to });
 }, { admin: true });
 route('POST', '/api/admin/alerts/test', async (req, res, ctx) => {
   const b = await readJson(req, 8192);
@@ -1218,14 +1261,14 @@ route('POST', '/api/admin/alerts/test', async (req, res, ctx) => {
   if (!type) throw new HttpError(400, '请选择通知类型');
   const sec = saved ? alerts.secretsOf(saved.id) : { webhook: '', secret: '' };
   const webhookIn = typeof b.webhook === 'string' ? b.webhook.trim() : '';
-  if (!webhookIn && !sec.webhook) throw new HttpError(400, '请先填写 Webhook 地址');
+  if (!webhookIn && !sec.webhook) throw new HttpError(400, ALERT_TYPES[type].email ? '请先填写收件人邮箱' : '请先填写 Webhook 地址');
   if (!webhookIn && saved && type !== saved.type) throw new HttpError(400, '已更换通知类型，请填写对应的 Webhook 地址后再测试');
   let webhook;
   try { webhook = validateWebhook(type, webhookIn || sec.webhook, { allowPrivate: config.alertAllowPrivate }); }
   catch (e) { throw new HttpError(400, e.message); }
   const secretIn = typeof b.secret === 'string' ? b.secret.trim().slice(0, 256) : '';
   const secret = secretIn || (webhook === sec.webhook ? sec.secret : '');
-  const ch = { id: saved?.id || 'test', name: saved?.name || ALERT_TYPES[type].label, type, atAll: !!b.atAll, atMobiles: cleanMobiles(b.atMobiles) };
+  const ch = { id: saved?.id || 'test', name: saved?.name || ALERT_TYPES[type].label, type, atAll: !!b.atAll, atMobiles: cleanMobiles(b.atMobiles), scope: b.scope != null ? cleanScope(b.scope) : saved?.scope };
   try { await alerts.test(ch, { webhook, secret }); }
   catch (e) {
     store.audit(ctx.user.username, ctx.ip, 'alert.test.fail', { type, error: String(e.message).slice(0, 200) });
