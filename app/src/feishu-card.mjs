@@ -127,7 +127,7 @@ export function feishuCard({ title, subtitle, level = 'info', doc = {}, footer, 
 
 /**
  * 飞书返回的错误是否属于“卡片内容不被接受”（应降级重发）：签名 / IP 白名单 / 频率限制等错误降级也无济于事，直接报错
- * （19021 签名校验失败、19022 IP 不在白名单、11232 频率限制）。
+ * （19001 机器人地址无效、19021 签名校验失败、19022 IP 不在白名单、11232 频率限制）。
  * 19024 关键词校验失败会降级：机器人设置了“自定义关键词”时，简洁卡片保留原有的“【品牌】标题”与正文写法，可能包含新卡片中没有的关键词
  */
 export function feishuFormatError({ status, text }) {
@@ -135,6 +135,7 @@ export function feishuFormatError({ status, text }) {
   try { j = JSON.parse(text); } catch { return false; }
   const code = Number(j?.code ?? j?.StatusCode);
   if (!Number.isFinite(code) || code === 0) return false;
-  if ([19021, 19022, 11232].includes(code)) return false;
+  // 19001：机器人地址（access token）无效，换样式重发也无济于事
+  if ([19001, 19021, 19022, 11232].includes(code)) return false;
   return status === 200 || status === 400;
 }

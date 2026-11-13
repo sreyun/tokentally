@@ -22,7 +22,7 @@ import { ShareService, filterData, SHARE_DAYS } from './share.mjs';
 import { scopePredicate } from './overview-mail.mjs';
 import { loadMasterKey, hashPassword, verifyPassword, burnPasswordCheck, checkPasswordPolicy, randomPassword, maskId, sha256 } from './crypto.mjs';
 
-const VERSION = '1.9.3';
+const VERSION = '1.9.4';
 
 /* ===================================================================
  * 系统日志：所有运行日志同时输出到控制台并写入数据库（system_log，保留 SYSTEM_LOG_DAYS 天），
@@ -1309,23 +1309,28 @@ route('POST', '/api/admin/alerts/test', async (req, res, ctx) => {
   store.audit(ctx.user.username, ctx.ip, 'alert.test', { type, channel: ch.name });
   return json(req, res, 200, { ok: true, style: typeof style === 'string' ? style : null });
 }, { admin: true });
-/* 报表预览 / 立即发送（不影响定时发送记录） */
+/*
+ * 报表预览 / 立即发送（不影响定时发送记录）。按所选渠道的推送范围生成：限定范围的渠道只能收到范围内的数据
+ * （此前预览与“立即发送”总是使用全部范围的报表，项目群会收到全公司的费用、预算与排行）
+ */
 route('POST', '/api/admin/alerts/report', async (req, res, ctx) => {
   const b = await readJson(req, 4096);
   const kind = ['daily', 'weekly', 'monthly'].includes(b.kind) ? b.kind : 'daily';
-  const r = alerts.report(kind);
+  const ch = typeof b.channelId === 'string' && b.channelId ? alerts.settings().channels.find(c => c.id === b.channelId) : null;
+  if (b.send && !ch) throw new HttpError(400, '请选择已保存的通知渠道');
+  const scope = ch ? alerts.scopeOf(ch) : null;
+  const r = scope ? alerts.scopedReport(kind, todayIn(config.billTz), scope) : alerts.report(kind);
+  const out = { title: r.title, lines: r.lines, doc: r.doc, empty: !!r.empty, scope: scope?.label || null };
   if (b.send) {
-    const ch = alerts.settings().channels.find(c => c.id === b.channelId);
-    if (!ch) throw new HttpError(400, '请选择已保存的通知渠道');
     const sec = alerts.secretsOf(ch.id);
     if (!sec.webhook) throw new HttpError(400, '该渠道尚未配置 Webhook 地址');
     let style = null;
     try { style = await alerts.send(ch, sec, { title: r.title + '（手动发送）', level: r.level, lines: r.lines, doc: r.doc, event: kind, path: r.path }); }
     catch (e) { throw new HttpError(502, '发送失败：' + e.message); }
-    store.audit(ctx.user.username, ctx.ip, 'alert.report.send', { kind, channel: ch.name });
-    return json(req, res, 200, { title: r.title, lines: r.lines, doc: r.doc, empty: !!r.empty, sent: true, style: typeof style === 'string' ? style : null });
+    store.audit(ctx.user.username, ctx.ip, 'alert.report.send', { kind, channel: ch.name, ...(scope ? { scope: scope.label } : {}) });
+    return json(req, res, 200, { ...out, sent: true, style: typeof style === 'string' ? style : null });
   }
-  return json(req, res, 200, { title: r.title, lines: r.lines, doc: r.doc, empty: !!r.empty, sent: false });
+  return json(req, res, 200, { ...out, sent: false });
 }, { admin: true });
 
 /* ---------------- 只读分享链接 ---------------- */

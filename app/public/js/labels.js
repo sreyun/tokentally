@@ -87,7 +87,7 @@ const DESC = {
   'alert.test': d => [['渠道', `${d.channel || '-'}（${CH_TYPE[d.type] || d.type}）`]],
   'alert.test.fail': d => [['渠道类型', CH_TYPE[d.type] || d.type], ['错误', d.error]],
   'alert.sent': d => [['事件', EVENT[d.event] || d.event], ['渠道', d.channel], d.items != null && ['条目', `${d.items} 条`], d.trigger && ['触发', TRIGGER[d.trigger] || d.trigger]],
-  'alert.report.send': d => [['报表', EVENT[d.kind] || d.kind], ['渠道', d.channel]],
+  'alert.report.send': d => [['报表', EVENT[d.kind] || d.kind], ['渠道', d.channel], d.scope && ['推送范围', d.scope]],
   'smtp.update': d => [['修改项', list(d.fields, f => SMTP_FIELD[f] || f)]],
   'smtp.test': d => [['收件人', d.to]],
   'smtp.test.fail': d => [['收件人', d.to], ['错误', d.error]],

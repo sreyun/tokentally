@@ -603,13 +603,13 @@ async function alerts(el) {
         </div>`).join('')}</div>` : `<div class="empty-mini">${icon('bell')}<div><b>尚未配置通知渠道</b><span class="muted">添加钉钉、飞书、企业微信群机器人、通用 Webhook 或邮件，接收预算告警、费用异常、同步故障与日报 / 周报 / 月报；邮件会附上完整的成本概览。</span></div></div>`}
     </section>
     <section class="panel c4"><div class="panel-h"><h3>告警规则</h3>${help('预算告警：同一阈值（含预算金额）每个账期每个渠道只通知一次。费用异常：每天报表时间之后检查“昨日费用 ≥ 前 7 日日均 × 倍数，且增量 ≥ 最小金额”。同步故障：同一云厂商同类同步连续失败 3 次时告警，恢复后通知。')}</div>
-      <form id="rForm" class="form-grid" style="grid-template-columns:1fr 1fr">
+      <form id="rForm" class="form-grid wrap-labels" style="grid-template-columns:1fr 1fr">
         <div class="field full"><span>预算告警条件</span><div class="row" style="gap:6px 16px">${Object.entries(RULE_LABEL).map(([k, l]) => `<label class="chk"><input type="checkbox" name="rule_${k}" ${al.rules[k] ? 'checked' : ''}> ${l}</label>`).join('')}</div></div>
         <label class="field" title="按原价（目录价）判断，不受优惠券 / 折扣集中抵扣的影响"><span>异常倍数（×前 7 日原价日均）</span><input class="inp" type="number" name="ratio" min="1.2" max="20" step="0.1" value="${al.anomaly.ratio}"></label>
         <label class="field" title="昨日原价比前 7 日原价日均至少多出的金额"><span>异常最小增量（元，按原价）</span><input class="inp" type="number" name="minAmount" min="0" step="1" value="${al.anomaly.minAmount}"></label>
         <label class="chk full"><input type="checkbox" name="anomalyKeys" ${al.anomaly.keys ? 'checked' : ''}> 同时检测单个 API Key 的费用异常（最多列出 5 个）</label>
         <label class="field" title="渠道开启“附带交互报表链接”时，每条消息生成的只读链接的有效期"><span>交互报表链接有效期（天）</span><input class="inp" type="number" name="shareDays" min="1" max="90" step="1" value="${al.shareDays}"></label>
-        <div class="field"><span>&nbsp;</span><small class="hint" style="margin-top:8px">${al.shareAvailable ? '到期后链接自动失效，可在下方“只读分享链接”中提前撤销' : '需设置 PUBLIC_URL 后才能附带链接'}</small></div>
+        <div class="field"><small class="hint">${al.shareAvailable ? '到期后链接自动失效，可在下方“只读分享链接”中提前撤销' : '需设置 PUBLIC_URL 后才能附带链接'}</small></div>
         <label class="field full"><span>报表与异常检查时间</span><select class="inp" name="reportHour">${Array.from({ length: 24 }, (_, h) => opt(h, `每天 ${p2(h)}:00 之后`, al.reportHour)).join('')}</select><small class="hint">账单通常延迟数小时入账，建议 9:00 之后发送，数据更完整</small></label>
         <div class="row full"><button class="btn primary" type="submit">保存规则</button></div>
       </form></section>
@@ -627,7 +627,7 @@ async function alerts(el) {
         ${al.smtp.passwordSet ? '<label class="chk"><input type="checkbox" name="clearPassword"> 清除已保存的密码</label>' : ''}
         <div class="row full"><button class="btn primary" type="submit">保存邮件服务器</button><span class="sp"></span><input class="inp" name="testTo" type="email" placeholder="测试收件人邮箱" style="width:240px" aria-label="测试收件人邮箱"><button class="btn" type="button" data-smtp-test>${icon('mail')}发送测试邮件（含成本概览）</button></div>
       </form></section>
-    <section class="panel c7"><div class="panel-h"><h3>报表预览</h3><span class="sub">预览日报 / 周报 / 月报内容，可立即发送到指定渠道（不影响定时发送）</span></div>
+    <section class="panel c7"><div class="panel-h"><h3>报表预览</h3><span class="sub">按所选渠道的推送范围预览日报 / 周报 / 月报，可立即发送到该渠道（不影响定时发送）</span></div>
       <div class="row" style="margin-bottom:10px"><div class="seg sm" role="group" aria-label="报表类型">${[['daily', '日报'], ['weekly', '周报'], ['monthly', '月报']].map(([k, l], i) => `<button type="button" data-rk="${k}" aria-pressed="${i === 0}">${l}</button>`).join('')}</div>
         <span class="sp"></span><select class="inp sm" id="rCh" aria-label="发送到渠道">${al.channels.map(c => opt(c.id, c.name, '')).join('') || opt('', '（请先添加渠道）', '')}</select><button class="btn sm" id="rSend" ${al.channels.length ? '' : 'disabled'}>${icon('send')}立即发送</button></div>
       <div id="rPrev" class="report-prev"><div class="nodata">加载中…</div></div></section>
@@ -683,17 +683,20 @@ async function alerts(el) {
   // 报表预览
   let kind = 'daily', seq = 0;
   // 请求序号：先点“月报”再点“日报”时，较慢返回的月报不能覆盖当前选中的日报预览
+  // 预览与发送都按所选渠道的推送范围生成（限定范围的渠道只能收到范围内的数据），切换渠道时重新预览
   const preview = async (send = false) => {
-    const box = $('#rPrev', el), my = ++seq, k = kind;
+    const box = $('#rPrev', el), my = ++seq, k = kind, chId = $('#rCh', el).value || undefined;
     if (!send) box.innerHTML = '<div class="nodata">加载中…</div>';
     try {
-      const r = await http('POST', '/api/admin/alerts/report', { kind: k, send, channelId: send ? $('#rCh', el).value : undefined });
-      if (my !== seq || k !== kind) { if (send) toast('报表已发送'); return; }
-      box.innerHTML = r.doc ? cardPreview(r) : `<div class="rp-t">${esc(r.title)}${r.empty ? ' <span class="pill neutral">无费用，定时发送时将跳过</span>' : ''}</div>${r.lines.map(l => (l === '' ? '<div class="rp-gap"></div>' : l.startsWith('#') ? `<div class="rp-h">${esc(l.replace(/^#+\s*/, ''))}</div>` : `<div class="rp-l">${esc(l).replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')}</div>`)).join('')}`;
-      if (send) toast(`报表已发送${STYLE_NOTE[r.style] || ''}`, '', 4500);
+      const r = await http('POST', '/api/admin/alerts/report', { kind: k, send, channelId: chId });
+      if (my !== seq || k !== kind || chId !== ($('#rCh', el).value || undefined)) { if (send) toast('报表已发送'); return; }
+      const scopeNote = r.scope ? `<div class="hint" style="margin:0 0 8px">${icon('filter')} 该渠道限定推送范围：${esc(r.scope)}，以下为范围内的报表</div>` : '';
+      box.innerHTML = scopeNote + (r.doc ? cardPreview(r) : `<div class="rp-t">${esc(r.title)}${r.empty ? ' <span class="pill neutral">无费用，定时发送时将跳过</span>' : ''}</div>${r.lines.map(l => (l === '' ? '<div class="rp-gap"></div>' : l.startsWith('#') ? `<div class="rp-h">${esc(l.replace(/^#+\s*/, ''))}</div>` : `<div class="rp-l">${esc(l).replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')}</div>`)).join('')}`);
+      if (send) toast(`报表已发送${r.scope ? `（范围：${r.scope}）` : ''}${STYLE_NOTE[r.style] || ''}`, '', 4500);
     } catch (ex) { if (send) toast(ex.message, 'err', 5000); else if (my === seq) box.innerHTML = `<div class="bad-text">${esc(ex.message)}</div>`; }
   };
   el.querySelectorAll('[data-rk]').forEach(b => b.onclick = () => { kind = b.dataset.rk; el.querySelectorAll('[data-rk]').forEach(x => x.setAttribute('aria-pressed', String(x === b))); preview(); });
+  $('#rCh', el).onchange = () => preview();
   // 事件分发结束后 e.currentTarget 会变为 null：按钮必须在 await 之前取得
   $('#rSend', el).onclick = async e => { const btn = e.currentTarget; btn.disabled = true; try { await preview(true); } finally { btn.disabled = false; } };
   preview();
@@ -787,6 +790,9 @@ function editChannel(al, c, onSave) {
   const sel = { type: cur.scope?.type || 'all', ids: { key: new Set(cur.scope?.type === 'key' ? cur.scope.ids : []), ws: new Set(cur.scope?.type === 'ws' ? cur.scope.ids : []) } };
   const segScope = `<div class="seg sm" role="group" aria-label="推送范围">${[['all', '全部'], ['ws', '按业务空间'], ['key', '按 API Key']].map(([k, l]) => `<button type="button" data-scope-type="${k}" aria-pressed="${sel.type === k}">${l}</button>`).join('')}</div>`;
   const group = g => Object.entries(evs).filter(([, e]) => e.group === g).map(([k, e]) => `<label class="chk"><input type="checkbox" name="ev_${k}" ${cur.events[k] ? 'checked' : ''}> ${esc(e.label)}</label>`).join('');
+  // 未设置 PUBLIC_URL 时复选框为禁用状态（表单数据中不包含禁用的字段）：保持渠道原有的设置，
+  // 否则临时去掉 PUBLIC_URL 期间编辑渠道会悄悄关闭“附带交互报表链接”，恢复后也不再附带
+  const shareOf = fd => (al.shareAvailable ? fd.get('share') === 'on' : !!cur.share);
   return modal({
     title: isNew ? '添加通知渠道' : `编辑通知渠道 · ${cur.name}`, submit: '保存', wide: true,
     body: `<div class="form-grid">
@@ -844,7 +850,7 @@ function editChannel(al, c, onSave) {
       $('[data-test]', form).onclick = async e => {
         const fd = new FormData(form), btn = e.currentTarget;
         btn.disabled = true;
-        try { await http('POST', '/api/admin/alerts/test', { channelId: c?.id, type: fd.get('type'), webhook: fd.get('webhook') || '', secret: fd.get('secret') || '', atAll: fd.get('atAll') === 'on', atMobiles: fd.get('atMobiles') || '', scope: form._scope(), share: fd.get('share') === 'on' }); toast('测试消息已发送，请在群中查看'); }
+        try { const r = await http('POST', '/api/admin/alerts/test', { channelId: c?.id, type: fd.get('type'), webhook: fd.get('webhook') || '', secret: fd.get('secret') || '', atAll: fd.get('atAll') === 'on', atMobiles: fd.get('atMobiles') || '', scope: form._scope(), share: shareOf(fd) }); toast(`测试消息已发送${STYLE_NOTE[r.style] || ''}，请在群中查看`, '', 5000); }
         catch (ex) { toast(ex.message, 'err', 5000); } finally { btn.disabled = false; }
       };
     },
@@ -858,7 +864,7 @@ function editChannel(al, c, onSave) {
         id: c?.id, name: String(fd.get('name') || '').trim() || al.types[type].label, type, enabled: fd.get('enabled') === 'on',
         events: Object.fromEntries(Object.keys(evs).map(k => [k, fd.get('ev_' + k) === 'on'])), atAll: fd.get('atAll') === 'on',
         atMobiles: String(fd.get('atMobiles') || '').split(/[,，\s]+/).filter(Boolean), webhook, secret: String(fd.get('secret') || '').trim(), clearSecret: fd.get('clearSecret') === 'on',
-        scope: form._scope(), share: fd.get('share') === 'on',
+        scope: form._scope(), share: shareOf(fd),
       };
       if (ch.scope.type !== 'all' && !ch.scope.ids.length) throw new Error(`请至少选择一个${ch.scope.type === 'key' ? ' API Key' : '业务空间'}，或将推送范围改为“全部”`);
       await onSave(ch);
