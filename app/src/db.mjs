@@ -217,6 +217,43 @@ export class Store {
         CREATE INDEX IF NOT EXISTS idx_oplog_cat ON op_log(category, ts);
         PRAGMA user_version = 6;`);
     }
+    if (v < 7) {
+      // v7：只读分享链接（报表 / 告警消息中的“查看交互报表”）。只保存令牌的 SHA-256，不保存令牌本身
+      this.db.exec(`CREATE TABLE IF NOT EXISTS share_links (id TEXT PRIMARY KEY, title TEXT NOT NULL, spec TEXT NOT NULL, scope TEXT,
+          channel_id TEXT, channel_name TEXT, event TEXT, created_by TEXT NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
+          revoked_at INTEGER, revoked_by TEXT, views INTEGER NOT NULL DEFAULT 0, last_view_at INTEGER, last_view_ip TEXT);
+        CREATE INDEX IF NOT EXISTS idx_share_created ON share_links(created_at);
+        PRAGMA user_version = 7;`);
+    }
+  }
+
+  /* ---------------- 只读分享链接 ---------------- */
+  addShare(s) {
+    this.q(`INSERT INTO share_links(id, title, spec, scope, channel_id, channel_name, event, created_by, created_at, expires_at)
+      VALUES(?,?,?,?,?,?,?,?,?,?)`).run(s.id, s.title, JSON.stringify(s.spec), s.scope ? JSON.stringify(s.scope) : null, s.channelId || null, s.channelName || null, s.event || null, s.createdBy, s.createdAt, s.expiresAt);
+  }
+  getShare(id) {
+    const r = this.q('SELECT * FROM share_links WHERE id = ?').get(id);
+    if (!r) return null;
+    try { r.spec = JSON.parse(r.spec); r.scope = r.scope ? JSON.parse(r.scope) : null; } catch { return null; }
+    return r;
+  }
+  touchShare(id, ip) { this.q('UPDATE share_links SET views = views + 1, last_view_at = ?, last_view_ip = ? WHERE id = ?').run(Date.now(), ip || null, id); }
+  /** 列表（不含令牌）：status = active（有效）/ expired / revoked / ''（全部） */
+  listShares({ status = '', limit = 300 } = {}) {
+    const now = Date.now(), where = status === 'active' ? 'WHERE revoked_at IS NULL AND expires_at > ?' : status === 'expired' ? 'WHERE revoked_at IS NULL AND expires_at <= ?' : status === 'revoked' ? 'WHERE revoked_at IS NOT NULL AND ? > 0' : 'WHERE ? > 0';
+    return this.q(`SELECT id, title, spec, scope, channel_id, channel_name, event, created_by, created_at, expires_at, revoked_at, revoked_by, views, last_view_at, last_view_ip
+      FROM share_links ${where} ORDER BY created_at DESC LIMIT ?`).all(now, Math.min(1000, Math.max(1, limit))).map(r => ({ ...r, spec: JSON.parse(r.spec), scope: r.scope ? JSON.parse(r.scope) : null }));
+  }
+  shareStats() {
+    const now = Date.now();
+    return this.q('SELECT COUNT(*) AS total, SUM(CASE WHEN revoked_at IS NULL AND expires_at > ? THEN 1 ELSE 0 END) AS active, COALESCE(SUM(views), 0) AS views FROM share_links').get(now);
+  }
+  /** 撤销：id 为 null 时撤销全部有效链接；返回撤销的条数 */
+  revokeShares(id, by) {
+    const now = Date.now();
+    if (id) return Number(this.q('UPDATE share_links SET revoked_at = ?, revoked_by = ? WHERE id = ? AND revoked_at IS NULL').run(now, by, id).changes);
+    return Number(this.q('UPDATE share_links SET revoked_at = ?, revoked_by = ? WHERE revoked_at IS NULL AND expires_at > ?').run(now, by, now).changes);
   }
 
   /* ---------------- 系统日志 ---------------- */
@@ -371,6 +408,8 @@ export class Store {
     // 操作日志保留 OPLOG_DAYS 天（默认 180），且最多 100 万条
     this.q('DELETE FROM op_log WHERE ts < ?').run(Date.now() - (this.opLogDays || 180) * 864e5);
     this.q('DELETE FROM op_log WHERE id <= (SELECT id FROM op_log ORDER BY id DESC LIMIT 1 OFFSET 1000000)').run();
+    // 分享链接：过期或撤销 90 天后删除记录
+    this.q('DELETE FROM share_links WHERE expires_at < ? OR revoked_at < ?').run(Date.now() - 90 * 864e5, Date.now() - 90 * 864e5);
     this.optimize();
   }
 
@@ -702,10 +741,10 @@ export class Store {
     return this.q("SELECT period AS day, SUM(pretax) AS cost FROM bill_lines WHERE granularity = 'D' AND period >= ? AND period <= ? GROUP BY period").all(from, to).map(r => ({ day: r.day, cost: r.cost || 0 }));
   }
   monthByKey(cycle) {
-    return this.q(`SELECT COALESCE(api_key_id, '') AS id, provider, SUM(pretax) AS cost, SUM(gross) AS gross FROM bill_lines WHERE granularity = 'M' AND period = ? GROUP BY COALESCE(api_key_id, ''), provider`).all(cycle);
+    return this.q(`SELECT COALESCE(api_key_id, '') AS id, provider, SUM(pretax) AS cost, SUM(gross) AS gross, SUM(COALESCE(tokens, 0)) AS tokens FROM bill_lines WHERE granularity = 'M' AND period = ? GROUP BY COALESCE(api_key_id, ''), provider`).all(cycle);
   }
   monthByModel(cycle) {
-    return this.q(`SELECT model, SUM(pretax) AS cost FROM bill_lines WHERE granularity = 'M' AND period = ? GROUP BY model`).all(cycle);
+    return this.q(`SELECT model, SUM(pretax) AS cost, SUM(COALESCE(tokens, 0)) AS tokens FROM bill_lines WHERE granularity = 'M' AND period = ? GROUP BY model`).all(cycle);
   }
   /**
    * 数据版本指纹：账单、用量、Key/空间元数据、标签、预算任一变化都会改变，用于 /api/data 的 ETag 与前端轮询判断是否需要重新加载。

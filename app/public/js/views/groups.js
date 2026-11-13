@@ -460,6 +460,7 @@ const CHG = { create: ['新增', 'good'], update: ['修改', 'warn'], delete: ['
 async function loadChanges(v, wsId, memberIds) {
   const el = $('#gdChanges', v);
   if (!el) return;
+  if (state.share) { el.innerHTML = '<div class="nodata">只读分享视图不包含变更记录</div>'; return; }
   try {
     if (!state.changes) state.changes = (await http('GET', '/api/changes')).changes;
     const list = state.changes.filter(c => (c.entity === 'workspace' && c.entity_id === wsId) || (c.entity === 'api_key' && memberIds.has(c.entity_id))).slice(0, 30);

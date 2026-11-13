@@ -32,6 +32,14 @@ const ROUTES = {
   admin: { label: '系统管理', icon: 'settings', sub: '云厂商接入、数据同步、预算与告警、用户、品牌与备份、安全审计、操作日志、系统日志', view: Admin, admin: true, noData: true, noPeriod: true, arg: true },
 };
 const NAV = [{ sec: '成本分析' }, 'overview', 'keys', 'models', 'workspaces', 'pivot', 'detail', { sec: '治理' }, 'governance', 'changes', { sec: '系统', admin: true }, 'admin'];
+/**
+ * 只读分享模式（/share）：share-boot.js 用链接令牌换取分享会话后加载本模块。统计周期与推送范围由服务端固定，
+ * 只提供费用分析页面（无治理、变更记录、系统管理、同步、用户菜单），不上报操作日志、不轮询状态、不改写本地保存的周期
+ */
+const SHARE = window.__TT_SHARE__ || null;
+const SHARE_ROUTES = new Set(['overview', 'keys', 'key', 'models', 'workspaces', 'group', 'pivot', 'detail']);
+const SHARE_NAV = [{ sec: '成本分析' }, 'overview', 'keys', 'models', 'workspaces', 'pivot', 'detail'];
+if (SHARE) { state.share = SHARE; document.documentElement.classList.add('share-mode'); }
 let route = { name: 'overview', arg: '' };
 
 /* ---------------- 路由 ----------------
@@ -52,6 +60,7 @@ function parseHash(h = location.hash) {
   // hasOwn：#/constructor、#/toString 等原型属性名不能被当成页面
   const r = Object.hasOwn(ROUTES, name) ? { name, arg: ROUTES[name].arg ? arg : '' } : { name: 'overview', arg: '' };
   if (ROUTES[r.name].admin && state.me && !isAdmin()) return { name: 'overview', arg: '' };
+  if (SHARE && !SHARE_ROUTES.has(r.name)) return { name: 'overview', arg: '' };
   return r;
 }
 const argPath = (name, arg) => {
@@ -84,7 +93,7 @@ function applyQuery() {
   if (query == null) return false;
   const sp = new URLSearchParams(query), r = ROUTES[route.name];
   if (r.filters) for (const k of FQ_KEYS) { const v = sp.get(k); ui.f[k] = v == null ? (k === 'channel' ? '__all' : '') : v.slice(0, 300); }
-  if (r.noPeriod || !state.today) return false;
+  if (r.noPeriod || !state.today || SHARE) return false; // 分享链接的周期固定
   const p = ui.period, before = periodKey(p), snap = JSON.stringify(p), D = /^\d{4}-\d{2}-\d{2}$/;
   const c = sp.get('cycle'), pr = sp.get('preset'), fr = sp.get('from'), to = sp.get('to');
   if (c && /^\d{4}-(0[1-9]|1[0-2])$/.test(c) && c <= state.today.slice(0, 7)) { p.mode = 'month'; p.cycle = c; }
@@ -169,6 +178,7 @@ app.openModel = (m, scope) => Models.openModel(m, scope);
 app.openDay = (d, scope) => Day.openDay(d, scope);
 /** 切换统计周期：url='push'（下钻，可后退）| 'replace'（顶栏切换）| false（随后由 app.go 写入地址） */
 app.setPeriod = (p, { url = 'push' } = {}) => {
+  if (SHARE) { toast(`分享链接的统计周期固定为 ${SHARE.periodLabel}`, '', 3000); return; }
   draft = null;
   Object.assign(ui.period, p); savePeriod(); renderPeriod();
   if (url) commitPeriodUrl(url === 'replace');
@@ -200,7 +210,7 @@ async function loadData({ silent = false, background = false } = {}) {
   const q = p.mode === 'month' ? `mode=month&cycle=${encodeURIComponent(p.cycle)}` : `mode=range&from=${encodeURIComponent(p.from)}&to=${encodeURIComponent(p.to)}`;
   const errs = [];
   let d = null, failed = null;
-  try { d = await http('GET', '/api/data?' + q, undefined, { background }); }
+  try { d = SHARE ? await shareData() : await http('GET', '/api/data?' + q, undefined, { background }); }
   catch (e) { failed = e; if (seq === loadSeq) errs.push({ level: 'err', title: '数据加载失败', why: e.message }); }
   if (seq !== loadSeq) return; // 已有更新的请求（如用户连续切换账期），丢弃过期响应
   if (d) { applyData(d); lastGoodPeriod = JSON.parse(JSON.stringify(ui.period)); lastGoodToday = state.today; }
@@ -223,6 +233,33 @@ async function loadData({ silent = false, background = false } = {}) {
   render(errs);
 }
 
+/** 分享数据；分享会话过期（如服务重启）时用本标签页保存的令牌重新换取一次，链接失效时显示失效页 */
+async function shareData() {
+  try { return await http('GET', '/api/share/data'); }
+  catch (e) {
+    if (e.status === 401) {
+      let t = null;
+      try { t = sessionStorage.getItem('bc.share'); } catch { /* ignore */ }
+      if (t) {
+        const r = await fetch('/api/share/open', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: t }) }).catch(() => null);
+        if (r?.ok) return http('GET', '/api/share/data');
+        if (r) { const j = await r.json().catch(() => ({})); Object.assign(e, { status: r.status, code: j.code, message: j.error || e.message }); }
+      }
+    }
+    const TITLE = { expired: '链接已过期', revoked: '链接已被撤销', limited: '尝试次数过多' };
+    if ([401, 404, 410, 429].includes(e.status)) window.__TT_SHARE_FAIL__?.(TITLE[e.code] || (e.status === 401 ? '分享会话已过期' : '链接已失效'), e.message + (e.status === 401 ? '。请从消息中重新打开链接。' : ''));
+    throw e;
+  }
+}
+/** 分享模式的页面外壳：品牌、侧栏说明卡片 */
+function renderShareChrome() {
+  const b = SHARE.brand || {};
+  applyAccent(b.accent);
+  $('#brandName').textContent = b.name || '大模型费用分析';
+  $('#brandSub').textContent = '只读分享';
+  $('#sideFoot').innerHTML = `<div class="side-card"><b>只读分享</b><br>${esc(SHARE.title)}<br>周期：${esc(SHARE.periodLabel)}<br>范围：${esc(SHARE.scopeLabel)}<br>有效期至 ${esc(fmtTime(SHARE.expiresAt))}</div>`;
+}
+
 /* ---------------- 渲染 ---------------- */
 let refocus = null;
 /**
@@ -233,7 +270,7 @@ function render(extraNotices = [], { layoutOnly = false } = {}) {
   route = parseHash();
   const r = ROUTES[route.name];
   renderNav(); renderTitle(r); renderPeriod(); renderSyncBtn(); renderUser(); renderSideFoot();
-  $('#periodBox').hidden = !!r.noPeriod;
+  $('#periodBox').hidden = !!r.noPeriod || !!SHARE;
   $('#btnRefresh').hidden = !!r.noPeriod;
   $('#note').hidden = !!r.noData;
   renderFilters(r);
@@ -271,6 +308,7 @@ function flushOps(keepalive = false) {
   if (opQueue.length) opTimer = setTimeout(flushOps, 1000);
 }
 app.track = (action, target, detail = null) => {
+  if (SHARE) return; // 分享访问由服务端在打开链接时记录
   opQueue.push({ action, target: String(target || '').slice(0, 200), detail, route: location.hash.slice(0, 120), at: Date.now() });
   if (opQueue.length >= 10) flushOps(); else if (!opTimer) opTimer = setTimeout(flushOps, 5000);
 };
@@ -334,7 +372,7 @@ function renderNav() {
   try { govCount = state.data ? Gov.computeFindings().filter(f => f.severity !== 'low').length : 0; } catch { /* ignore */ }
   const badge = { keys: state.apiKeys.size || '', governance: govCount || '' };
   const active = ROUTES[route.name].nav || route.name;
-  $('#nav').innerHTML = NAV.map(n => {
+  $('#nav').innerHTML = (SHARE ? SHARE_NAV : NAV).map(n => {
     if (typeof n === 'object') return n.admin && !isAdmin() ? '' : `<div class="nav-sec">${n.sec}</div>`;
     const r = ROUTES[n];
     if (r.admin && !isAdmin()) return '';
@@ -363,7 +401,7 @@ function renderSideFoot() {
 
 /* ---------------- 周期 ---------------- */
 /** 保存周期；current 记录所选账期当时是否为本月：下次打开（跨月后）仍回到“本月”，而不是停留在旧月份 */
-function savePeriod() { LS.set('bc.period', { ...ui.period, current: ui.period.mode === 'month' && !!state.today && ui.period.cycle === state.today.slice(0, 7) }); }
+function savePeriod() { if (SHARE) return; LS.set('bc.period', { ...ui.period, current: ui.period.mode === 'month' && !!state.today && ui.period.cycle === state.today.slice(0, 7) }); }
 function renderPeriod() {
   const p = ui.period;
   $$('#modeSeg button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.mode === p.mode)));
@@ -579,6 +617,7 @@ function resolveConflicts(changed) {
 /* ---------------- 提示 ---------------- */
 function renderNotices(r, extra) {
   const list = extra.slice();
+  if (SHARE) list.push({ level: 'info', title: `只读分享 · ${SHARE.title}`, why: `统计周期 ${SHARE.periodLabel} · 范围：${SHARE.scopeLabel} · 有效期至 ${fmtTime(SHARE.expiresAt)}。无需登录即可查看，请勿转发给无关人员。` });
   const s = state.status;
   const demoHidden = (() => { try { return sessionStorage.getItem('bc.demoHide') === '1'; } catch { return false; } })();
   if (s?.demo && !demoHidden) list.push({ dismiss: 'demo', level: 'info', title: '演示模式 · 当前为随机生成的演示数据', why: isAdmin() ? '在“系统管理 → 阿里云接入 / 腾讯云接入”中配置真实访问密钥后，演示数据会被自动清除并开始同步真实账单。' : '演示数据仅用于体验功能，金额与 Key 均为虚构。', go: isAdmin() ? '#/admin/aliyun' : null });
@@ -895,18 +934,21 @@ async function poll() {
 }
 for (const id of ['#drawer', '#dlgPwd']) $(id).addEventListener('close', () => { if (pendingReload) setTimeout(poll, 50); });
 async function start() {
-  await app.refreshStatus();
-  lastBillsSeen = state.status?.sync?.bills.changedAt || 0;
-  const cur = state.today.slice(0, 7);
-  if (!ui.period.cycle || ui.period.cycle > cur || (ui.period.mode === 'month' && ui.period.current)) ui.period.cycle = cur;
-  if (ui.period.mode === 'range' && ui.period.preset !== 'custom') applyPreset(ui.period.preset);
-  // 本地保存的自定义范围无效（如超过 400 天）时改回近 30 天，避免每次打开都加载失败
-  if (ui.period.mode === 'range' && ui.period.preset === 'custom' && rangeError(ui.period.from, ui.period.to)) applyPreset('30');
+  if (!SHARE) {
+    await app.refreshStatus();
+    lastBillsSeen = state.status?.sync?.bills.changedAt || 0;
+    const cur = state.today.slice(0, 7);
+    if (!ui.period.cycle || ui.period.cycle > cur || (ui.period.mode === 'month' && ui.period.current)) ui.period.cycle = cur;
+    if (ui.period.mode === 'range' && ui.period.preset !== 'custom') applyPreset(ui.period.preset);
+    // 本地保存的自定义范围无效（如超过 400 天）时改回近 30 天，避免每次打开都加载失败
+    if (ui.period.mode === 'range' && ui.period.preset === 'custom' && rangeError(ui.period.from, ui.period.to)) applyPreset('30');
+  }
   route = parseHash();
   applyQuery(); // 分享链接 / 书签中的周期与筛选优先
   canonicalize();
   render();
   await loadData();
+  if (SHARE) return; // 分享页不轮询同步状态（数据固定为链接的周期，可手动刷新）
   setInterval(poll, 20_000);
   document.addEventListener('visibilitychange', () => { if (!document.hidden) poll(); });
 }
@@ -915,6 +957,14 @@ let booting = 0;
   const my = ++booting; // 自动重试与“立即重试”只保留最新的一次启动
   applyTheme(getTheme());
   if (LS.get('bc.collapsed', false)) $('#app').classList.add('collapsed');
+  if (SHARE) {
+    state.me = { username: '只读分享', role: 'share' }; state.csrf = ''; state.today = SHARE.today; state.tz = SHARE.tz;
+    const p = SHARE.period || {};
+    Object.assign(ui.period, p.mode === 'range' ? { mode: 'range', preset: 'custom', from: p.from, to: p.to, current: false } : { mode: 'month', cycle: p.cycle, current: false });
+    renderShareChrome();
+    await start();
+    return;
+  }
   try {
     const me = await http('GET', '/api/me');
     state.me = me.user; state.csrf = me.csrf; state.today = me.today; state.tz = me.tz;

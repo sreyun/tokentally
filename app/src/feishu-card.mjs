@@ -26,7 +26,8 @@ function deltaMd(d) {
   if (!d) return '';
   const arrow = d.dir === 'up' ? '↑ ' : d.dir === 'down' ? '↓ ' : '';
   const text = d.dir ? String(d.text).replace(/^[+−-]/, '') : d.text;
-  return `${font('grey', safe(d.label))} ${font(COLOR[d.dir] || 'grey', arrow + safe(text))}`;
+  // 用量（neutral）的涨跌不代表好坏：统一用蓝色
+  return `${font('grey', safe(d.label))} ${font(d.neutral ? (d.dir ? 'blue' : 'grey') : COLOR[d.dir] || 'grey', arrow + safe(text))}`;
 }
 
 /** 指标面板：灰底分栏，每栏为“标签 / 数值 / 说明”；数值较长时用小一号字体，窄屏下不折行 */
@@ -85,15 +86,16 @@ function chartEl(c) {
 
 /**
  * 生成卡片；内容超出上限时返回 null（调用方改用简洁卡片）。
- * doc：{ tags:[{text, level}], kpis:[{label, value, sub, delta, tone}], notes:[], chart:{title, values, colors}, sections:[{title, rows|items}], items:[{text, body, tag, level}] }
+ * doc：{ tags:[{text, level}], kpis / usage:[{label, value, sub, delta, tone}], notes:[], chart / tokenChart:{title, values, colors}, sections:[{title, rows|items}], items:[{text, body, tag, level}] }
  */
-export function feishuCard({ title, subtitle, level = 'info', doc = {}, footer, link, links = [], mentions, chart = true }) {
+export function feishuCard({ title, subtitle, level = 'info', doc = {}, footer, link, links = [], buttons = null, mentions, chart = true }) {
   const E = [];
   if (doc.kpis?.length) E.push(kpiPanel(doc.kpis));
+  if (doc.usage?.length) E.push(kpiPanel(doc.usage));
   for (const n of doc.notes || []) E.push(md(font('grey', safe(n)), { text_size: 'notation' }));
   const at = mentions?.all ? '\n<at id=all></at>' : '';
   if (doc.items?.length) E.push(md(itemsMd(doc.items, 16000, at)));
-  if (chart && doc.chart?.values?.length >= 3) E.push(md(`**${safe(doc.chart.title)}**`), chartEl(doc.chart));
+  for (const c of chart ? [doc.chart, doc.tokenChart] : []) if (c?.values?.length >= 3) E.push(md(`**${safe(c.title)}**`), chartEl(c));
   const secs = (doc.sections || []).filter(s => s.rows?.length || s.items?.length);
   if (secs.length && E.length) E.push({ tag: 'hr' });
   for (const s of secs) {
@@ -103,7 +105,7 @@ export function feishuCard({ title, subtitle, level = 'info', doc = {}, footer, 
   }
   if (at && !doc.items?.length) E.push(md(at.trim()));
   E.push({ tag: 'hr' });
-  const btns = [link && { text: '查看详情', url: link, type: 'primary' }, ...links].filter(Boolean).slice(0, 3);
+  const btns = (buttons || [link && { text: '查看详情', url: link, type: 'primary' }, ...links]).filter(Boolean).slice(0, 3);
   if (btns.length) E.push({ tag: 'action', layout: 'flow', actions: btns.map(b => ({ tag: 'button', text: { tag: 'plain_text', content: b.text }, type: b.type || 'default', url: b.url })) });
   E.push({ tag: 'note', elements: [{ tag: 'plain_text', content: safe(footer) }] });
   const header = { template: TEMPLATE[level] || 'blue', title: { tag: 'plain_text', content: safe(title) } };

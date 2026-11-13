@@ -92,6 +92,7 @@ export const I = {
   terminal: '<path d="M4 17l6-5-6-5M12 19h8"/>',
   send: '<path d="M22 2L11 13M22 2l-7 20-4-9-9-4z"/>',
   mail: '<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 7l9 6 9-6"/>',
+  link: '<path d="M10 13a5 5 0 0 0 7.07 0l3-3a5 5 0 0 0-7.07-7.07l-1.5 1.5"/><path d="M14 11a5 5 0 0 0-7.07 0l-3 3a5 5 0 0 0 7.07 7.07l1.5-1.5"/>',
   copy: '<rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1"/>',
   chevL: '<path d="M15 6l-6 6 6 6"/>', chevR: '<path d="M9 6l6 6-6 6"/>',
   cloud: '<path d="M7 18a5 5 0 0 1-.9-9.9A6 6 0 0 1 17.7 9 4.5 4.5 0 0 1 17.5 18z"/>',
@@ -142,7 +143,7 @@ export const PROVIDERS = { aliyun: '阿里云', tencent: '腾讯云' };
 /** 当前数据中涉及多个云厂商时才显示云厂商维度，避免单云用户看到无意义的筛选 */
 export const multiCloud = () => state.providers.length > 1;
 export const provTag = (p, force = false) => (p && (force || multiCloud()) ? `<span class="prov ${esc(p)}" title="${esc(PROVIDERS[p] || p)}">${esc(PROVIDERS[p] || p)}</span>` : '');
-export const brandName = () => state.status?.branding?.name || '大模型费用分析';
+export const brandName = () => state.status?.branding?.name || state.share?.brand?.name || '大模型费用分析';
 /** 是否有任一 Key 设置了成本中心 / 负责人 */
 export const hasTags = () => [...state.apiKeys.values()].some(k => k.costCenter || k.owner);
 export const NO_CC = '__nocc__';
@@ -195,7 +196,7 @@ export async function http(method, url, body, { background = false } = {}) {
   if (body !== undefined) headers['Content-Type'] = 'application/json';
   if (method !== 'GET') headers['X-CSRF-Token'] = state.csrf;
   const res = await fetch(url, { method, headers, body: body !== undefined ? JSON.stringify(body) : undefined, credentials: 'same-origin' });
-  if (res.status === 401) {
+  if (res.status === 401 && !state.share) {
     // 把原因（会话过期 / 被强制退出）带到登录页显示
     const j = await res.json().catch(() => ({}));
     try { if (state.me) sessionStorage.setItem('bc.loginMsg', j.error || '会话已过期，请重新登录'); } catch { /* ignore */ }

@@ -255,7 +255,11 @@ export function renderOverviewHtml(spec, { store, today, link = '', scope = null
     '', '模型费用排行：', ...modelItems.slice(0, 10).map((a, i) => `${i + 1}. ${a.key} ${yuan(a.cost)}（${pct(a.cost, cur.cost)}）`)].join('\n');
   const fullLabel = inScope ? `${label} · ${scope.label || '指定范围'}` : label;
   return { html, text: (inScope ? `范围：${scope.label || ''}\n` : '') + text, label: fullLabel, total: cur.cost,
-    stats: { cost: cur.cost, prevCost: pv.cost, prevLabel, forecast, budget, label, topKeys: keyItems.slice(0, 5).map(a => ({ name: keyName(a.key), cost: a.cost })), topModels: modelItems.slice(0, 3).map(a => ({ name: a.key, cost: a.cost })) } };
+    stats: { cost: cur.cost, prevCost: pv.cost, prevLabel, forecast, budget, label, topKeys: keyItems.slice(0, 5).map(a => ({ name: keyName(a.key), cost: a.cost })), topModels: modelItems.slice(0, 3).map(a => ({ name: a.key, cost: a.cost })),
+      // Token 用量（报表消息中的用量指标与 Token 排行）
+      tokens: cur.tokens, prevTokens: pv.tokens,
+      tokenKeys: [...byKey.values()].filter(a => a.tokens > 0).sort((a, b) => b.tokens - a.tokens).slice(0, 5).map(a => ({ name: keyName(a.key), tokens: a.tokens })),
+      tokenModels: [...byModel.values()].filter(a => a.tokens > 0).sort((a, b) => b.tokens - a.tokens).slice(0, 3).map(a => ({ name: a.key, tokens: a.tokens })) } };
 }
 
 /**
@@ -279,7 +283,8 @@ export function linesToHtml(lines) {
 }
 
 /** 整封邮件：标题栏 + 消息内容 + 成本概览 + 页脚 */
-export function renderEmail({ brand, title, level = 'info', lines, overview, footer }) {
+export function renderEmail({ brand, title, level = 'info', lines, overview, footer, share = null }) {
+  const shareHtml = share?.url ? `<div style="margin:12px 0 2px"><a href="${esc(share.url)}" style="display:inline-block;background:#2563eb;color:#ffffff;text-decoration:none;font-size:13px;font-weight:600;padding:8px 16px;border-radius:8px">在浏览器中查看交互报表</a><span style="font-size:12px;color:#64748b;margin-left:10px">${esc(share.days)} 天内有效，无需登录；请勿转发给无关人员</span></div>` : '';
   const color = { bad: '#d03b3b', warn: '#eda100', good: '#0ca30c' }[level] || '#2563eb';
   const html = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)}</title></head>
 <body style="margin:0;padding:0;background:#f3f5f9;font-family:-apple-system,'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;color:#0f172a">
@@ -287,10 +292,10 @@ export function renderEmail({ brand, title, level = 'info', lines, overview, foo
 <table role="presentation" cellpadding="0" cellspacing="0" width="100%" style="max-width:760px"><tr><td>
   <div style="padding:4px 2px 12px;font-size:13px;color:#64748b"><b style="color:#0f172a;font-size:15px">${esc(brand)}</b> · 成本概览邮件</div>
   <div style="background:#ffffff;border:1px solid #e2e8f0;border-left:4px solid ${color};border-radius:12px;padding:14px 18px;margin:0 0 14px">
-    <div style="font-size:17px;font-weight:700;color:#0f172a;margin-bottom:6px">${esc(title)}</div>${linesToHtml(lines)}</div>
+    <div style="font-size:17px;font-weight:700;color:#0f172a;margin-bottom:6px">${esc(title)}</div>${linesToHtml(lines)}${shareHtml}</div>
   ${overview?.html ? `<div style="font-size:14px;font-weight:700;color:#334155;margin:18px 2px 10px">成本概览 · ${esc(overview.label)}</div>${overview.html}` : ''}
   <div style="font-size:11px;color:#94a3b8;line-height:1.7;padding:10px 2px 0">${esc(footer || '')}<br>金额口径：应付金额 = 原价 − 折扣 − 优惠券 / 代金券抵扣（税前），与费用中心账单一致。此邮件由系统自动发送，请勿直接回复。</div>
 </td></tr></table></td></tr></table></body></html>`;
-  const text = [title, '', ...(lines || []).map(l => l.replace(/\*\*/g, '').replace(/^#+\s*/, '')), '', overview?.text ? `—— 成本概览 · ${overview.label} ——\n${overview.text}` : '', '', footer || ''].join('\n');
+  const text = [title, '', ...(lines || []).map(l => l.replace(/\*\*/g, '').replace(/^#+\s*/, '')), '', overview?.text ? `—— 成本概览 · ${overview.label} ——\n${overview.text}` : '', share?.url ? `交互报表（${share.days} 天内有效，无需登录）：${share.url}` : '', '', footer || ''].join('\n');
   return { html, text };
 }

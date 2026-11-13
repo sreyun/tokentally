@@ -12,7 +12,7 @@ export const ACT = {
   'aliyun.calls.secret': '修改调用次数 Prometheus 地址 / 认证', 'aliyun.calls.secret.fail': '修改 Prometheus 认证验证失败', 'aliyun.calls.secret.lock': '修改 Prometheus 认证多次验证失败', 'aliyun.calls.sync': '同步阿里云调用次数',
   'tencent.key.update': '更新腾讯云密钥', 'tencent.key.update.fail': '更新腾讯云密钥验证失败', 'tencent.key.update.lock': '更新腾讯云密钥多次验证失败', 'tencent.key.bootstrap': '导入腾讯云密钥', 'tencent.test': '测试腾讯云连接',
   'sync.trigger': '触发同步', 'budgets.update': '修改预算', 'keytags.update': '修改成本中心 / 负责人', 'alert.update': '修改告警设置', 'alert.test': '发送测试消息', 'alert.test.fail': '测试消息发送失败',
-  'alert.sent': '告警 / 报表已发送', 'alert.report.send': '手动发送报表', 'backup.create': '创建备份', 'backup.download': '下载备份', 'backup.download.fail': '下载备份验证失败', 'backup.download.lock': '下载备份多次验证失败', 'demo.clear': '清除演示数据',
+  'alert.sent': '告警 / 报表已发送', 'alert.report.send': '手动发送报表', 'backup.create': '创建备份', 'backup.download': '下载备份', 'backup.download.fail': '下载备份验证失败', 'backup.download.lock': '下载备份多次验证失败', 'demo.clear': '清除演示数据', 'share.create': '生成分享链接', 'share.revoke': '撤销分享链接',
   'network.update': '修改客户端 IP 来源', 'network.update.fail': '修改客户端 IP 来源验证失败', 'network.update.lock': '修改客户端 IP 来源多次验证失败', 'user.unlock.cli': '命令行解除锁定',
   'smtp.update': '修改邮件服务器（SMTP）', 'smtp.update.fail': '修改邮件服务器验证失败', 'smtp.update.lock': '修改邮件服务器多次验证失败', 'smtp.test': '发送测试邮件', 'smtp.test.fail': '测试邮件发送失败',
   'user.promote.fail': '设为管理员验证失败', 'user.promote.lock': '设为管理员多次验证失败', 'user.reset.fail': '重置密码验证失败', 'user.reset.lock': '重置密码多次验证失败', 'user.create.fail': '创建管理员验证失败', 'user.create.lock': '创建管理员多次验证失败',
@@ -23,7 +23,7 @@ export const actBad = a => /(^|\.)(fail|lock)$/.test(a);
 
 const PROV = { aliyun: '阿里云', tencent: '腾讯云' };
 const SYNC_KIND = { meta: 'API Key 与业务空间', bills: '账单' };
-const ROLE = { admin: '管理员', viewer: '只读用户' };
+const ROLE = { admin: '管理员', viewer: '只读用户', share: '分享访客' };
 const CH_TYPE = { dingtalk: '钉钉', feishu: '飞书', wecom: '企业微信', generic: '通用 Webhook', email: '邮件' };
 const SMTP_FIELD = { host: 'SMTP 服务器', port: '端口', security: '加密方式', username: '用户名', fromAddr: '发件人邮箱', fromName: '发件人名称', password: '密码 / 授权码', 'password.clear': '清除密码' };
 export const EVENT = { budget: '预算告警', anomaly: '费用异常', sync: '同步故障', keyChange: 'Key 变更', daily: '日报', weekly: '周报', monthly: '月报' };
@@ -60,6 +60,8 @@ const DESC = {
   'network.update': d => [['IP 来源', `${ipSrc(d.from)} → ${ipSrc(d.to)}`]],
   'backup.create': d => [['文件', d.name], d.size != null && ['大小', fmtSize(d.size)]],
   'backup.download': d => [['文件', d.name]],
+  'share.create': d => [['标题', d.title], ['周期', d.period], ['有效期', d.days != null ? d.days + ' 天' : null]],
+  'share.revoke': d => [['链接', d.id === 'all' ? '全部有效链接' : d.id], ['撤销数量', d.count]],
   'settings.update': d => [['修改项', list(d.fields, f => SETTING[f] || f)]],
   'user.create': d => [['用户', d.username], ['角色', ROLE[d.role] || d.role]],
   'user.update': d => [['用户', d.username], ['修改', list(d.fields, f => (f === 'pw_changed_at' ? '' : USER_FIELD[f] || f)) || '-']],
@@ -117,10 +119,10 @@ export const OP_ACT = {
   'settings.update': '修改系统设置', 'provider.test': '测试云厂商连接', 'sync.trigger': '触发同步', 'calls.discover': '发现调用次数指标', 'calls.preview': '预览调用次数', 'calls.sync': '同步调用次数',
   'budget.update': '修改预算', 'keytags.update': '修改成本中心 / 负责人', 'alert.update': '修改告警设置', 'alert.test': '发送测试消息', 'alert.report': '预览 / 发送报表',
   'smtp.update': '修改邮件服务器', 'smtp.test': '发送测试邮件', 'backup.create': '创建备份', 'backup.download': '下载备份', 'network.update': '修改客户端 IP 来源',
-  'user.create': '创建用户', 'user.update': '修改用户', 'user.delete': '删除用户', 'access.denied': '无权限访问', 'oplog.throttled': '操作上报过于频繁',
+  'user.create': '创建用户', 'user.update': '修改用户', 'user.delete': '删除用户', 'access.denied': '无权限访问', 'oplog.throttled': '操作上报过于频繁', 'share.view': '打开分享链接', 'share.create': '生成分享链接', 'share.revoke': '撤销分享链接',
 };
-const OP_KEY = { page: '页面', period: '周期', filters: '筛选', metric: '口径', rows: '行数', fields: '修改项', provider: '云厂商', cycles: '账期', force: '强制', send: '立即发送', role: '角色', count: '数量', monthly: '月度预算', keys: 'Key 预算', ipSource: 'IP 来源', hops: '代理层数', error: '失败原因' };
-const OP_VAL = { metric: { gross: '原价', after: '优惠后' }, provider: { all: '全部', aliyun: '阿里云', tencent: '腾讯云' }, role: { admin: '管理员', viewer: '只读用户' } };
+const OP_KEY = { page: '页面', period: '周期', filters: '筛选', metric: '口径', rows: '行数', fields: '修改项', provider: '云厂商', cycles: '账期', force: '强制', send: '立即发送', role: '角色', count: '数量', monthly: '月度预算', keys: 'Key 预算', ipSource: 'IP 来源', hops: '代理层数', scope: '范围', channel: '渠道', days: '有效期（天）', error: '失败原因' };
+const OP_VAL = { metric: { gross: '原价', after: '优惠后' }, provider: { all: '全部', aliyun: '阿里云', tencent: '腾讯云' }, role: { admin: '管理员', viewer: '只读用户', share: '分享访客' } };
 /** 操作详情 → [[标签, 文本], ...] */
 export function opPairs(raw) {
   let d; try { d = typeof raw === 'string' ? JSON.parse(raw) : raw; } catch { return raw ? [['', String(raw)]] : []; }

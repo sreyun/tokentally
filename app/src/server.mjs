@@ -18,9 +18,11 @@ import { seedDemo, clearDemo, demoStale } from './demo.mjs';
 import { PromClient, dayStartSec, validateCalls, discover, fetchCalls, buildUsageRows, buildQuery, DEFAULT_CALLS, MAPPING_FIELDS, PROM_AUTH } from './prom.mjs';
 import { configureIpLoc, ipLoc, ipLocInfo } from './iploc.mjs';
 import { normalizeSmtp, parseRecipients } from './smtp.mjs';
+import { ShareService, filterData, SHARE_DAYS } from './share.mjs';
+import { scopePredicate } from './overview-mail.mjs';
 import { loadMasterKey, hashPassword, verifyPassword, burnPasswordCheck, checkPasswordPolicy, randomPassword, maskId, sha256 } from './crypto.mjs';
 
-const VERSION = '1.9.0';
+const VERSION = '1.9.1';
 
 /* ===================================================================
  * 系统日志：所有运行日志同时输出到控制台并写入数据库（system_log，保留 SYSTEM_LOG_DAYS 天），
@@ -142,6 +144,9 @@ function refreshDemo() {
 refreshDemo();
 const sync = new SyncService({ store, tz: config.billTz, log, tencentEndpoint: config.tencentEndpoint, promAllowLoopback: config.promAllowLoopback });
 const alerts = new AlertService({ store, tz: config.billTz, log, publicUrl: config.publicUrl, allowPrivate: config.alertAllowPrivate, providers: () => sync.configured() });
+// 只读分享链接（需设置 PUBLIC_URL）：报表 / 告警消息附带“查看交互报表”，收件人无需账号即可查看限定周期与范围的成本概览
+const shares = new ShareService({ store, publicUrl: config.publicUrl, log });
+alerts.shares = shares;
 sync.onBillsSynced = () => alerts.check('bills');
 sync.onRunFinished = (p, kind) => { if (kind === 'meta') alerts.check('sync'); };
 sync.start();
@@ -203,7 +208,7 @@ if (config.backupKeep > 0) {
  * =================================================================== */
 const PUBLIC_DIR = path.join(import.meta.dirname, '..', 'public');
 const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml' };
-const PUBLIC_ROUTES = { '/login': 'login.html', '/login.js': 'login.js', '/boot.js': 'boot.js', '/app.css': 'app.css', '/favicon.svg': 'favicon.svg' };
+const PUBLIC_ROUTES = { '/login': 'login.html', '/login.js': 'login.js', '/boot.js': 'boot.js', '/share-boot.js': 'share-boot.js', '/app.css': 'app.css', '/favicon.svg': 'favicon.svg' };
 const PRIVATE_ROUTES = { '/': 'index.html', '/index.html': 'index.html' };
 /** 前端 ES 模块：仅允许 /js/xxx.js 与 /js/views/xxx.js，需登录 */
 const MODULE_RE = /^\/js\/(?:views\/)?[a-z0-9-]+\.js$/;
@@ -364,6 +369,27 @@ function setSessionCookie(req, res, token, maxAgeSec) {
 }
 /** HTTPS 下只接受 __Host- 前缀的会话 Cookie：无前缀的 bcs 可被同一主域下的其他子域写入，用来把用户登录到攻击者的账号 */
 function sessionToken(req) { const c = parseCookies(req); return cookieSecure(req) ? c['__Host-bcs'] || '' : c.bcs || ''; }
+/** 分享会话 Cookie（只读分享链接换取，最长 12 小时）：与登录会话完全独立，只能读取该链接的数据 */
+function shareSid(req) { const c = parseCookies(req); return cookieSecure(req) ? c['__Host-bss'] || '' : c.bss || ''; }
+function setShareCookie(req, res, sid, maxAgeSec) {
+  const secure = cookieSecure(req);
+  res.setHeader('Set-Cookie', `${secure ? '__Host-bss' : 'bss'}=${sid}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${maxAgeSec}${secure ? '; Secure' : ''}`);
+}
+/** 分享页外壳：与主页面同一份 index.html，把模块入口换成 share-boot.js（先用令牌换取分享会话，再加载前端模块） */
+let shareShell = null;
+function sendShareShell(req, res) {
+  const f = getFile('index.html');
+  if (!shareShell || shareShell.etag !== f.etag) {
+    const html = f.body.toString('utf8').replace('<script type="module" src="/js/main.js"></script>', '<script src="/share-boot.js"></script>');
+    if (!html.includes('/share-boot.js')) throw new Error('index.html 中缺少模块入口，无法生成分享页');
+    const body = Buffer.from(html);
+    shareShell = { etag: f.etag, body, gz: zlib.gzipSync(body) };
+  }
+  const gzip = /gzip/.test(req.headers['accept-encoding'] || '');
+  const body = gzip ? shareShell.gz : shareShell.body;
+  res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Content-Length': body.length, 'Cache-Control': 'no-store', 'X-Robots-Tag': 'noindex, nofollow', ...(gzip ? { 'Content-Encoding': 'gzip', Vary: 'Accept-Encoding' } : {}) });
+  res.end(req.method === 'HEAD' ? undefined : body);
+}
 
 /**
  * 读取 JSON 请求体。超出大小时立即返回 413，其余数据继续读取并丢弃；不能直接销毁套接字，否则客户端收不到 413，只看到连接被重置
@@ -1170,6 +1196,7 @@ route('PUT', '/api/admin/alerts', async (req, res, ctx) => {
     keys: b.anomaly?.keys == null ? cur.anomaly.keys : !!b.anomaly.keys,
   };
   const reportHour = int(b.reportHour, 0, 23, cur.reportHour);
+  const shareDays = int(b.shareDays, SHARE_DAYS.min, SHARE_DAYS.max, cur.shareDays);
   const used = new Set(), plan = [], fields = [];
   for (const raw of list) {
     const old = raw.id && curById.get(raw.id);
@@ -1198,7 +1225,7 @@ route('PUT', '/api/admin/alerts', async (req, res, ctx) => {
     if (raw.scope != null && !obj(raw.scope)) throw new HttpError(400, `渠道「${name}」的推送范围格式不正确`);
     const scope = raw.scope == null ? cleanScope(old?.scope) : cleanScope(raw.scope);
     if (raw.scope && ['key', 'ws'].includes(raw.scope.type) && scope.type === 'all') throw new HttpError(400, `渠道「${name}」请至少选择一个${raw.scope.type === 'key' ? ' API Key' : '业务空间'}`);
-    plan.push({ ch: { id, name, type, enabled: !!raw.enabled && usable, events, atAll: !!raw.atAll, atMobiles: cleanMobiles(raw.atMobiles), scope }, webhook, secretIn, clearSecret: !!raw.clearSecret, sec, isNew: !old });
+    plan.push({ ch: { id, name, type, enabled: !!raw.enabled && usable, events, atAll: !!raw.atAll, atMobiles: cleanMobiles(raw.atMobiles), scope, share: raw.share == null ? !!old?.share : !!raw.share }, webhook, secretIn, clearSecret: !!raw.clearSecret, sec, isNew: !old });
   }
   // 校验全部通过后再落库，避免部分保存
   for (const p of plan) {
@@ -1213,12 +1240,12 @@ route('PUT', '/api/admin/alerts', async (req, res, ctx) => {
     store.setSecret(`alerts.ch.${old.id}.webhook`, ''); store.setSecret(`alerts.ch.${old.id}.secret`, '');
     fields.push(`${old.name}.removed`);
   }
-  const next = { channels: plan.map(p => p.ch), rules, anomaly, reportHour };
+  const next = { channels: plan.map(p => p.ch), rules, anomaly, reportHour, shareDays };
   store.setSetting('alerts', next);
   // 只保存、不推送：新订阅（新渠道 / 重新启用 / 新勾选事件 / 修改推送范围 / 报表时间改到已过的时刻）当前已到点的内容不补发
   let armed = 0;
   try { armed = alerts.arm(cur, alerts.settings()); } catch (e) { log('登记告警基线失败（配置已保存）：' + e.message); }
-  store.audit(ctx.user.username, ctx.ip, 'alert.update', { channels: next.channels.map(c => ({ name: c.name, type: c.type, enabled: c.enabled, events: Object.keys(c.events).filter(k => c.events[k]), ...(c.scope?.type !== 'all' ? { scope: { type: c.scope.type, n: c.scope.ids.length } } : {}) })), rules, anomaly, reportHour, fields });
+  store.audit(ctx.user.username, ctx.ip, 'alert.update', { channels: next.channels.map(c => ({ name: c.name, type: c.type, enabled: c.enabled, events: Object.keys(c.events).filter(k => c.events[k]), ...(c.scope?.type !== 'all' ? { scope: { type: c.scope.type, n: c.scope.ids.length } } : {}), ...(c.share ? { share: true } : {}) })), rules, anomaly, reportHour, shareDays, fields });
   return json(req, res, 200, { ...alerts.out(), armed });
 }, { admin: true });
 /*
@@ -1272,7 +1299,7 @@ route('POST', '/api/admin/alerts/test', async (req, res, ctx) => {
   catch (e) { throw new HttpError(400, e.message); }
   const secretIn = typeof b.secret === 'string' ? b.secret.trim().slice(0, 256) : '';
   const secret = secretIn || (webhook === sec.webhook ? sec.secret : '');
-  const ch = { id: saved?.id || 'test', name: saved?.name || ALERT_TYPES[type].label, type, atAll: !!b.atAll, atMobiles: cleanMobiles(b.atMobiles), scope: b.scope != null ? cleanScope(b.scope) : saved?.scope };
+  const ch = { id: saved?.id || 'test', name: saved?.name || ALERT_TYPES[type].label, type, atAll: !!b.atAll, atMobiles: cleanMobiles(b.atMobiles), scope: b.scope != null ? cleanScope(b.scope) : saved?.scope, share: b.share != null ? !!b.share : !!saved?.share };
   let style = null;
   try { style = await alerts.test(ch, { webhook, secret }); }
   catch (e) {
@@ -1299,6 +1326,86 @@ route('POST', '/api/admin/alerts/report', async (req, res, ctx) => {
     return json(req, res, 200, { title: r.title, lines: r.lines, doc: r.doc, empty: !!r.empty, sent: true, style: typeof style === 'string' ? style : null });
   }
   return json(req, res, 200, { title: r.title, lines: r.lines, doc: r.doc, empty: !!r.empty, sent: false });
+}, { admin: true });
+
+/* ---------------- 只读分享链接 ---------------- */
+const SHARE_REASON = { not_found: '链接无效', expired: '链接已过期', revoked: '链接已被管理员撤销', no_session: '分享会话已过期，请重新打开链接' };
+const specLabel = s => (s?.mode === 'range' ? `${s.from} ~ ${s.to}` : `账期 ${s?.cycle || ''}`);
+const shareScopeLabel = scope => (scope && scope.type !== 'all' ? alerts.scopeOf({ scope })?.label || '指定范围' : '全部');
+function shareMeta(l) {
+  return { title: l.title, period: l.spec, periodLabel: specLabel(l.spec), scopeLabel: shareScopeLabel(l.scope), channel: l.channel_name || '', createdAt: l.created_at, expiresAt: l.expires_at, today: todayIn(config.billTz), tz: config.billTz, brand: store.branding() };
+}
+/** 访问记入操作日志（同一链接同一 IP 10 分钟内只记一次） */
+const shareSeen = new Map();
+function recordShareView(l, ctx, req) {
+  const k = l.id + '|' + ctx.ip, now = Date.now();
+  if (now - (shareSeen.get(k) || 0) < 10 * 60_000) return;
+  shareSeen.set(k, now);
+  if (shareSeen.size > 5000) for (const [x, t] of shareSeen) if (now - t > 10 * 60_000) shareSeen.delete(x);
+  recordOp({ ts: now, userId: null, username: '分享链接', role: 'share', ip: ctx.ip, action: 'share.view', category: 'view', target: l.title, detail: { period: specLabel(l.spec), scope: shareScopeLabel(l.scope), channel: l.channel_name || undefined }, method: 'POST', path: '/api/share/open', status: 200, ms: 0, ua: req.headers['user-agent'], sid: l.id.slice(0, 10), source: 'server' });
+}
+route('POST', '/api/share/open', async (req, res, ctx) => {
+  const b = await readJson(req, 1024);
+  const r = shares.open(typeof b.token === 'string' ? b.token : '', ctx.ip);
+  if (r.reason === 'limited') return json(req, res, 429, { error: '尝试次数过多，请 10 分钟后再试', code: 'limited' });
+  if (!r.sid) return json(req, res, r.reason === 'not_found' ? 404 : 410, { error: SHARE_REASON[r.reason] || '链接无效', code: r.reason });
+  setShareCookie(req, res, r.sid, r.maxAge);
+  recordShareView(r.link, ctx, req);
+  return json(req, res, 200, shareMeta(r.link));
+}, { public: true });
+/** 分享数据：与 /api/data 结构相同，固定为链接的周期，并按链接的推送范围过滤 */
+route('GET', '/api/share/data', async (req, res) => {
+  const r = shares.session(shareSid(req));
+  if (!r.link) return json(req, res, r.reason === 'no_session' ? 401 : 410, { error: SHARE_REASON[r.reason] || '链接无效', code: r.reason });
+  const s = r.link.spec, u = new URL('http://localhost/');
+  if (s.mode === 'range') { u.searchParams.set('mode', 'range'); u.searchParams.set('from', s.from); u.searchParams.set('to', s.to); }
+  else { u.searchParams.set('mode', 'month'); u.searchParams.set('cycle', s.cycle); }
+  const out = getData(u);
+  const keys = new Map(store.listApiKeys().map(k => [k.api_key_id, k]));
+  filterData(out, scopePredicate(r.link.scope, keys));
+  // 分享给系统外的人：去掉分析用不到的敏感字段（Key 的访问 IP 白名单与创建账号、业务空间的接入地址与租户 ID）
+  out.apiKeys = out.apiKeys.map(({ accessIps, createdBy, ...k }) => k);
+  out.workspaces = out.workspaces.map(({ apiHost, tenantId, ...w }) => w);
+  delete out.dataVersion;
+  out.share = shareMeta(r.link);
+  return json(req, res, 200, out);
+}, { public: true });
+function shareOut(l) {
+  const now = Date.now();
+  return { id: l.id, title: l.title, periodLabel: specLabel(l.spec), scopeLabel: shareScopeLabel(l.scope), channel: l.channel_name || '', event: l.event || '', createdBy: l.created_by, createdAt: l.created_at, expiresAt: l.expires_at, revokedAt: l.revoked_at, revokedBy: l.revoked_by || '',
+    views: l.views, lastViewAt: l.last_view_at, lastViewIp: l.last_view_ip || '', lastViewLoc: l.last_view_ip ? ipLoc(l.last_view_ip) : '', status: l.revoked_at ? 'revoked' : l.expires_at <= now ? 'expired' : 'active' };
+}
+route('GET', '/api/admin/shares', async (req, res, ctx) => {
+  const status = ['active', 'expired', 'revoked'].includes(ctx.url.searchParams.get('status')) ? ctx.url.searchParams.get('status') : '';
+  return json(req, res, 200, { available: shares.available, days: alerts.settings().shareDays, limits: SHARE_DAYS, stats: store.shareStats(), links: store.listShares({ status }).map(shareOut) });
+}, { admin: true });
+/** 手动生成分享链接（全部范围）：指定账期或日期范围；链接只在本次响应中返回一次 */
+route('POST', '/api/admin/shares', async (req, res, ctx) => {
+  if (!shares.available) throw new HttpError(400, '请先设置环境变量 PUBLIC_URL（系统对外访问地址），才能生成分享链接');
+  const b = await readJson(req, 4096), today = todayIn(config.billTz);
+  let spec;
+  if (b.mode === 'range') {
+    if (!isDate(b.from) || !isDate(b.to) || b.from > b.to || b.to > today) throw new HttpError(400, '日期范围无效');
+    if (daysBetween(b.from, b.to) > 400) throw new HttpError(400, '日期范围不能超过 400 天');
+    spec = { mode: 'range', from: b.from, to: b.to };
+  } else {
+    const cycle = typeof b.cycle === 'string' ? b.cycle : today.slice(0, 7);
+    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(cycle) || cycle > today.slice(0, 7)) throw new HttpError(400, '账期无效');
+    spec = { mode: 'month', cycle };
+  }
+  const title = String(b.title || '').replace(/[<>"'`\\\u0000-\u001f]/g, '').trim().slice(0, 60) || `成本概览 · ${specLabel(spec)}`;
+  const days = int(b.days, SHARE_DAYS.min, SHARE_DAYS.max, alerts.settings().shareDays);
+  const l = shares.create({ title, spec, createdBy: ctx.user.username, days });
+  store.audit(ctx.user.username, ctx.ip, 'share.create', { title, period: specLabel(spec), days });
+  return json(req, res, 200, { url: l.url, id: l.id, expiresAt: l.expiresAt, title });
+}, { admin: true });
+route('POST', '/api/admin/shares/revoke', async (req, res, ctx) => {
+  const b = await readJson(req, 1024);
+  const id = typeof b.id === 'string' && /^[0-9a-f]{64}$/.test(b.id) ? b.id : null;
+  if (!id && b.all !== true) throw new HttpError(400, '请指定要撤销的链接');
+  const n = shares.revoke(id, ctx.user.username);
+  store.audit(ctx.user.username, ctx.ip, 'share.revoke', { id: id ? id.slice(0, 12) : 'all', count: n });
+  return json(req, res, 200, { revoked: n });
 }, { admin: true });
 
 /* ---------------- 数据备份 ---------------- */
@@ -1519,6 +1626,7 @@ const OPS = [ // [方法, 路径, 操作代码, 分类]
   ['PUT', /^\/api\/admin\/smtp$/, 'smtp.update', 'alert'], ['POST', /^\/api\/admin\/smtp\/test$/, 'smtp.test', 'alert'],
   ['POST', /^\/api\/admin\/backups$/, 'backup.create', 'config'], ['POST', /^\/api\/admin\/backups\/download$/, 'backup.download', 'export'],
   ['PUT', /^\/api\/admin\/network$/, 'network.update', 'config'],
+  ['POST', /^\/api\/admin\/shares$/, 'share.create', 'config'], ['POST', /^\/api\/admin\/shares\/revoke$/, 'share.revoke', 'config'],
   ['POST', /^\/api\/admin\/users$/, 'user.create', 'user'], ['PUT', /^\/api\/admin\/users\/[^/]+$/, 'user.update', 'user'], ['DELETE', /^\/api\/admin\/users\/[^/]+$/, 'user.delete', 'user'],
 ];
 const SECRET_KEY = /pass|secret|token|webhook|key(secret|value)?$|^confirm|authorization|cookie/i;
@@ -1534,6 +1642,8 @@ function opDescribe(action, req, ctx, b = req.jsonBody || {}) {
       return { target: null, detail: { fields: Object.keys(b).filter(k => !SECRET_KEY.test(k)).slice(0, 20), ...(action === 'network.update' ? { ipSource: ostr(b.ipSource, 10), hops: b.hops } : {}), ...(action === 'budget.update' ? { monthly: b.monthly ?? null, keys: b.keys && typeof b.keys === 'object' ? Object.keys(b.keys).length : 0 } : {}) } };
     case 'keytags.update': return { target: null, detail: { count: Array.isArray(b.items) ? b.items.length : 0 } };
     case 'backup.download': return { target: ostr(b.name, 120), detail: null };
+    case 'share.create': return { target: ostr(b.title, 60) || (b.mode === 'range' ? `${ostr(b.from, 10)} ~ ${ostr(b.to, 10)}` : `账期 ${ostr(b.cycle, 7) || '本月'}`), detail: { days: b.days } };
+    case 'share.revoke': return { target: b.all === true ? '全部有效链接' : ostr(b.id, 12), detail: null };
     case 'smtp.test': return { target: ostr(b.to, 200), detail: null };
     case 'provider.test': return { target: ostr(b.provider, 16) || 'aliyun', detail: null };
     case 'user.create': return { target: ostr(b.username, 64), detail: { role: ostr(b.role, 10) } };
@@ -1578,7 +1688,7 @@ async function handle(req, res) {
   if (!['GET', 'HEAD', 'POST', 'PUT', 'DELETE'].includes(req.method)) return send(req, res, 405, 'Method Not Allowed', 'text/plain', { Allow: 'GET, HEAD, POST, PUT, DELETE' });
   // HEAD 与 GET 走同一路由（响应不带正文）；只读方法不做跨站 / CSRF 校验
   const method = req.method === 'HEAD' ? 'GET' : req.method;
-  const isStatic = method === 'GET' && (PUBLIC_ROUTES[p] || PRIVATE_ROUTES[p] || MODULE_RE.test(p));
+  const isStatic = method === 'GET' && (PUBLIC_ROUTES[p] || PRIVATE_ROUTES[p] || MODULE_RE.test(p) || p === '/share');
   // 静态资源（页面与前端模块，带 ETag 缓存）不计入接口限流：多人共用出口 IP 时不能因为加载模块触发 429 导致页面无法启动
   if (!isStatic && rateLimited(ip, config.rateLimitPerMin)) return json(req, res, 429, { error: '请求过于频繁' });
 
@@ -1594,8 +1704,10 @@ async function handle(req, res) {
     if (!session) { res.writeHead(302, { Location: '/login' }); return res.end(); }
     return sendFile(req, res, PRIVATE_ROUTES[p]);
   }
+  if (method === 'GET' && p === '/share') return sendShareShell(req, res);
   if (method === 'GET' && MODULE_RE.test(p)) {
-    if (!session) return send(req, res, 401, 'Unauthorized', 'text/plain; charset=utf-8');
+    // 前端模块：登录会话或有效的分享会话
+    if (!session && !shares.session(shareSid(req)).link) return send(req, res, 401, 'Unauthorized', 'text/plain; charset=utf-8');
     if (!fs.existsSync(path.join(PUBLIC_DIR, p.slice(1)))) return send(req, res, 404, 'Not Found', 'text/plain; charset=utf-8');
     return sendFile(req, res, p.slice(1));
   }

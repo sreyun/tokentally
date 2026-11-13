@@ -561,14 +561,18 @@ const STYLE_NOTE = { chart: '（飞书完整卡片：指标 + 趋势图 + 排行
 function cardPreview(r) {
   const d = r.doc, TONE = { bad: 'bad', warn: 'warn', good: 'good', up: 'bad', down: 'good' }, TXT = { bad: 'bad-text', warn: 'warn-text', good: 'ok-text', up: 'bad-text', down: 'ok-text' };
   const md = s => esc(s).replace(/\*\*(.+?)\*\*/g, '<b>$1</b>');
-  const delta = x => (x ? `<span class="muted">${esc(x.label)}</span> <span class="${TXT[x.dir] || 'muted'}">${x.dir === 'up' ? '↑ ' : x.dir === 'down' ? '↓ ' : ''}${esc(x.dir ? String(x.text).replace(/^[+−-]/, '') : x.text)}</span>` : '');
+  // 用量（neutral）的涨跌不代表好坏：用主题色显示
+  const delta = x => (x ? `<span class="muted">${esc(x.label)}</span> <span class="${x.neutral ? (x.dir ? 'acc-text' : 'muted') : TXT[x.dir] || 'muted'}">${x.dir === 'up' ? '↑ ' : x.dir === 'down' ? '↓ ' : ''}${esc(x.dir ? String(x.text).replace(/^[+−-]/, '') : x.text)}</span>` : '');
   const tags = (d.tags || []).filter(Boolean).map(t => `<span class="pill ${TONE[t.level] || 'info'}">${esc(t.text)}</span>`).join('');
-  const kpis = d.kpis?.length ? `<div class="fc-kpis">${d.kpis.map(k => `<div><span>${esc(k.label)}</span><b class="${TXT[k.tone] || ''}">${esc(k.value)}</b><small>${k.delta ? delta(k.delta) : esc(k.sub || '')}</small></div>`).join('')}</div>` : '';
-  const max = Math.max(1e-9, ...(d.chart?.values || []).map(v => v.v));
-  const chart = d.chart?.values?.length ? `<div class="fc-sec">${esc(d.chart.title)}</div><div class="fc-chart" role="img" aria-label="${esc(d.chart.title)}">${d.chart.values.map(v => `<i style="height:${Math.max(2, v.v / max * 100).toFixed(1)}%;background:${esc(d.chart.colors?.[v.k] || '#3370FF')}" title="${esc(v.d)} · ¥${esc(v.v.toLocaleString('zh-CN', { minimumFractionDigits: 2 }))}"></i>`).join('')}</div>` : '';
+  const panel = list => (list?.length ? `<div class="fc-kpis">${list.map(k => `<div><span>${esc(k.label)}</span><b class="${TXT[k.tone] || ''}">${esc(k.value)}</b><small>${k.delta ? delta(k.delta) : esc(k.sub || '')}</small></div>`).join('')}</div>` : '');
+  const chart = c => {
+    if (!c?.values?.length) return '';
+    const max = Math.max(1e-9, ...c.values.map(v => v.v)), unit = /Token/.test(c.title) ? ' 万 Token' : ' 元';
+    return `<div class="fc-sec">${esc(c.title)}</div><div class="fc-chart" role="img" aria-label="${esc(c.title)}">${c.values.map(v => `<i style="height:${Math.max(2, v.v / max * 100).toFixed(1)}%;background:${esc(c.colors?.[v.k] || '#3370FF')}" title="${esc(v.d)} · ${esc(v.v.toLocaleString('zh-CN', { maximumFractionDigits: 2 }))}${unit}"></i>`).join('')}</div>`;
+  };
   const secs = (d.sections || []).filter(s => s.rows?.length || s.items?.length).map(s => `<div class="fc-sec">${esc(s.title)}</div>${s.rows?.length ? `<div class="fc-rows">${s.rows.map((x, i) => `<div><em>${i + 1}</em><span>${esc(x.name)}</span><b>${esc(x.value)}</b><small>${esc(x.share || '')}</small></div>`).join('')}</div>` : s.items.map(i => `<div class="fc-item"><span class="pill ${TONE[i.level] || 'info'}">${esc(i.tag || '提示')}</span> ${md(i.text)}</div>`).join('')}`).join('');
   return `<div class="fc"><div class="fc-h"><div><b>${esc(r.title)}</b>${tags}</div>${r.empty ? '<span class="pill neutral">无费用，定时发送时将跳过</span>' : ''}</div>
-    <div class="fc-b">${kpis}${(d.notes || []).map(n => `<div class="fc-note">${esc(n)}</div>`).join('')}${chart}${secs}</div>
+    <div class="fc-b">${panel(d.kpis)}${panel(d.usage)}${(d.notes || []).map(n => `<div class="fc-note">${esc(n)}</div>`).join('')}${chart(d.chart)}${chart(d.tokenChart)}${secs}</div>
     <div class="fc-f muted">飞书卡片预览 · 钉钉 / 企业微信 / 邮件为文本消息，内容相同</div></div>`;
 }
 
@@ -592,7 +596,7 @@ async function alerts(el) {
         <div class="ch-card ${c.enabled ? '' : 'off'}">
           <div class="ch-top"><span class="ch-ico">${icon(c.type === 'email' ? 'mail' : 'bell')}</span><div class="ch-t"><b>${esc(c.name)}</b><span class="muted">${esc(al.types[c.type]?.label || c.type)} · <span class="mono">${esc(c.webhookMasked || '未配置地址')}</span>${c.secretSet ? ' · 已加签' : ''}</span></div>
             <span class="state ${c.enabled ? 'on' : 'off'}">${c.enabled ? '已启用' : '已停用'}</span></div>
-          <div class="ch-evs">${c.scopeLabel ? `<span class="tag info">${icon('filter')}范围：${esc(c.scopeLabel)}</span>` : ''}${Object.keys(evs).filter(k => c.events[k]).map(k => `<span class="tag">${icon(EVENT_ICON[k] || 'bell')}${esc(evs[k].label)}</span>`).join('') || '<span class="muted">未订阅任何事件</span>'}${c.atAll || c.atMobiles.length ? `<span class="tag warn">@ ${c.atAll ? '所有人' : ''}${c.atAll && c.atMobiles.length ? ' + ' : ''}${c.atMobiles.length ? c.atMobiles.length + ' 人' : ''}</span>` : ''}</div>
+          <div class="ch-evs">${c.scopeLabel ? `<span class="tag info">${icon('filter')}范围：${esc(c.scopeLabel)}</span>` : ''}${Object.keys(evs).filter(k => c.events[k]).map(k => `<span class="tag">${icon(EVENT_ICON[k] || 'bell')}${esc(evs[k].label)}</span>`).join('') || '<span class="muted">未订阅任何事件</span>'}${c.share ? `<span class="tag info">${icon('link')}附交互报表链接</span>` : ''}${c.atAll || c.atMobiles.length ? `<span class="tag warn">@ ${c.atAll ? '所有人' : ''}${c.atAll && c.atMobiles.length ? ' + ' : ''}${c.atMobiles.length ? c.atMobiles.length + ' 人' : ''}</span>` : ''}</div>
           ${Object.keys(c.nextRuns || {}).length ? `<div class="ch-next">${icon('clock')}<span>下次报表：${Object.entries(c.nextRuns).map(([k, v]) => `${esc(evs[k]?.label.replace(/（.*）/, '') || k)} <b>${esc(v)}</b>`).join('<i>·</i>')}</span></div>` : ''}
           <div class="ch-foot"><span class="${c.lastError && (!c.lastSentAt || c.lastErrorAt > c.lastSentAt) ? 'bad-text' : 'muted'}">${c.lastError && (!c.lastSentAt || c.lastErrorAt > c.lastSentAt) ? `${esc(fmtTime(c.lastErrorAt))} 发送失败：${esc(c.lastError)}` : c.lastSentAt ? `最近发送 ${esc(fmtTime(c.lastSentAt))}` : '尚未发送'}</span>
             <span class="sp"></span><button class="btn sm" data-ch-test="${esc(c.id)}">${icon('send')}测试</button><button class="btn sm" data-ch-edit="${esc(c.id)}">${icon('edit')}编辑</button><button class="btn sm danger" data-ch-del="${esc(c.id)}">${icon('trash')}删除</button></div>
@@ -604,6 +608,8 @@ async function alerts(el) {
         <label class="field" title="按原价（目录价）判断，不受优惠券 / 折扣集中抵扣的影响"><span>异常倍数（×前 7 日原价日均）</span><input class="inp" type="number" name="ratio" min="1.2" max="20" step="0.1" value="${al.anomaly.ratio}"></label>
         <label class="field" title="昨日原价比前 7 日原价日均至少多出的金额"><span>异常最小增量（元，按原价）</span><input class="inp" type="number" name="minAmount" min="0" step="1" value="${al.anomaly.minAmount}"></label>
         <label class="chk full"><input type="checkbox" name="anomalyKeys" ${al.anomaly.keys ? 'checked' : ''}> 同时检测单个 API Key 的费用异常（最多列出 5 个）</label>
+        <label class="field" title="渠道开启“附带交互报表链接”时，每条消息生成的只读链接的有效期"><span>交互报表链接有效期（天）</span><input class="inp" type="number" name="shareDays" min="1" max="90" step="1" value="${al.shareDays}"></label>
+        <div class="field"><span>&nbsp;</span><small class="hint" style="margin-top:8px">${al.shareAvailable ? '到期后链接自动失效，可在下方“只读分享链接”中提前撤销' : '需设置 PUBLIC_URL 后才能附带链接'}</small></div>
         <label class="field full"><span>报表与异常检查时间</span><select class="inp" name="reportHour">${Array.from({ length: 24 }, (_, h) => opt(h, `每天 ${p2(h)}:00 之后`, al.reportHour)).join('')}</select><small class="hint">账单通常延迟数小时入账，建议 9:00 之后发送，数据更完整</small></label>
         <div class="row full"><button class="btn primary" type="submit">保存规则</button></div>
       </form></section>
@@ -630,11 +636,14 @@ async function alerts(el) {
       ${al.pending.length ? `<ul class="alert-list">${al.pending.map(t => `<li class="warn">${esc(t)}</li>`).join('')}</ul>` : `<p class="hint" style="margin:0">${state.budgets.monthly || Object.keys(state.budgets.keys || {}).length ? '暂无（未达到任何阈值，或已通知过）' : '尚未设置预算'}</p>`}
       <h4 class="sec-h">最近通知记录</h4>
       ${al.state.history.length ? `<ul class="alert-list">${al.state.history.map(h => `<li class="${h.level === 'bad' ? 'bad' : h.level === 'good' ? 'good' : h.level === 'warn' ? 'warn' : 'info'}"><b>${esc(fmtTime(h.at))}</b> · ${esc(h.chName || '')} · ${esc(h.title || evs[h.event]?.label || '')}<div class="muted">${(h.items || []).slice(0, 3).map(esc).join('；')}</div></li>`).join('')}</ul>` : '<p class="hint" style="margin:0">暂无</p>'}
-    </section></div>`;
+    </section>
+    <section class="panel c12" id="shareBox"><div class="panel-h"><h3>只读分享链接</h3>${help('收件人无需账号即可在浏览器（飞书中在飞书内）查看限定周期与范围的交互式成本概览：可悬停查看明细、切换页面、按 Key / 模型筛选与下钻，但不能修改任何配置。链接只出现在消息中，系统只保存其摘要；到期自动失效，撤销后已打开的页面也立即失效。访问记录在“操作日志”中（用户为“分享链接”）。')}<span class="sub" data-share-sub></span>
+      <div class="actions"><button class="btn sm danger" data-share-revoke-all>${icon('trash')}撤销全部有效链接</button></div></div>
+      <div data-share-body><div class="nodata">加载中…</div></div></section></div>`;
 
   const payload = (channels, extra = {}) => ({
-    channels: channels.map(c => ({ id: c.id, name: c.name, type: c.type, enabled: c.enabled, events: c.events, atAll: c.atAll, atMobiles: c.atMobiles, scope: c.scope, ...(c.webhook ? { webhook: c.webhook } : {}), ...(c.secret ? { secret: c.secret } : {}), ...(c.clearSecret ? { clearSecret: true } : {}) })),
-    rules: al.rules, anomaly: al.anomaly, reportHour: al.reportHour, ...extra,
+    channels: channels.map(c => ({ id: c.id, name: c.name, type: c.type, enabled: c.enabled, events: c.events, atAll: c.atAll, atMobiles: c.atMobiles, scope: c.scope, share: !!c.share, ...(c.webhook ? { webhook: c.webhook } : {}), ...(c.secret ? { secret: c.secret } : {}), ...(c.clearSecret ? { clearSecret: true } : {}) })),
+    rules: al.rules, anomaly: al.anomaly, reportHour: al.reportHour, shareDays: al.shareDays, ...extra,
   });
   const save = async (channels, extra, okMsg) => {
     // 保存渠道会重绘本页：告警规则表单有未保存的修改时先确认，避免被静默丢弃
@@ -667,6 +676,7 @@ async function alerts(el) {
       rules: Object.fromEntries(Object.keys(RULE_LABEL).map(k => [k, fd.get('rule_' + k) === 'on'])),
       anomaly: { ratio: Number(fd.get('ratio')), minAmount: Number(fd.get('minAmount')), keys: fd.get('anomalyKeys') === 'on' },
       reportHour: Number(fd.get('reportHour')),
+      shareDays: Number(fd.get('shareDays')),
     };
     try { markClean(e.target); await save(al.channels, extra, '告警规则已保存'); } catch (ex) { markDirty(e.target); toast('保存失败：' + ex.message, 'err', 4000); }
   };
@@ -688,6 +698,57 @@ async function alerts(el) {
   $('#rSend', el).onclick = async e => { const btn = e.currentTarget; btn.disabled = true; try { await preview(true); } finally { btn.disabled = false; } };
   preview();
   bindSmtp(el, al, () => refresh(el, () => alerts(el)));
+  bindShares(el);
+}
+
+/** 只读分享链接：生成（全部范围）、列表、撤销 */
+async function bindShares(el) {
+  const box = $('#shareBox', el);
+  if (!box) return;
+  const body = $('[data-share-body]', box), sub = $('[data-share-sub]', box);
+  const ST = { active: ['有效', 'good'], expired: ['已过期', 'neutral'], revoked: ['已撤销', 'bad'] };
+  const load = async () => {
+    let r;
+    try { r = await http('GET', '/api/admin/shares'); } catch (ex) { body.innerHTML = `<div class="bad-text">${esc(ex.message)}</div>`; return; }
+    if (!box.isConnected) return;
+    sub.textContent = `有效 ${r.stats.active || 0} 个 · 累计 ${r.stats.total || 0} 个 · 访问 ${r.stats.views || 0} 次`;
+    const cur = (state.today || '').slice(0, 7), months = Array.from({ length: 12 }, (_, i) => addMonths(cur, -i));
+    body.innerHTML = `${r.available ? `<form class="row share-new" data-share-new style="gap:8px;flex-wrap:wrap;margin-bottom:12px">
+        <select class="inp sm" name="cycle" aria-label="账期">${months.map((m, i) => opt(m, i === 0 ? `本月（${m}）` : i === 1 ? `上月（${m}）` : m, cur)).join('')}</select>
+        <input class="inp sm" name="title" maxlength="60" placeholder="标题（可选，如：10 月费用汇报）" style="width:240px">
+        <label class="row" style="gap:6px"><span class="muted">有效期</span><input class="inp sm" type="number" name="days" min="${r.limits.min}" max="${r.limits.max}" value="${r.days}" style="width:70px"><span class="muted">天</span></label>
+        <button class="btn sm primary" type="submit">${icon('link')}生成分享链接（全部范围）</button><span class="hint">按渠道范围的链接会随报表 / 告警消息自动生成</span></form><div data-share-out></div>`
+      : '<div class="notice warn" style="margin-bottom:12px">' + icon('warn') + '<div><b>尚未设置 PUBLIC_URL</b><span class="why">请在环境变量中设置系统对外访问地址（如 https://cost.example.com），才能生成分享链接与消息中的“查看交互报表”。</span></div></div>'}
+      ${r.links.length ? `<div class="tbl-wrap"><table class="tbl"><thead><tr><th>标题</th><th>周期</th><th>范围</th><th>来源</th><th>创建</th><th>有效期至</th><th>访问</th><th>最近访问</th><th>状态</th><th></th></tr></thead><tbody>${r.links.map(l => `<tr>
+        <td class="wide-cell">${esc(l.title)}</td><td class="nowrap">${esc(l.periodLabel)}</td><td>${esc(l.scopeLabel)}</td><td>${esc(l.channel || (l.createdBy === 'system' ? '系统' : l.createdBy))}</td>
+        <td class="nowrap">${esc(fmtTime(l.createdAt))}</td><td class="nowrap">${esc(fmtTime(l.expiresAt))}</td><td class="num">${l.views}</td>
+        <td class="nowrap">${l.lastViewAt ? `${esc(fmtTime(l.lastViewAt))}<div class="muted">${esc(l.lastViewIp)}${l.lastViewLoc ? ' · ' + esc(l.lastViewLoc) : ''}</div>` : '<span class="muted">—</span>'}</td>
+        <td><span class="pill ${ST[l.status][1]}">${ST[l.status][0]}</span>${l.revokedBy ? `<div class="muted">${esc(l.revokedBy)}</div>` : ''}</td>
+        <td>${l.status === 'active' ? `<button class="btn sm" data-share-revoke="${esc(l.id)}">撤销</button>` : ''}</td></tr>`).join('')}</tbody></table></div>` : '<p class="hint" style="margin:0">暂无分享链接</p>'}`;
+    const form = $('[data-share-new]', body);
+    if (form) form.onsubmit = async e => {
+      e.preventDefault();
+      const fd = new FormData(form), btn = form.querySelector('[type=submit]');
+      btn.disabled = true;
+      try {
+        const x = await http('POST', '/api/admin/shares', { mode: 'month', cycle: fd.get('cycle'), title: fd.get('title'), days: Number(fd.get('days')) });
+        await load();
+        const out = $('[data-share-out]', body);
+        if (out) out.innerHTML = `<div class="notice info" style="margin-bottom:12px">${icon('check')}<div><b>已生成：${esc(x.title)}</b><span class="why">链接只显示这一次，请复制后发送；有效期至 ${esc(fmtTime(x.expiresAt))}。</span><div class="row" style="gap:8px;margin-top:6px"><input class="inp sm mono" readonly value="${esc(x.url)}" style="flex:1;min-width:260px" data-share-url><button type="button" class="btn sm" data-share-copy>${icon('copy')}复制</button></div></div></div>`;
+        const inp = $('[data-share-url]', body);
+        $('[data-share-copy]', body).onclick = async () => { try { await navigator.clipboard.writeText(inp.value); toast('已复制分享链接'); } catch { inp.select(); toast('请按 Ctrl+C 复制', '', 3000); } };
+      } catch (ex) { toast(ex.message, 'err', 5000); } finally { btn.disabled = false; }
+    };
+    body.querySelectorAll('[data-share-revoke]').forEach(b => b.onclick = async () => {
+      if (!confirm('撤销该分享链接？撤销后已打开的页面也将无法继续查看，且不能恢复。')) return;
+      try { await http('POST', '/api/admin/shares/revoke', { id: b.dataset.shareRevoke }); toast('已撤销'); await load(); } catch (ex) { toast(ex.message, 'err', 5000); }
+    });
+  };
+  $('[data-share-revoke-all]', box).onclick = async () => {
+    if (!confirm('撤销全部有效的分享链接？已发送的消息中的“查看交互报表”将全部失效，且不能恢复。')) return;
+    try { const x = await http('POST', '/api/admin/shares/revoke', { all: true }); toast(`已撤销 ${x.revoked} 个链接`); await load(); } catch (ex) { toast(ex.message, 'err', 5000); }
+  };
+  await load();
 }
 
 /** 邮件服务器（SMTP）表单：保存（敏感修改需当前登录密码）与发送测试邮件 */
@@ -738,6 +799,7 @@ function editChannel(al, c, onSave) {
       <div class="field full"><span>订阅报表</span><div class="row" style="gap:6px 16px">${group('报表')}</div></div>
       <div class="field full" data-mention><span>@ 提醒（仅告警消息）</span><div class="row" style="gap:8px 16px;align-items:center"><label class="chk"><input type="checkbox" name="atAll" ${cur.atAll ? 'checked' : ''}> @所有人</label>
         <input class="inp" name="atMobiles" data-mobiles value="${esc(cur.atMobiles.join(','))}" placeholder="@ 手机号，多个用逗号分隔（最多 10 个）" style="flex:1;min-width:220px"></div></div>
+      <label class="chk full" title="${al.shareAvailable ? '' : '需先设置 PUBLIC_URL'}"><input type="checkbox" name="share" ${(isNew ? al.shareAvailable : cur.share) ? 'checked' : ''} ${al.shareAvailable ? '' : 'disabled'}> 附带只读交互报表链接（收件人无需登录即可查看该渠道范围内的成本概览，${al.shareDays} 天内有效${al.shareAvailable ? '' : '；需先设置 PUBLIC_URL'}）</label>
       <label class="chk full"><input type="checkbox" name="enabled" ${cur.enabled ? 'checked' : ''}> 启用该渠道</label>
       <div class="row full"><button type="button" class="btn" data-test>${icon('send')}用当前填写内容发送测试</button></div>
     </div>`,
@@ -779,7 +841,7 @@ function editChannel(al, c, onSave) {
       $('[data-test]', form).onclick = async e => {
         const fd = new FormData(form), btn = e.currentTarget;
         btn.disabled = true;
-        try { await http('POST', '/api/admin/alerts/test', { channelId: c?.id, type: fd.get('type'), webhook: fd.get('webhook') || '', secret: fd.get('secret') || '', atAll: fd.get('atAll') === 'on', atMobiles: fd.get('atMobiles') || '', scope: form._scope() }); toast('测试消息已发送，请在群中查看'); }
+        try { await http('POST', '/api/admin/alerts/test', { channelId: c?.id, type: fd.get('type'), webhook: fd.get('webhook') || '', secret: fd.get('secret') || '', atAll: fd.get('atAll') === 'on', atMobiles: fd.get('atMobiles') || '', scope: form._scope(), share: fd.get('share') === 'on' }); toast('测试消息已发送，请在群中查看'); }
         catch (ex) { toast(ex.message, 'err', 5000); } finally { btn.disabled = false; }
       };
     },
@@ -793,7 +855,7 @@ function editChannel(al, c, onSave) {
         id: c?.id, name: String(fd.get('name') || '').trim() || al.types[type].label, type, enabled: fd.get('enabled') === 'on',
         events: Object.fromEntries(Object.keys(evs).map(k => [k, fd.get('ev_' + k) === 'on'])), atAll: fd.get('atAll') === 'on',
         atMobiles: String(fd.get('atMobiles') || '').split(/[,，\s]+/).filter(Boolean), webhook, secret: String(fd.get('secret') || '').trim(), clearSecret: fd.get('clearSecret') === 'on',
-        scope: form._scope(),
+        scope: form._scope(), share: fd.get('share') === 'on',
       };
       if (ch.scope.type !== 'all' && !ch.scope.ids.length) throw new Error(`请至少选择一个${ch.scope.type === 'key' ? ' API Key' : '业务空间'}，或将推送范围改为“全部”`);
       await onSave(ch);

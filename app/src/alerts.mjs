@@ -21,6 +21,7 @@ import { dayStartSec } from './prom.mjs';
 import { sendMail, parseRecipients, normalizeSmtp, SMTP_SECURITY } from './smtp.mjs';
 import { renderOverviewHtml, renderEmail } from './overview-mail.mjs';
 import { feishuCard, feishuFormatError } from './feishu-card.mjs';
+import { feishuAppLink } from './share.mjs';
 
 /** 推送范围：全部 / 指定 API Key / 指定业务空间（最多 200 个） */
 export const SCOPE_TYPES = { all: '全部', key: '指定 API Key', ws: '指定业务空间' };
@@ -151,17 +152,27 @@ const topRows = (rows, n, nameOf, total) => rows.filter(r => r.cost > 0.005).sor
 const rowLines = rows => rows.map((r, i) => `${i + 1}. ${r.name} ${r.value}${r.share ? `（${r.share}）` : ''}`);
 /** 结构化分节 → 文本行（钉钉 / 企业微信 / 邮件 / 通用 Webhook / 通知记录使用） */
 const sectionLines = sections => sections.flatMap(s => (s.rows?.length ? ['', `#### ${s.title}`, ...rowLines(s.rows)] : s.items?.length ? ['', `#### ${s.title}`, ...s.items.map(i => i.text)] : []));
-/** 每日费用柱状图数据：from..to 每天一根柱子，k 用于分组着色；有数据的天数不足 3 天时不画图 */
-function dailyChart(title, rows, from, to, kOf, colors) {
+/** Token 数量：≥1 亿显示“x.xx 亿”，≥1 万显示“x.x 万”，否则显示整数 */
+const tok = n => { n = Number(n) || 0; return n >= 1e8 ? (n / 1e8).toFixed(2) + ' 亿' : n >= 1e4 ? (n / 1e4).toLocaleString('zh-CN', { minimumFractionDigits: 1, maximumFractionDigits: 1 }) + ' 万' : Math.round(n).toLocaleString('zh-CN'); };
+/** 单位成本：每百万 Token 的应付金额 */
+const perM = (cost, tokens) => (tokens > 0 ? `¥${(cost / tokens * 1e6).toFixed(2)} / 百万 Token` : '—');
+const perMv = (cost, tokens) => (tokens > 0 ? `¥${(cost / tokens * 1e6).toFixed(2)}` : '—');
+/** Token 排行：[{ name, value: 'x 万', share }] */
+const tokRows = (rows, n, nameOf, total) => rows.filter(r => (r.tokens || 0) > 0).sort((x, y) => y.tokens - x.tokens).slice(0, n).map(r => ({ name: nameOf(r), value: tok(r.tokens), share: pct(total ? r.tokens / total * 100 : 0) }));
+/** 用量涨跌：Token 增加不一定是坏事，卡片中用中性颜色显示 */
+const udelta = (label, a, b) => ({ ...delta(label, a, b), neutral: true });
+/** 每日柱状图数据：from..to 每天一根柱子，k 用于分组着色；val 取值（默认应付金额），scale 换算单位；有数据的天数不足 3 天时不画图 */
+function dailyChart(title, rows, from, to, kOf, colors, val = r => r.cost || 0, scale = 1) {
   const by = new Map();
-  for (const r of rows) by.set(r.day, (by.get(r.day) || 0) + (r.cost || 0));
+  for (const r of rows) by.set(r.day, (by.get(r.day) || 0) + val(r));
   const first = [...by.keys()].sort()[0];
   if (!first) return null;
   const values = [];
-  for (let d = first > from ? first : from; d <= to; d = addDays(d, 1)) values.push({ d: d.slice(5), v: Math.round((by.get(d) || 0) * 100) / 100, k: kOf(d) });
+  for (let d = first > from ? first : from; d <= to; d = addDays(d, 1)) values.push({ d: d.slice(5), v: Math.round((by.get(d) || 0) * scale * 100) / 100, k: kOf(d) });
   return values.length >= 3 ? { title, values, colors } : null;
 }
-const BLUE = '#3370FF', BLUE_L = '#B7CBF9';
+const BLUE = '#3370FF', BLUE_L = '#B7CBF9', TEAL = '#14A38B', TEAL_L = '#A7DED4';
+const tokVal = r => r.tokens || 0;
 
 /**
  * 机器人消息长度上限按 UTF-8 字节计算（企业微信 markdown 4096 字节、钉钉 20000 字节、飞书卡片约 30KB；中文每字 3 字节）。
@@ -180,21 +191,24 @@ export function fitLines(head, body, tail, maxBytes) {
   const out = [...head, ...body.slice(0, kept), `…另有 ${dropped} 行内容未显示`, ...tail];
   return size(out) <= maxBytes ? out : [Buffer.from(out.join('\n'), 'utf8').subarray(0, maxBytes - 3).toString('utf8').replace(/�+$/, '')];
 }
-function buildMessage(type, { title, level, lines, footer, link, mentions }) {
+function buildMessage(type, { title, level, lines, footer, link, mentions, share = null }) {
+  // 只读分享链接（无需登录的交互报表）放在“打开费用分析”（需登录）之前
+  const shareMd = share ? [`[查看交互报表（${share.days} 天内有效，无需登录）](${share.url})`] : [];
   const atText = mentions?.mobiles?.length ? '\n\n' + mentions.mobiles.map(m => '@' + m).join(' ') : '';
   if (type === 'dingtalk') {
-    const text = fitLines([`### ${title}`, ''], lines.map(l => (l.startsWith('#') || l === '' ? l : `- ${l}`)), ['', `> ${footer}`, ...(link ? ['', `[打开费用分析](${link})`] : [])], MSG_BYTES.dingtalk - Buffer.byteLength(atText)).join('\n') + atText;
+    const text = fitLines([`### ${title}`, ''], lines.map(l => (l.startsWith('#') || l === '' ? l : `- ${l}`)), ['', `> ${footer}`, ...(share ? ['', ...shareMd] : []), ...(link ? ['', `[打开费用分析](${link})`] : [])], MSG_BYTES.dingtalk - Buffer.byteLength(atText)).join('\n') + atText;
     return { msgtype: 'markdown', markdown: { title, text }, ...(mentions ? { at: { atMobiles: mentions.mobiles || [], isAtAll: !!mentions.all } } : {}) };
   }
   if (type === 'feishu') {
     const content = fitLines([], lines.map(l => (l.startsWith('#') ? `**${l.replace(/^#+\s*/, '')}**` : l === '' ? '' : `• ${l}`)), ['', `<font color='grey'>${footer}</font>`, ...(mentions?.all ? ['<at id=all></at>'] : [])], MSG_BYTES.feishu).join('\n');
     const elements = [{ tag: 'markdown', content }];
-    if (link) elements.push({ tag: 'action', actions: [{ tag: 'button', text: { tag: 'plain_text', content: '打开费用分析' }, type: 'primary', url: link }] });
+    const btns = [share && { text: '查看交互报表', url: share.feishu || share.url, type: 'primary' }, link && { text: '打开费用分析', url: link, type: share ? 'default' : 'primary' }].filter(Boolean);
+    if (btns.length) elements.push({ tag: 'action', actions: btns.map(b => ({ tag: 'button', text: { tag: 'plain_text', content: b.text }, type: b.type, url: b.url })) });
     return { msg_type: 'interactive', card: { config: { wide_screen_mode: true }, header: { template: level === 'bad' ? 'red' : level === 'warn' ? 'orange' : level === 'good' ? 'green' : 'blue', title: { tag: 'plain_text', content: title } }, elements } };
   }
   if (type === 'wecom') {
     const color = level === 'bad' ? 'warning' : level === 'warn' ? 'comment' : 'info';
-    const content = fitLines([`### <font color="${color}">${title}</font>`], lines.map(l => (l.startsWith('#') ? `**${l.replace(/^#+\s*/, '')}**` : l === '' ? '' : `> ${l}`)), [`<font color="comment">${footer}</font>`, ...(link ? [`[打开费用分析](${link})`] : [])], MSG_BYTES.wecom).join('\n');
+    const content = fitLines([`### <font color="${color}">${title}</font>`], lines.map(l => (l.startsWith('#') ? `**${l.replace(/^#+\s*/, '')}**` : l === '' ? '' : `> ${l}`)), [`<font color="comment">${footer}</font>`, ...shareMd, ...(link ? [`[打开费用分析](${link})`] : [])], MSG_BYTES.wecom).join('\n');
     return { msgtype: 'markdown', markdown: { content } };
   }
   return null;
@@ -290,10 +304,12 @@ export class AlertService {
   settings() {
     const s = this.store.getSetting('alerts', {}) || {};
     return {
-      channels: (Array.isArray(s.channels) ? s.channels : []).map(c => ({ ...c, events: { ...DEFAULT_EVENTS, ...(c.events || {}) }, atMobiles: cleanMobiles(c.atMobiles), atAll: !!c.atAll, scope: cleanScope(c.scope) })),
+      channels: (Array.isArray(s.channels) ? s.channels : []).map(c => ({ ...c, events: { ...DEFAULT_EVENTS, ...(c.events || {}) }, atMobiles: cleanMobiles(c.atMobiles), atAll: !!c.atAll, scope: cleanScope(c.scope), share: !!c.share })),
       rules: { ...DEFAULT_RULES, ...(s.rules || {}) },
       anomaly: { ...DEFAULT_ANOMALY, ...(s.anomaly || {}) },
       reportHour: Number.isInteger(s.reportHour) ? s.reportHour : 9,
+      // 只读分享链接有效期（天）：渠道开启“附带交互报表链接”时使用
+      shareDays: Number.isInteger(s.shareDays) && s.shareDays >= 1 && s.shareDays <= 90 ? s.shareDays : 7,
     };
   }
   secretsOf(id) {
@@ -406,6 +422,7 @@ export class AlertService {
         return { ...c, scopeLabel: this.scopeOf(c)?.label || '', webhookSet: !!sec.webhook, webhookMasked: c.type === 'email' ? maskEmails(sec.webhook) : maskWebhook(sec.webhook), secretSet: !!sec.secret, undecryptable: !!sec.undecryptable, lastSentAt: cs.lastSentAt || null, lastError: cs.lastError || null, lastErrorAt: cs.lastErrorAt || null, nextRuns: c.enabled ? this.nextRuns(c, st, today, hour, s.reportHour) : {} };
       }),
       enabled: s.channels.some(c => c.enabled),
+      shareAvailable: !!this.shares?.available,
       types: Object.fromEntries(Object.entries(ALERT_TYPES).map(([k, v]) => [k, { label: v.label, sign: v.sign, host: v.hosts?.[0] || '', mention: v.mention, email: !!v.email }])),
       eventTypes: EVENT_TYPES, maxChannels: MAX_CHANNELS,
       smtp: { ...this.smtpSettings(), passwordSet: this.smtpPasswordSet(), securities: SMTP_SECURITY },
@@ -438,24 +455,29 @@ export class AlertService {
     if (kind === 'daily') {
       const day = addDays(today, -1);
       const rows14 = this.store.dailyByKey(addDays(day, -13), day).filter(r => scope.keys.has(r.id));
-      const y = rows14.filter(r => r.day === day), yc = y.reduce((s, r) => s + r.cost, 0), pc = rows14.filter(r => r.day === addDays(day, -1)).reduce((s, r) => s + r.cost, 0);
-      const byKey = new Map(); for (const r of y) byKey.set(r.id, (byKey.get(r.id) || 0) + r.cost);
-      const sections = [{ title: '昨日 API Key Top 5', rows: topRows([...byKey.entries()].map(([id, cost]) => ({ id, cost })), 5, r => this.keyName(r.id, keys), yc) }];
-      const lines = [`**昨日（${day.slice(5)}）费用 ${yuan(yc)}**，较前一日 ${chg(yc, pc)}`, `${st.label} 合计 ${yuan(st.cost)}${st.forecast != null ? `，预计月末 ${yuan(st.forecast)}` : ''}${st.budget ? `，范围内 Key 预算 ${yuan(st.budget)}（已用 ${pct(st.cost / st.budget * 100)}）` : ''}`, scopeNote, ...sectionLines(sections)];
+      const y = rows14.filter(r => r.day === day), pd = rows14.filter(r => r.day === addDays(day, -1));
+      const yc = y.reduce((s, r) => s + r.cost, 0), pc = pd.reduce((s, r) => s + r.cost, 0), yt = y.reduce((s, r) => s + (r.tokens || 0), 0), pt = pd.reduce((s, r) => s + (r.tokens || 0), 0);
+      const byKey = new Map(); for (const r of y) { const a = byKey.get(r.id) || byKey.set(r.id, { id: r.id, cost: 0, tokens: 0 }).get(r.id); a.cost += r.cost; a.tokens += r.tokens || 0; }
+      const sections = [{ title: '昨日 API Key Top 5', rows: topRows([...byKey.values()], 5, r => this.keyName(r.id, keys), yc) }, { title: '昨日 Token 用量 · API Key Top 5', rows: tokRows([...byKey.values()], 5, r => this.keyName(r.id, keys), yt) }];
+      const lines = [`**昨日（${day.slice(5)}）费用 ${yuan(yc)}**，较前一日 ${chg(yc, pc)}`, `${st.label} 合计 ${yuan(st.cost)}${st.forecast != null ? `，预计月末 ${yuan(st.forecast)}` : ''}${st.budget ? `，范围内 Key 预算 ${yuan(st.budget)}（已用 ${pct(st.cost / st.budget * 100)}）` : ''}`, `昨日 Token ${tok(yt)}，较前一日 ${chg(yt, pt)}${yt > 0 ? `，单位成本 ${perM(yc, yt)}` : ''}`, scopeNote, ...sectionLines(sections)];
       const d = delta('较前一日', yc, pc);
       const doc = {
         tags: [{ text: '指定范围', level: 'info' }],
         kpis: [{ label: `昨日费用（${day.slice(5)}）`, value: yuan(yc), delta: d }, { label: `${st.label} 合计`, value: yuan(st.cost), sub: st.forecast != null ? `预计月末 ${yuan(st.forecast)}` : '' }, ...budgetKpi],
+        usage: [{ label: '昨日 Token', value: tok(yt), delta: udelta('较前一日', yt, pt) }, { label: `${st.label} Token`, value: tok(st.tokens) }, { label: '昨日单位成本', value: perMv(yc, yt), sub: '每百万 Token' }],
         notes: [scopeNote], sections,
         chart: dailyChart('近 14 日每日费用（元）', rows14, addDays(day, -13), day, x => (x === day ? '昨日' : '此前'), { 此前: BLUE_L, 昨日: BLUE }),
+        tokenChart: dailyChart('近 14 日每日 Token（万）', rows14, addDays(day, -13), day, x => (x === day ? '昨日' : '此前'), { 此前: TEAL_L, 昨日: TEAL }, tokVal, 1e-4),
       };
       return { title: `费用日报 · ${day}${tag}`, level: 'info', lines, doc, empty: yc < 0.005 && st.cost < 0.005, period: today, ready: true, path: '#/overview' };
     }
     const period = kind === 'weekly' ? isoWeek(addDays(isoWeek(today).from, -1)).key : addMonths(today.slice(0, 7), -1);
-    const sections = [{ title: 'API Key Top 5', rows: rowsOf(st.topKeys) }, { title: '模型 Top 3', rows: rowsOf(st.topModels) }];
-    const lines = [`**${kind === 'weekly' ? '上周' : period + ' 账期'}费用 ${yuan(st.cost)}**，较${st.prevLabel} ${chg(st.cost, st.prevCost)}`, scopeNote, ...sectionLines(sections)];
+    const tRows = list => (list || []).map(x => ({ name: clean(x.name), value: tok(x.tokens), share: st.tokens ? pct(x.tokens / st.tokens * 100) : '' }));
+    const sections = [{ title: 'API Key Top 5', rows: rowsOf(st.topKeys) }, { title: '模型 Top 3', rows: rowsOf(st.topModels) }, { title: 'Token 用量 · API Key Top 5', rows: tRows(st.tokenKeys) }, { title: 'Token 用量 · 模型 Top 3', rows: tRows(st.tokenModels) }];
+    const lines = [`**${kind === 'weekly' ? '上周' : period + ' 账期'}费用 ${yuan(st.cost)}**，较${st.prevLabel} ${chg(st.cost, st.prevCost)}`, `Token ${tok(st.tokens)}，较${st.prevLabel} ${chg(st.tokens || 0, st.prevTokens || 0)}${st.tokens > 0 ? `，单位成本 ${perM(st.cost, st.tokens)}` : ''}`, scopeNote, ...sectionLines(sections)];
     const d = delta('较' + st.prevLabel, st.cost, st.prevCost);
-    const doc = { tags: [{ text: '指定范围', level: 'info' }], kpis: [{ label: kind === 'weekly' ? '上周费用' : `${period} 应付`, value: yuan(st.cost), delta: d }, { label: st.prevLabel, value: yuan(st.prevCost) }, ...(kind === 'monthly' ? budgetKpi : [])], notes: [scopeNote], sections };
+    const doc = { tags: [{ text: '指定范围', level: 'info' }], kpis: [{ label: kind === 'weekly' ? '上周费用' : `${period} 应付`, value: yuan(st.cost), delta: d }, { label: st.prevLabel, value: yuan(st.prevCost) }, ...(kind === 'monthly' ? budgetKpi : [])],
+      usage: [{ label: kind === 'weekly' ? '上周 Token' : `${period} Token`, value: tok(st.tokens), delta: udelta('较' + st.prevLabel, st.tokens || 0, st.prevTokens || 0) }, { label: '单位成本', value: perMv(st.cost, st.tokens), sub: '每百万 Token' }], notes: [scopeNote], sections };
     return { title: `${kind === 'weekly' ? '费用周报' : '费用月报'} · ${period}${tag}`, level: 'info', lines, doc, empty: st.cost < 0.005 && st.prevCost < 0.005, period, ready: kind === 'monthly' ? globalReady : true, path: '#/overview' };
   }
 
@@ -613,7 +635,7 @@ export class AlertService {
    */
   report(kind, today = todayIn(this.tz)) {
     const keys = this.keyMap(), b = this.store.budgets(), alertPct = b.alertPct || 80;
-    const sumBy = (rows, f) => { const m = new Map(); for (const r of rows) { const k = f(r); m.set(k, (m.get(k) || 0) + (r.cost || 0)); } return [...m.entries()].map(([k, cost]) => ({ k, cost })); };
+    const sumBy = (rows, f) => { const m = new Map(); for (const r of rows) { const k = f(r); const a = m.get(k) || m.set(k, { k, cost: 0, tokens: 0 }).get(k); a.cost += r.cost || 0; a.tokens += r.tokens || 0; } return [...m.values()]; };
     const provSplit = rows => {
       const ps = sumBy(rows, r => r.provider || 'aliyun');
       return ps.length > 1 ? '按云厂商：' + ps.sort((x, y) => y.cost - x.cost).map(x => `${PROVIDER_NAMES[x.k] || x.k} ${yuan(x.cost)}`).join('，') : null;
@@ -630,6 +652,7 @@ export class AlertService {
       const rows14 = this.store.dailyByKey(addDays(day, -13), day);
       const y = rows14.filter(r => r.day === day), p = rows14.filter(r => r.day === addDays(day, -1));
       const yc = y.reduce((s, r) => s + r.cost, 0), pc = p.reduce((s, r) => s + r.cost, 0);
+      const yt = y.reduce((s, r) => s + (r.tokens || 0), 0), pt = p.reduce((s, r) => s + (r.tokens || 0), 0);
       const { daily, month } = this.store.budgetUsage(cycle);
       // 月累计与预算使用率按账期（月）账单计算，与预算告警、概览预算条、/metrics 一致；日账单只用于预测
       const mtd = month.reduce((s, r) => s + (r.cost || 0), 0);
@@ -637,10 +660,15 @@ export class AlertService {
       const lines = [`**昨日（${day.slice(5)}）费用 ${yuan(yc)}**，较前一日 ${chg(yc, pc)}`];
       lines.push(`${isCur ? '本月累计' : `${cycle} 合计`} ${yuan(mtd)}${fc != null ? `，预计月末 ${yuan(fc)}` : ''}${b.monthly ? `，月度预算 ${yuan(b.monthly)}（已用 ${pct(mtd / b.monthly * 100)}）` : ''}`);
       const ps = provSplit(y); if (ps) lines.push(ps);
+      const mt = this.store.monthByKey(cycle).reduce((s, r) => s + (r.tokens || 0), 0);
+      lines.push(`昨日 Token ${tok(yt)}，较前一日 ${chg(yt, pt)}${yt > 0 ? `，单位成本 ${perM(yc, yt)}` : ''}；${isCur ? '本月' : cycle} 累计 ${tok(mt)}`);
       const an = this.evaluateAnomaly(today);
+      const byKeyY = sumBy(y, r => r.id).map(x => ({ id: x.k, cost: x.cost, tokens: x.tokens })), byModelY = this.store.dailyByModel(day, day);
       const sections = [
-        { title: '昨日 API Key Top 5', rows: topRows(sumBy(y, r => r.id).map(x => ({ id: x.k, cost: x.cost })), 5, r => this.keyName(r.id, keys), yc) },
-        { title: '昨日模型 Top 3', rows: topRows(this.store.dailyByModel(day, day), 3, r => clean(r.model), yc) },
+        { title: '昨日 API Key Top 5', rows: topRows(byKeyY, 5, r => this.keyName(r.id, keys), yc) },
+        { title: '昨日模型 Top 3', rows: topRows(byModelY, 3, r => clean(r.model), yc) },
+        { title: '昨日 Token 用量 · API Key Top 5', rows: tokRows(byKeyY, 5, r => this.keyName(r.id, keys), yt) },
+        { title: '昨日 Token 用量 · 模型 Top 3', rows: tokRows(byModelY, 3, r => clean(r.model), yt) },
         { title: '异常提示', items: an.map(i => ({ text: i.text, tag: i.tag, level: i.level })) },
       ];
       lines.push(...sectionLines(sections));
@@ -648,8 +676,10 @@ export class AlertService {
       const doc = {
         tags: [dirTag(d), an.length ? { text: `${an.length} 项异常`, level: 'warn' } : null],
         kpis: [{ label: `昨日费用（${day.slice(5)}）`, value: yuan(yc), delta: d }, { label: isCur ? '本月累计' : `${cycle} 合计`, value: yuan(mtd), sub: fc != null ? `预计月末 ${yuan(fc)}` : '' }, ...budgetKpi(mtd)],
+        usage: [{ label: '昨日 Token', value: tok(yt), delta: udelta('较前一日', yt, pt) }, { label: isCur ? '本月累计 Token' : `${cycle} Token`, value: tok(mt) }, { label: '昨日单位成本', value: perMv(yc, yt), sub: '每百万 Token' }],
         notes: ps ? [ps] : [], sections,
         chart: dailyChart('近 14 日每日费用（元）', rows14, addDays(day, -13), day, x => (x === day ? '昨日' : '此前'), { 此前: BLUE_L, 昨日: BLUE }),
+        tokenChart: dailyChart('近 14 日每日 Token（万）', rows14, addDays(day, -13), day, x => (x === day ? '昨日' : '此前'), { 此前: TEAL_L, 昨日: TEAL }, tokVal, 1e-4),
       };
       return { title: `费用日报 · ${day}`, level: 'info', lines, doc, empty: yc < 0.005 && mtd < 0.005, period: today, path: `#/overview?from=${day}&to=${day}` };
     }
@@ -658,22 +688,29 @@ export class AlertService {
       const rows = this.store.dailyByKey(prev.from, last.to);
       const cur = rows.filter(r => r.day >= last.from), old = rows.filter(r => r.day < last.from);
       const c = cur.reduce((s, r) => s + r.cost, 0), o = old.reduce((s, r) => s + r.cost, 0);
+      const ct = cur.reduce((s, r) => s + (r.tokens || 0), 0), ot = old.reduce((s, r) => s + (r.tokens || 0), 0);
       const lines = [`**上周（${last.from.slice(5)} ~ ${last.to.slice(5)}）费用 ${yuan(c)}**，较前一周 ${chg(c, o)}，日均 ${yuan(c / 7)}`];
       const ps = provSplit(cur); if (ps) lines.push(ps);
+      lines.push(`上周 Token ${tok(ct)}，较前一周 ${chg(ct, ot)}，日均 ${tok(ct / 7)}${ct > 0 ? `，单位成本 ${perM(c, ct)}` : ''}`);
+      const byModelW = this.store.dailyByModel(last.from, last.to);
       const kc = sumBy(cur, r => r.id), ko = new Map(sumBy(old, r => r.id).map(x => [x.k, x.cost]));
       const up = kc.map(x => ({ id: x.k, d: x.cost - (ko.get(x.k) || 0) })).filter(x => x.d >= 1).sort((x, y) => y.d - x.d).slice(0, 3);
       const sections = [
         { title: 'API Key Top 5', rows: topRows(kc.map(x => ({ id: x.k, cost: x.cost })), 5, r => this.keyName(r.id, keys), c) },
         { title: '增长最快', rows: up.map(x => ({ name: this.keyName(x.id, keys), value: '+' + yuan(x.d) })) },
-        { title: '模型 Top 3', rows: topRows(this.store.dailyByModel(last.from, last.to), 3, r => clean(r.model), c) },
+        { title: '模型 Top 3', rows: topRows(byModelW, 3, r => clean(r.model), c) },
+        { title: 'Token 用量 · API Key Top 5', rows: tokRows(kc.map(x => ({ id: x.k, tokens: x.tokens })), 5, r => this.keyName(r.id, keys), ct) },
+        { title: 'Token 用量 · 模型 Top 3', rows: tokRows(byModelW, 3, r => clean(r.model), ct) },
       ];
       lines.push(...sectionLines(sections));
       const d = delta('较前一周', c, o);
       const doc = {
         tags: [dirTag(d)],
         kpis: [{ label: `上周（${last.from.slice(5)} ~ ${last.to.slice(5)}）`, value: yuan(c), delta: d }, { label: '日均', value: yuan(c / 7), sub: `前一周日均 ${yuan(o / 7)}` }, { label: '有消费的 API Key', value: `${kc.filter(x => x.cost > 0.005).length} 个`, sub: `前一周 ${[...ko.values()].filter(v => v > 0.005).length} 个` }],
+        usage: [{ label: '上周 Token', value: tok(ct), delta: udelta('较前一周', ct, ot) }, { label: '日均 Token', value: tok(ct / 7), sub: `前一周日均 ${tok(ot / 7)}` }, { label: '单位成本', value: perMv(c, ct), sub: '每百万 Token' }],
         notes: ps ? [ps] : [], sections,
         chart: dailyChart('近两周每日费用（元）', rows, prev.from, last.to, x => (x >= last.from ? '上周' : '前一周'), { 前一周: BLUE_L, 上周: BLUE }),
+        tokenChart: dailyChart('近两周每日 Token（万）', rows, prev.from, last.to, x => (x >= last.from ? '上周' : '前一周'), { 前一周: TEAL_L, 上周: TEAL }, tokVal, 1e-4),
       };
       return { title: `费用周报 · ${last.key}`, level: 'info', lines, doc, empty: c < 0.005 && o < 0.005, period: last.key, path: `#/overview?from=${last.from}&to=${last.to}` };
     }
@@ -684,19 +721,27 @@ export class AlertService {
     const lines = [`**${cycle} 账期应付 ${yuan(c)}**，较上月 ${chg(c, o)}${g > c ? `，原价 ${yuan(g)}，优惠 ${yuan(g - c)}` : ''}`];
     if (b.monthly) lines.push(`月度预算 ${yuan(b.monthly)}，${c > b.monthly ? `超出 ${yuan(c - b.monthly)}` : `使用 ${pct(c / b.monthly * 100)}`}`);
     const ps = provSplit(rows); if (ps) lines.push(ps);
+    const ct = rows.reduce((s, r) => s + (r.tokens || 0), 0), ot = prows.reduce((s, r) => s + (r.tokens || 0), 0), mdays = daysInMonth(cycle);
+    lines.push(`${cycle} Token ${tok(ct)}，较上月 ${chg(ct, ot)}，日均 ${tok(ct / mdays)}${ct > 0 ? `，单位成本 ${perM(c, ct)}` : ''}`);
+    const byModelM = this.store.monthByModel(cycle);
     const cc = sumBy(rows, r => clean(keys.get(r.id)?.tag?.cost_center) || '未分配成本中心');
     const sections = [
       { title: 'API Key Top 5', rows: topRows(sumBy(rows, r => r.id).map(x => ({ id: x.k, cost: x.cost })), 5, r => this.keyName(r.id, keys), c) },
       { title: '按成本中心', rows: cc.length > 1 || (cc[0] && cc[0].k !== '未分配成本中心') ? topRows(cc, 6, r => r.k, c) : [] },
-      { title: '模型 Top 3', rows: topRows(this.store.monthByModel(cycle), 3, r => clean(r.model), c) },
+      { title: '模型 Top 3', rows: topRows(byModelM, 3, r => clean(r.model), c) },
+      { title: 'Token 用量 · API Key Top 5', rows: tokRows(sumBy(rows, r => r.id).map(x => ({ id: x.k, tokens: x.tokens })), 5, r => this.keyName(r.id, keys), ct) },
+      { title: 'Token 用量 · 模型 Top 3', rows: tokRows(byModelM, 3, r => clean(r.model), ct) },
     ];
     lines.push(...sectionLines(sections));
     const d = delta('较上月', c, o), last = addDays(addMonths(cycle, 1) + '-01', -1);
+    const mdaily = this.store.dailyByKey(cycle + '-01', last);
     const doc = {
       tags: [dirTag(d), b.monthly && c > b.monthly ? { text: '超出预算', level: 'bad' } : null],
       kpis: [{ label: `${cycle} 应付`, value: yuan(c), delta: d }, ...(g > 0.005 ? [{ label: '原价', value: yuan(g), sub: g - c >= 0.005 ? `优惠 ${yuan(g - c)}` : '无优惠抵扣' }] : []), ...budgetKpi(c, '预算使用')],
+      usage: [{ label: `${cycle} Token`, value: tok(ct), delta: udelta('较上月', ct, ot) }, { label: '日均 Token', value: tok(ct / mdays) }, { label: '单位成本', value: perMv(c, ct), sub: '每百万 Token' }],
       notes: ps ? [ps] : [], sections,
-      chart: dailyChart(`${cycle} 每日费用（元）`, this.store.dailyByKey(cycle + '-01', last), cycle + '-01', last, () => '每日应付', { 每日应付: BLUE }),
+      chart: dailyChart(`${cycle} 每日费用（元）`, mdaily, cycle + '-01', last, () => '每日应付', { 每日应付: BLUE }),
+      tokenChart: dailyChart(`${cycle} 每日 Token（万）`, mdaily, cycle + '-01', last, () => '每日 Token', { '每日 Token': TEAL }, tokVal, 1e-4),
     };
     return { title: `费用月报 · ${cycle}`, level: 'info', lines, doc, empty: c < 0.005 && o < 0.005, period: cycle, ready: this.monthlyReady(today), path: `#/overview?cycle=${cycle}` };
   }
@@ -851,7 +896,7 @@ export class AlertService {
     if (event === 'monthly') return { mode: 'month', cycle: addMonths(today.slice(0, 7), -1) };
     return { mode: 'month', cycle: today.slice(0, 7) };
   }
-  async sendEmail(recipients, { brand, title, level, lines, footer, event, today = todayIn(this.tz), scope = null }) {
+  async sendEmail(recipients, { brand, title, level, lines, footer, event, today = todayIn(this.tz), scope = null, share = null }) {
     const spec = this.overviewSpec(event, today);
     const base = this.publicUrl ? this.publicUrl.replace(/\/+$/, '') + '/' : '';
     const link = base ? base + (spec.mode === 'month' ? `#/overview?cycle=${spec.cycle}` : `#/overview?from=${spec.from}&to=${spec.to}`) : '';
@@ -861,8 +906,21 @@ export class AlertService {
     this._ov = (this._ov || new Map());
     for (const [k, v] of this._ov) if (now - v.t > 60_000) this._ov.delete(k);
     try { overview = this._ov.get(ck)?.o || renderOverviewHtml(spec, { store: this.store, today, link, scope }); this._ov.set(ck, { t: now, o: overview }); } catch (e) { this.log?.(`生成成本概览邮件内容失败：${e.message}`); }
-    const { html, text } = renderEmail({ brand, title, level, lines, overview, footer });
+    const { html, text } = renderEmail({ brand, title, level, lines, overview, footer, share });
     return sendMail(this.smtpConfig(), { to: parseRecipients(recipients), subject: title, html, text }, { allowPrivate: this.allowPrivate, isPrivateIp });
+  }
+  /**
+   * 渠道开启“附带交互报表链接”且已设置 PUBLIC_URL 时，为本条消息生成只读分享链接：周期与邮件附带的成本概览一致
+   * （日报为昨日所在账期、周报为上周、月报为上月、告警为本月），范围与渠道的推送范围一致。生成失败不影响消息发送
+   */
+  shareFor(ch, { title, event, today, webhook }) {
+    if (!ch.share || !this.shares?.available) return null;
+    try {
+      const days = this.settings().shareDays, spec = this.overviewSpec(event, today);
+      const l = this.shares.create({ title: String(title).replace(/（手动发送）$/, ''), spec, scope: cleanScope(ch.scope), channelId: ch.id, channelName: ch.name, event: event || 'alert', days });
+      let host = ''; try { host = new URL(webhook).hostname; } catch { /* 邮件渠道 */ }
+      return { url: l.url, feishu: feishuAppLink(l.url, host), days, expiresAt: l.expiresAt };
+    } catch (e) { this.log?.('生成分享链接失败（消息照常发送）：' + e.message); return null; }
   }
   /**
    * 飞书：依次尝试“完整卡片（含趋势图）→ 不含趋势图 → 简洁卡片”，只有飞书明确拒绝卡片内容时才降级（签名 / 关键词 / 限流等错误直接报错）；
@@ -894,20 +952,23 @@ export class AlertService {
     const base = this.publicUrl ? this.publicUrl.replace(/\/+$/, '') + '/' : '';
     const link = base ? base + (/^#\/[\w/?&=.~%-]*$/.test(path) ? path : '#/overview') : '';
     const type = ch.type;
-    if (ALERT_TYPES[type]?.email) return this.sendEmail(webhook, { brand, title: `【${brand}】${title}`, level, lines, footer, event, today, scope: this.scopeOf(ch) });
+    const share = this.shareFor(ch, { title, event, today, webhook });
+    if (ALERT_TYPES[type]?.email) return this.sendEmail(webhook, { brand, title: `【${brand}】${title}`, level, lines, footer, event, today, scope: this.scopeOf(ch), share });
     const mentions = mention && (ch.atAll || ch.atMobiles?.length) ? { all: !!ch.atAll, mobiles: ALERT_TYPES[type]?.mention === 'mobile' ? ch.atMobiles || [] : [] } : null;
     const fullTitle = `【${brand}】${title}`;
-    const payload = buildMessage(type, { title: fullTitle, level, lines, footer, link, mentions });
+    const payload = buildMessage(type, { title: fullTitle, level, lines, footer, link, mentions, share });
     if (type === 'feishu') {
-      const opt = { title, subtitle: `${brand} · 统计至 ${today.slice(5)} ${time}`, level, doc: doc || { items: lines.filter(l => l && !l.startsWith('#')).map(text => ({ text })) }, footer: `${brand} · 口径：应付金额（税前） · 数据来源：${src}费用中心`, link, mentions, links: link && !/^#\/overview/.test(path) ? [{ text: '成本概览', url: base + '#/overview' }] : [] };
-      const hasChart = !!doc?.chart;
+      const opt = { title, subtitle: `${brand} · 统计至 ${today.slice(5)} ${time}`, level, doc: doc || { items: lines.filter(l => l && !l.startsWith('#')).map(text => ({ text })) }, footer: `${brand} · 口径：应付金额（税前） · 数据来源：${src}费用中心${share ? ` · 交互报表 ${share.days} 天内有效，无需登录` : ''}`, mentions,
+        // 按钮：查看交互报表（只读分享链接，在飞书内打开）/ 查看详情（登录后的系统页面）/ 成本概览
+        buttons: [share && { text: '查看交互报表', url: share.feishu, type: 'primary' }, link && { text: share ? '登录系统查看' : '查看详情', url: link, type: share ? 'default' : 'primary' }, !share && link && !/^#\/overview/.test(path) && { text: '成本概览', url: base + '#/overview' }].filter(Boolean) };
+      const hasChart = !!(doc?.chart || doc?.tokenChart);
       return this.postFeishu(webhook, secret, [
         { style: 'chart', label: '完整卡片', card: hasChart ? feishuCard({ ...opt, chart: true }) : null },
         { style: 'card', label: '卡片（不含趋势图）', card: feishuCard({ ...opt, chart: false }) },
         { style: 'plain', label: '简洁卡片', card: payload },
       ]);
     }
-    const generic = { event: 'alert', title: fullTitle, level, items: lines.filter(l => l && !l.startsWith('#')).map(strip), text: [fullTitle, ...lines.map(l => (l.startsWith('#') ? l.replace(/^#+\s*/, '') : l ? '- ' + strip(l) : '')), footer].join('\n'), link: link || null, mentions, sentAt: new Date().toISOString() };
+    const generic = { event: 'alert', title: fullTitle, level, items: lines.filter(l => l && !l.startsWith('#')).map(strip), text: [fullTitle, ...lines.map(l => (l.startsWith('#') ? l.replace(/^#+\s*/, '') : l ? '- ' + strip(l) : '')), footer].join('\n'), link: link || null, shareUrl: share?.url || null, shareExpiresAt: share ? new Date(share.expiresAt).toISOString() : null, mentions, sentAt: new Date().toISOString() };
     const req = signRequest(type, webhook, secret, payload, generic);
     checkResponse(type, await postJson(req.url, req.body, req.headers, this.allowPrivate));
     // 企业微信 markdown 不支持按手机号 @，追加一条 text 消息提醒；主消息已送达，提醒失败只记录日志，避免重试时重复发送主消息
@@ -927,7 +988,7 @@ export class AlertService {
     if (ch.type === 'feishu') {
       let r = null;
       try { r = this.report('daily'); } catch (e) { this.log?.('生成测试卡片指标失败：' + e.message); }
-      doc = { tags: [{ text: '测试', level: 'info' }], kpis: r?.doc.kpis || null, chart: r?.doc.chart || null, items: lines.map(text => ({ text })) };
+      doc = { tags: [{ text: '测试', level: 'info' }], kpis: r?.doc.kpis || null, usage: r?.doc.usage || null, chart: r?.doc.chart || null, tokenChart: r?.doc.tokenChart || null, items: lines.map(text => ({ text })) };
     }
     return this.send(ch, creds, { title: '测试消息', level: 'info', mention: true, lines, doc });
   }

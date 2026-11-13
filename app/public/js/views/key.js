@@ -219,6 +219,7 @@ const CHG = { create: ['新增', 'good'], update: ['修改', 'warn'], delete: ['
 async function loadChanges(v, id) {
   const el = $('#kChanges', v);
   if (!el) return;
+  if (state.share) { el.innerHTML = '<div class="nodata">只读分享视图不包含变更记录</div>'; return; }
   try {
     // 按 Key 查询全部变更（不在最近 2000 条全局变更中查找，较早创建的 Key 也能看到历史）
     const list = (await http('GET', '/api/changes?entity_id=' + encodeURIComponent(id))).changes.filter(c => c.entity === 'api_key');
