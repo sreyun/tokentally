@@ -20,7 +20,7 @@ import { configureIpLoc, ipLoc, ipLocInfo } from './iploc.mjs';
 import { normalizeSmtp, parseRecipients } from './smtp.mjs';
 import { loadMasterKey, hashPassword, verifyPassword, burnPasswordCheck, checkPasswordPolicy, randomPassword, maskId, sha256 } from './crypto.mjs';
 
-const VERSION = '1.8.0';
+const VERSION = '1.9.0';
 
 /* ===================================================================
  * 系统日志：所有运行日志同时输出到控制台并写入数据库（system_log，保留 SYSTEM_LOG_DAYS 天），
@@ -1132,7 +1132,7 @@ route('PUT', '/api/admin/budgets', async (req, res, ctx) => {
   const next = { monthly, alertPct, keys };
   store.setSetting('budgets', next);
   store.audit(ctx.user.username, ctx.ip, 'budgets.update', { monthly, alertPct, keyBudgets: Object.keys(keys).length });
-  alerts.check('budgets');
+  // 不立即推送：新的预算条件由定时检查（每 5 分钟 / 账单同步后）发送，与“保存配置只保存”的规则一致
   return json(req, res, 200, next);
 }, { admin: true });
 
@@ -1215,9 +1215,11 @@ route('PUT', '/api/admin/alerts', async (req, res, ctx) => {
   }
   const next = { channels: plan.map(p => p.ch), rules, anomaly, reportHour };
   store.setSetting('alerts', next);
+  // 只保存、不推送：新订阅（新渠道 / 重新启用 / 新勾选事件 / 修改推送范围 / 报表时间改到已过的时刻）当前已到点的内容不补发
+  let armed = 0;
+  try { armed = alerts.arm(cur, alerts.settings()); } catch (e) { log('登记告警基线失败（配置已保存）：' + e.message); }
   store.audit(ctx.user.username, ctx.ip, 'alert.update', { channels: next.channels.map(c => ({ name: c.name, type: c.type, enabled: c.enabled, events: Object.keys(c.events).filter(k => c.events[k]), ...(c.scope?.type !== 'all' ? { scope: { type: c.scope.type, n: c.scope.ids.length } } : {}) })), rules, anomaly, reportHour, fields });
-  const check = next.channels.some(c => c.enabled) ? await alerts.check('config') : null;
-  return json(req, res, 200, { ...alerts.out(), check });
+  return json(req, res, 200, { ...alerts.out(), armed });
 }, { admin: true });
 /*
  * 邮件服务器（SMTP）：密码（或授权码）只写不回显，AES-256-GCM 加密保存；
@@ -1271,13 +1273,14 @@ route('POST', '/api/admin/alerts/test', async (req, res, ctx) => {
   const secretIn = typeof b.secret === 'string' ? b.secret.trim().slice(0, 256) : '';
   const secret = secretIn || (webhook === sec.webhook ? sec.secret : '');
   const ch = { id: saved?.id || 'test', name: saved?.name || ALERT_TYPES[type].label, type, atAll: !!b.atAll, atMobiles: cleanMobiles(b.atMobiles), scope: b.scope != null ? cleanScope(b.scope) : saved?.scope };
-  try { await alerts.test(ch, { webhook, secret }); }
+  let style = null;
+  try { style = await alerts.test(ch, { webhook, secret }); }
   catch (e) {
     store.audit(ctx.user.username, ctx.ip, 'alert.test.fail', { type, error: String(e.message).slice(0, 200) });
     throw new HttpError(502, '发送失败：' + e.message);
   }
   store.audit(ctx.user.username, ctx.ip, 'alert.test', { type, channel: ch.name });
-  return json(req, res, 200, { ok: true });
+  return json(req, res, 200, { ok: true, style: typeof style === 'string' ? style : null });
 }, { admin: true });
 /* 报表预览 / 立即发送（不影响定时发送记录） */
 route('POST', '/api/admin/alerts/report', async (req, res, ctx) => {
@@ -1289,11 +1292,13 @@ route('POST', '/api/admin/alerts/report', async (req, res, ctx) => {
     if (!ch) throw new HttpError(400, '请选择已保存的通知渠道');
     const sec = alerts.secretsOf(ch.id);
     if (!sec.webhook) throw new HttpError(400, '该渠道尚未配置 Webhook 地址');
-    try { await alerts.send(ch, sec, { title: r.title + '（手动发送）', level: r.level, lines: r.lines }); }
+    let style = null;
+    try { style = await alerts.send(ch, sec, { title: r.title + '（手动发送）', level: r.level, lines: r.lines, doc: r.doc, event: kind, path: r.path }); }
     catch (e) { throw new HttpError(502, '发送失败：' + e.message); }
     store.audit(ctx.user.username, ctx.ip, 'alert.report.send', { kind, channel: ch.name });
+    return json(req, res, 200, { title: r.title, lines: r.lines, doc: r.doc, empty: !!r.empty, sent: true, style: typeof style === 'string' ? style : null });
   }
-  return json(req, res, 200, { title: r.title, lines: r.lines, empty: !!r.empty, sent: !!b.send });
+  return json(req, res, 200, { title: r.title, lines: r.lines, doc: r.doc, empty: !!r.empty, sent: false });
 }, { admin: true });
 
 /* ---------------- 数据备份 ---------------- */

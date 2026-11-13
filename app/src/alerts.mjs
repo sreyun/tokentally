@@ -20,6 +20,7 @@ import { todayIn, hourIn, addDays, addMonths, isCycleFinal, PROVIDER_NAMES } fro
 import { dayStartSec } from './prom.mjs';
 import { sendMail, parseRecipients, normalizeSmtp, SMTP_SECURITY } from './smtp.mjs';
 import { renderOverviewHtml, renderEmail } from './overview-mail.mjs';
+import { feishuCard, feishuFormatError } from './feishu-card.mjs';
 
 /** 推送范围：全部 / 指定 API Key / 指定业务空间（最多 200 个） */
 export const SCOPE_TYPES = { all: '全部', key: '指定 API Key', ws: '指定业务空间' };
@@ -143,6 +144,24 @@ const chg = (a, b) => (b > 0 ? `${a >= b ? '+' : '−'}${Math.abs((a - b) / b * 
 /** 描述来自云厂商 Key 备注，去掉可构成 Markdown 链接/格式的字符 */
 export const clean = s => String(s || '').replace(/[[\]()<>*_`#|\\~]/g, '').replace(/\s+/g, ' ').trim().slice(0, 40);
 const strip = s => String(s).replace(/\*\*/g, '');
+/** 涨跌（飞书卡片着色用）：{ label, text: '+2.0%', dir: up / down / null } */
+const delta = (label, a, b) => ({ label, text: chg(a, b), dir: b > 0 && Math.abs(a - b) >= 0.005 ? (a > b ? 'up' : 'down') : null });
+/** 排行：[{ name, value, share }]；与文本消息中的“1. 名称 ¥金额（占比）”一一对应 */
+const topRows = (rows, n, nameOf, total) => rows.filter(r => r.cost > 0.005).sort((x, y) => y.cost - x.cost).slice(0, n).map(r => ({ name: nameOf(r), value: yuan(r.cost), share: pct(total ? r.cost / total * 100 : 0) }));
+const rowLines = rows => rows.map((r, i) => `${i + 1}. ${r.name} ${r.value}${r.share ? `（${r.share}）` : ''}`);
+/** 结构化分节 → 文本行（钉钉 / 企业微信 / 邮件 / 通用 Webhook / 通知记录使用） */
+const sectionLines = sections => sections.flatMap(s => (s.rows?.length ? ['', `#### ${s.title}`, ...rowLines(s.rows)] : s.items?.length ? ['', `#### ${s.title}`, ...s.items.map(i => i.text)] : []));
+/** 每日费用柱状图数据：from..to 每天一根柱子，k 用于分组着色；有数据的天数不足 3 天时不画图 */
+function dailyChart(title, rows, from, to, kOf, colors) {
+  const by = new Map();
+  for (const r of rows) by.set(r.day, (by.get(r.day) || 0) + (r.cost || 0));
+  const first = [...by.keys()].sort()[0];
+  if (!first) return null;
+  const values = [];
+  for (let d = first > from ? first : from; d <= to; d = addDays(d, 1)) values.push({ d: d.slice(5), v: Math.round((by.get(d) || 0) * 100) / 100, k: kOf(d) });
+  return values.length >= 3 ? { title, values, colors } : null;
+}
+const BLUE = '#3370FF', BLUE_L = '#B7CBF9';
 
 /**
  * 机器人消息长度上限按 UTF-8 字节计算（企业微信 markdown 4096 字节、钉钉 20000 字节、飞书卡片约 30KB；中文每字 3 字节）。
@@ -215,6 +234,15 @@ function checkResponse(type, { status, text }) {
   if (code != null && Number(code) !== 0) throw Object.assign(new Error(`${j.errmsg || j.msg || j.StatusMessage || '机器人返回错误'}（错误码 ${code}）`), { content: /length|exceed|content|长度|过长|invalid.*(markdown|msg)/i.test(String(j.errmsg || j.msg || '')) });
 }
 
+/** 告警卡片标题栏的状态标签 */
+function alertTag(event, level, n) {
+  if (event === 'budget') return level === 'bad' ? { text: '已超支', level: 'bad' } : { text: '预算预警', level: 'warn' };
+  if (event === 'anomaly') return { text: `${n} 项异常`, level: 'warn' };
+  if (event === 'sync') return level === 'good' ? { text: '已恢复', level: 'good' } : { text: '同步故障', level: 'bad' };
+  if (event === 'keyChange') return { text: `${n} 项变更`, level: 'info' };
+  return null;
+}
+
 /* ---------------- 日期工具 ---------------- */
 const daysBetween = (a, b) => Math.round((Date.parse(b + 'T00:00:00Z') - Date.parse(a + 'T00:00:00Z')) / 864e5) + 1;
 const daysInMonth = cycle => { const [y, m] = cycle.split('-').map(Number); return new Date(Date.UTC(y, m, 0)).getUTCDate(); };
@@ -283,15 +311,99 @@ export class AlertService {
   }
   saveState(st) { this.store.setSetting('alerts.state', st); }
 
+  /* ---------- 保存配置：只保存，不补发 ---------- */
+  /**
+   * 保存告警配置时调用（不发送任何消息）。以下情况视为“新订阅”，当前已到点 / 已满足条件的内容记为已处理、不补发，
+   * 之后只在下一次到点或出现新的条件时推送：
+   *  - 新增渠道、重新启用渠道、新勾选某个事件；
+   *  - 修改推送范围（预算告警与费用异常按新范围重新计算，当前已满足的条件不补发）；
+   *  - 报表时间改到今天已经过去的时刻（今天的日报 / 本周的周报 / 异常检查不在保存后立即补发）。
+   * 到点规则：日报为每天报表时间；周报为每周一报表时间；月报为上月出账后（保存时已出账的上月月报不补发）；
+   *          费用异常在每天报表时间检查昨日；预算告警与同步故障在条件出现时发送。
+   * 基线在保存时立即计算（以保存时刻的数据为准），并持久化到 alerts.arm：有检查正在进行时（其结束时会整体写回状态）
+   * 由下一次检查在开始时合并，避免并发写入互相覆盖；服务重启也不会丢失。返回登记的渠道数。
+   */
+  arm(prev, next) {
+    const today = todayIn(this.tz), cycle = today.slice(0, 7), hour = hourIn(this.tz);
+    const afterNew = hour >= next.reportHour, hourPast = afterNew && hour < prev.reportHour;
+    const prevById = new Map((prev.channels || []).map(c => [c.id, c]));
+    const scopeKey = sc => { const c = cleanScope(sc); return c.type + ':' + [...c.ids].sort().join(','); };
+    const lazy = {}, get = (k, f) => (lazy[k] ??= f());
+    const marks = [];
+    for (const ch of next.channels) {
+      if (!ch.enabled) continue;
+      const o = prevById.get(ch.id), wasOn = e => !!(o && o.enabled && o.events?.[e]);
+      const scopeChanged = !!o && scopeKey(o.scope) !== scopeKey(ch.scope);
+      // 报表时间提前到已过的时刻：只影响“今天”到点的内容（今天的日报与异常检查、周一的周报）；
+      // 此前已到点但尚未发出的报表（如周一账单未入账、周二仍在等待的周报，或等待出账的月报）照常发送，不能因改时间被跳过
+      const hourHit = e => hourPast && (e === 'anomaly' || e === 'daily' || (e === 'weekly' && weekday(today) === 1));
+      const armed = Object.keys(EVENT_TYPES).filter(e => ch.events[e] && (!wasOn(e) || (scopeChanged && (e === 'budget' || e === 'anomaly')) || hourHit(e)));
+      if (!armed.length) continue;
+      const scope = this.scopeOf(ch), keyOf = code => /^key:([^:]*):/.exec(code)?.[1] ?? null;
+      const m = { ch: ch.id, cycle, at: Date.now(), events: armed, sent: [], syncSent: [], reports: {}, lastChangeId: null };
+      for (const e of armed) {
+        if (e === 'budget') m.sent.push(...get('budget', () => this.evaluateBudget(today)).filter(i => !scope || scope.keys.has(keyOf(i.code))).map(i => i.code));
+        else if (e === 'anomaly' && afterNew) m.sent.push(...get('anomaly:' + (scope?.sig || ''), () => this.evaluateAnomaly(today, scope)).map(i => i.code));
+        else if (e === 'sync') m.syncSent.push(...get('sync', () => this.evaluateSync()).map(i => i.code));
+        else if (e === 'keyChange') m.lastChangeId = get('maxChange', () => this.store.maxChangeId());
+        else if (e === 'daily' && afterNew) m.reports.daily = today;
+        else if (e === 'weekly' && (weekday(today) !== 1 || afterNew)) m.reports.weekly = isoWeek(addDays(isoWeek(today).from, -1)).key;
+        else if (e === 'monthly' && get('monthlyReady', () => this.monthlyReady(today))) m.reports.monthly = addMonths(cycle, -1);
+      }
+      marks.push(m);
+    }
+    if (!marks.length) return 0;
+    const q = this.store.getSetting('alerts.arm', null);
+    this.store.setSetting('alerts.arm', [...(Array.isArray(q) ? q : []), ...marks].slice(-50));
+    if (!this.running) this.applyArm(); // 没有检查在进行：立即合并（JS 单线程，此刻不会有检查读写状态）
+    return marks.length;
+  }
+  /** 把基线合并进状态（纯函数，不保存）；预算 / 异常的标记只在同一账期内有效（预算条目编码不含账期，跨账期合并会压制新账期的告警） */
+  mergeArm(st, q) {
+    for (const m of q || []) {
+      if (!m || !m.ch) continue;
+      if (m.cycle === st.cycle) { const s = (st.sent[m.ch] ||= {}); for (const c of m.sent || []) s[c] ??= m.at; }
+      const y = (st.syncSent[m.ch] ||= {}); for (const c of m.syncSent || []) y[c] ??= m.at;
+      const r = (st.reports[m.ch] ||= {}); for (const [k, p] of Object.entries(m.reports || {})) if (r[k] == null || String(r[k]) < String(p)) r[k] = p;
+      if (m.lastChangeId != null) st.lastChangeId[m.ch] = Math.max(Number(st.lastChangeId[m.ch]) || 0, m.lastChangeId);
+    }
+    return st;
+  }
+  applyArm() {
+    const q = this.store.getSetting('alerts.arm', null);
+    if (!Array.isArray(q) || !q.length) return;
+    this.saveState(this.mergeArm(this.stateFor(todayIn(this.tz).slice(0, 7)), q));
+    this.store.setSetting('alerts.arm', []);
+  }
+  /** 渠道下一次报表的发送时间（展示用）：{ daily, weekly, monthly } 文本 */
+  nextRuns(ch, st, today = todayIn(this.tz), hour = hourIn(this.tz), reportHour = this.settings().reportHour) {
+    const r = st.reports[ch.id] || {}, hh = `${String(reportHour).padStart(2, '0')}:00`, at = d => `${d.slice(5)} ${hh}`, after = hour >= reportHour;
+    const cycle = today.slice(0, 7), prevCycle = addMonths(cycle, -1), nextCycle = addMonths(cycle, 1);
+    const out = {};
+    // “待发送”：已到点但尚未发出（账单尚未入账、上次发送失败等），下一次检查（每 5 分钟 / 同步完成后）发送
+    if (ch.events.daily) out.daily = r.daily === today ? at(addDays(today, 1)) : after ? '待发送' : at(today);
+    if (ch.events.weekly) {
+      const last = isoWeek(addDays(isoWeek(today).from, -1)).key, mon = isoWeek(today).from;
+      out.weekly = r.weekly === last ? at(addDays(mon, 7)) + '（周一）' : weekday(today) === 1 && !after ? at(mon) + '（周一）' : '待发送';
+    }
+    if (ch.events.monthly) {
+      out.monthly = r.monthly === prevCycle ? `${nextCycle.slice(5)} 月初出账后（约 ${nextCycle.slice(5)}-04，最晚 ${nextCycle.slice(5)}-10）`
+        : this.monthlyReady(today) ? (after ? '待发送' : `今天 ${hh}`) : `${prevCycle.slice(5)} 月账单出账后（约 ${cycle.slice(5)}-04，最晚 ${cycle.slice(5)}-10）`;
+    }
+    return out;
+  }
+
   out() {
-    const s = this.settings(), cycle = todayIn(this.tz).slice(0, 7), st = this.stateFor(cycle);
+    const s = this.settings(), today = todayIn(this.tz), cycle = today.slice(0, 7), hour = hourIn(this.tz);
+    // 展示时包含尚未合并的基线（检查进行中保存的配置），避免“当前满足条件、尚未通知”误列出不会补发的条目
+    const st = this.mergeArm(this.stateFor(cycle), this.store.getSetting('alerts.arm', null));
     const budgetItems = this.evaluateBudget().filter(i => !i.hidden);
     const subs = s.channels.filter(c => c.enabled && c.events.budget);
     return {
       ...s,
       channels: s.channels.map(c => {
         const sec = this.secretsOf(c.id), cs = st.channels[c.id] || {};
-        return { ...c, scopeLabel: this.scopeOf(c)?.label || '', webhookSet: !!sec.webhook, webhookMasked: c.type === 'email' ? maskEmails(sec.webhook) : maskWebhook(sec.webhook), secretSet: !!sec.secret, undecryptable: !!sec.undecryptable, lastSentAt: cs.lastSentAt || null, lastError: cs.lastError || null, lastErrorAt: cs.lastErrorAt || null };
+        return { ...c, scopeLabel: this.scopeOf(c)?.label || '', webhookSet: !!sec.webhook, webhookMasked: c.type === 'email' ? maskEmails(sec.webhook) : maskWebhook(sec.webhook), secretSet: !!sec.secret, undecryptable: !!sec.undecryptable, lastSentAt: cs.lastSentAt || null, lastError: cs.lastError || null, lastErrorAt: cs.lastErrorAt || null, nextRuns: c.enabled ? this.nextRuns(c, st, today, hour, s.reportHour) : {} };
       }),
       enabled: s.channels.some(c => c.enabled),
       types: Object.fromEntries(Object.entries(ALERT_TYPES).map(([k, v]) => [k, { label: v.label, sign: v.sign, host: v.hosts?.[0] || '', mention: v.mention, email: !!v.email }])),
@@ -320,20 +432,31 @@ export class AlertService {
     const keys = this.keyMap();
     const o = renderOverviewHtml(this.overviewSpec(kind, today), { store: this.store, today, scope });
     const st = o.stats, tag = `（${scope.label}）`;
-    const tops = (title, list) => (list.length ? ['', `#### ${title}`, ...list.map((x, i) => `${i + 1}. ${clean(x.name)} ${yuan(x.cost)}${st.cost ? `（${pct(x.cost / st.cost * 100)}）` : ''}`)] : []);
+    const rowsOf = list => list.filter(x => x.cost > 0.005).map(x => ({ name: clean(x.name), value: yuan(x.cost), share: st.cost ? pct(x.cost / st.cost * 100) : '' }));
+    const scopeNote = `推送范围：${scope.label}`;
+    const budgetKpi = st.budget ? [{ label: '范围内 Key 预算', value: pct(st.cost / st.budget * 100), tone: st.cost >= st.budget ? 'bad' : null, sub: `预算 ${yuan(st.budget)}` }] : [];
     if (kind === 'daily') {
       const day = addDays(today, -1);
-      const rows = this.store.dailyByKey(addDays(day, -1), day).filter(r => scope.keys.has(r.id));
-      const y = rows.filter(r => r.day === day), yc = y.reduce((s, r) => s + r.cost, 0), pc = rows.filter(r => r.day !== day).reduce((s, r) => s + r.cost, 0);
+      const rows14 = this.store.dailyByKey(addDays(day, -13), day).filter(r => scope.keys.has(r.id));
+      const y = rows14.filter(r => r.day === day), yc = y.reduce((s, r) => s + r.cost, 0), pc = rows14.filter(r => r.day === addDays(day, -1)).reduce((s, r) => s + r.cost, 0);
       const byKey = new Map(); for (const r of y) byKey.set(r.id, (byKey.get(r.id) || 0) + r.cost);
-      const top = [...byKey.entries()].filter(e => e[1] > 0.005).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([id, cost]) => `${this.keyName(id, keys)} ${yuan(cost)}（${pct(yc ? cost / yc * 100 : 0)}）`);
-      const lines = [`**昨日（${day.slice(5)}）费用 ${yuan(yc)}**，较前一日 ${chg(yc, pc)}`, `${st.label} 合计 ${yuan(st.cost)}${st.forecast != null ? `，预计月末 ${yuan(st.forecast)}` : ''}${st.budget ? `，范围内 Key 预算 ${yuan(st.budget)}（已用 ${pct(st.cost / st.budget * 100)}）` : ''}`, `推送范围：${scope.label}`];
-      if (top.length) lines.push('', '#### 昨日 API Key Top 5', ...top.map((t, i) => `${i + 1}. ${t}`));
-      return { title: `费用日报 · ${day}${tag}`, level: 'info', lines, empty: yc < 0.005 && st.cost < 0.005, period: today, ready: true, path: '#/overview' };
+      const sections = [{ title: '昨日 API Key Top 5', rows: topRows([...byKey.entries()].map(([id, cost]) => ({ id, cost })), 5, r => this.keyName(r.id, keys), yc) }];
+      const lines = [`**昨日（${day.slice(5)}）费用 ${yuan(yc)}**，较前一日 ${chg(yc, pc)}`, `${st.label} 合计 ${yuan(st.cost)}${st.forecast != null ? `，预计月末 ${yuan(st.forecast)}` : ''}${st.budget ? `，范围内 Key 预算 ${yuan(st.budget)}（已用 ${pct(st.cost / st.budget * 100)}）` : ''}`, scopeNote, ...sectionLines(sections)];
+      const d = delta('较前一日', yc, pc);
+      const doc = {
+        tags: [{ text: '指定范围', level: 'info' }],
+        kpis: [{ label: `昨日费用（${day.slice(5)}）`, value: yuan(yc), delta: d }, { label: `${st.label} 合计`, value: yuan(st.cost), sub: st.forecast != null ? `预计月末 ${yuan(st.forecast)}` : '' }, ...budgetKpi],
+        notes: [scopeNote], sections,
+        chart: dailyChart('近 14 日每日费用（元）', rows14, addDays(day, -13), day, x => (x === day ? '昨日' : '此前'), { 此前: BLUE_L, 昨日: BLUE }),
+      };
+      return { title: `费用日报 · ${day}${tag}`, level: 'info', lines, doc, empty: yc < 0.005 && st.cost < 0.005, period: today, ready: true, path: '#/overview' };
     }
     const period = kind === 'weekly' ? isoWeek(addDays(isoWeek(today).from, -1)).key : addMonths(today.slice(0, 7), -1);
-    const lines = [`**${kind === 'weekly' ? '上周' : period + ' 账期'}费用 ${yuan(st.cost)}**，较${st.prevLabel} ${chg(st.cost, st.prevCost)}`, `推送范围：${scope.label}`, ...tops('API Key Top 5', st.topKeys), ...tops('模型 Top 3', st.topModels)];
-    return { title: `${kind === 'weekly' ? '费用周报' : '费用月报'} · ${period}${tag}`, level: 'info', lines, empty: st.cost < 0.005 && st.prevCost < 0.005, period, ready: kind === 'monthly' ? globalReady : true, path: '#/overview' };
+    const sections = [{ title: 'API Key Top 5', rows: rowsOf(st.topKeys) }, { title: '模型 Top 3', rows: rowsOf(st.topModels) }];
+    const lines = [`**${kind === 'weekly' ? '上周' : period + ' 账期'}费用 ${yuan(st.cost)}**，较${st.prevLabel} ${chg(st.cost, st.prevCost)}`, scopeNote, ...sectionLines(sections)];
+    const d = delta('较' + st.prevLabel, st.cost, st.prevCost);
+    const doc = { tags: [{ text: '指定范围', level: 'info' }], kpis: [{ label: kind === 'weekly' ? '上周费用' : `${period} 应付`, value: yuan(st.cost), delta: d }, { label: st.prevLabel, value: yuan(st.prevCost) }, ...(kind === 'monthly' ? budgetKpi : [])], notes: [scopeNote], sections };
+    return { title: `${kind === 'weekly' ? '费用周报' : '费用月报'} · ${period}${tag}`, level: 'info', lines, doc, empty: st.cost < 0.005 && st.prevCost < 0.005, period, ready: kind === 'monthly' ? globalReady : true, path: '#/overview' };
   }
 
   /* ---------- 名称 ---------- */
@@ -359,11 +482,11 @@ export class AlertService {
     const items = [];
     if (b.monthly) {
       const used = total / b.monthly * 100;
-      if (r.over && total >= b.monthly) items.push({ code: `total:over:${b.monthly}`, level: 'bad', text: `**总预算已超出**：本月应付 ${yuan(total)}，预算 ${yuan(b.monthly)}（${pct(used)}）` });
-      if (r.pct && used >= alertPct) items.push({ code: `total:pct:${alertPct}:${b.monthly}`, level: 'warn', hidden: r.over && total >= b.monthly, text: `**总预算已用 ${pct(used)}**（预警阈值 ${alertPct}%）：${yuan(total)} / ${yuan(b.monthly)}` });
+      if (r.over && total >= b.monthly) items.push({ code: `total:over:${b.monthly}`, level: 'bad', tag: '超支', text: `**总预算已超出**：本月应付 ${yuan(total)}，预算 ${yuan(b.monthly)}（${pct(used)}）` });
+      if (r.pct && used >= alertPct) items.push({ code: `total:pct:${alertPct}:${b.monthly}`, level: 'warn', tag: '预警', hidden: r.over && total >= b.monthly, text: `**总预算已用 ${pct(used)}**（预警阈值 ${alertPct}%）：${yuan(total)} / ${yuan(b.monthly)}` });
       if (r.forecast && total < b.monthly) {
         const fc = this.forecast(daily, cycle, today);
-        if (fc != null && fc >= b.monthly) items.push({ code: `total:forecast:${b.monthly}`, level: 'warn', text: `**预计月末超出总预算**：按日均推算 ${yuan(fc)}，预算 ${yuan(b.monthly)}（超出 ${yuan(fc - b.monthly)}）` });
+        if (fc != null && fc >= b.monthly) items.push({ code: `total:forecast:${b.monthly}`, level: 'warn', tag: '预测超支', text: `**预计月末超出总预算**：按日均推算 ${yuan(fc)}，预算 ${yuan(b.monthly)}（超出 ${yuan(fc - b.monthly)}）` });
       }
     }
     if (hasKeys) {
@@ -372,11 +495,23 @@ export class AlertService {
         if (!budget) continue;
         const c = cost.get(id === '__none__' ? '' : id) || 0, used = c / budget * 100;
         const name = id === '__none__' ? '未关联 API Key 的费用' : `API Key「${this.keyName(id, keys)}」(${id})`;
-        if (r.over && c >= budget) items.push({ code: `key:${id}:over:${budget}`, level: 'bad', text: `**${name} 已超出预算**：${yuan(c)} / ${yuan(budget)}（${pct(used)}）` });
-        if (r.pct && used >= alertPct) items.push({ code: `key:${id}:pct:${alertPct}:${budget}`, level: 'warn', hidden: r.over && c >= budget, text: `**${name} 预算已用 ${pct(used)}**：${yuan(c)} / ${yuan(budget)}` });
+        if (r.over && c >= budget) items.push({ code: `key:${id}:over:${budget}`, level: 'bad', tag: '超支', text: `**${name} 已超出预算**：${yuan(c)} / ${yuan(budget)}（${pct(used)}）` });
+        if (r.pct && used >= alertPct) items.push({ code: `key:${id}:pct:${alertPct}:${budget}`, level: 'warn', tag: '预警', hidden: r.over && c >= budget, text: `**${name} 预算已用 ${pct(used)}**：${yuan(c)} / ${yuan(budget)}` });
       }
     }
     return items;
+  }
+  /** 预算告警卡片的指标面板（设置了月度总预算时）：本月应付 / 月度预算 / 已用 */
+  budgetKpis(today = todayIn(this.tz)) {
+    const b = this.store.budgets();
+    if (!b.monthly) return null;
+    const cycle = today.slice(0, 7), { month, daily } = this.store.budgetUsage(cycle);
+    const total = month.reduce((x, y) => x + (y.cost || 0), 0), used = total / b.monthly * 100, fc = this.forecast(daily, cycle, today);
+    return [
+      { label: '本月应付', value: yuan(total), sub: fc != null ? `预计月末 ${yuan(fc)}` : '' },
+      { label: '月度预算', value: yuan(b.monthly), sub: `预警阈值 ${b.alertPct || 80}%` },
+      { label: '已用', value: pct(used), tone: used >= 100 ? 'bad' : used >= (b.alertPct || 80) ? 'warn' : null, sub: total > b.monthly ? `超出 ${yuan(total - b.monthly)}` : `剩余 ${yuan(b.monthly - total)}` },
+    ];
   }
   /** 兼容旧接口 */
   evaluate(today) { return this.evaluateBudget(today); }
@@ -413,7 +548,7 @@ export class AlertService {
       if (y <= 0 || y <= base || y - base < Math.max(a.minAmount, 0.01)) return;
       if (base > 0 && y < base * a.ratio) return;
       const paid = yv?.p || 0;
-      items.push({ code: `anomaly:${scope}:${day}`, level: 'warn', delta: y - base, text: `**${name}** ${day.slice(5)} 原价 ${yuan(y)}${Math.abs(paid - y) >= 0.005 ? `（应付 ${yuan(paid)}）` : ''}，为前 7 日原价日均 ${yuan(base)} 的 ${base > 0 ? (y / base).toFixed(1) + ' 倍' : '—（此前无消费）'}（+${yuan(y - base)}）` });
+      items.push({ code: `anomaly:${scope}:${day}`, level: 'warn', tag: '异常', delta: y - base, text: `**${name}** ${day.slice(5)} 原价 ${yuan(y)}${Math.abs(paid - y) >= 0.005 ? `（应付 ${yuan(paid)}）` : ''}，为前 7 日原价日均 ${yuan(base)} 的 ${base > 0 ? (y / base).toFixed(1) + ' 倍' : '—（此前无消费）'}（+${yuan(y - base)}）` });
     };
     const add = (m, d, r) => { const o = m.get(d) || m.set(d, { g: 0, p: 0 }).get(d); o.g += r.gross ?? r.cost ?? 0; o.p += r.cost || 0; };
     const total = new Map(), byKey = new Map();
@@ -445,10 +580,10 @@ export class AlertService {
         const name = `${PROVIDER_NAMES[p]}${kind === 'meta' ? ' API Key 同步' : '账单同步'}`;
         if (runs[0].status === 'error') {
           const { n, anchor } = this.store.errorStreak(kind, p);
-          if (n >= 3) items.push({ code: `sync:${p}:${kind}:${anchor}`, level: 'bad', text: `**${name}连续失败 ${n} 次**：${clean(runs[0].error).slice(0, 80) || '未知错误'}` });
+          if (n >= 3) items.push({ code: `sync:${p}:${kind}:${anchor}`, level: 'bad', tag: '故障', text: `**${name}连续失败 ${n} 次**：${clean(runs[0].error).slice(0, 80) || '未知错误'}` });
         } else {
           const { n, anchor } = this.store.errorStreak(kind, p, runs[0].id);
-          if (n >= 3) items.push({ code: `syncok:${p}:${kind}:${anchor}`, level: 'good', text: `**${name}已恢复**：此前连续失败 ${n} 次` });
+          if (n >= 3) items.push({ code: `syncok:${p}:${kind}:${anchor}`, level: 'good', tag: '已恢复', text: `**${name}已恢复**：此前连续失败 ${n} 次` });
         }
       }
     }
@@ -465,25 +600,35 @@ export class AlertService {
     const CH = { create: '新增', delete: '删除', restore: '恢复' };
     const rows = this.store.changesSince(sinceId);
     const items = rows.filter(c => c.entity === 'api_key' && CH[c.change]).map(c => ({
-      code: `chg:${c.id}`, id: c.id, entity: c.entity_id, level: c.change === 'delete' ? 'warn' : 'info', text: `${CH[c.change]} API Key「${clean(c.name) || '无描述'}」(${c.entity_id})`,
+      code: `chg:${c.id}`, id: c.id, entity: c.entity_id, level: c.change === 'delete' ? 'warn' : c.change === 'restore' ? 'good' : 'info', tag: CH[c.change],
+      text: `${CH[c.change]} API Key「${clean(c.name) || '无描述'}」(${c.entity_id})`, body: `API Key「${clean(c.name) || '无描述'}」${c.entity_id}`,
     }));
     return { items, scannedTo: rows.length ? Math.max(...rows.map(c => c.id)) : null };
   }
 
   /* ---------- 报表 ---------- */
+  /**
+   * 返回 { title, level, lines, doc, empty, period, ready, path }：
+   * lines 为文本消息（钉钉 / 企业微信 / 邮件 / 通用 Webhook）；doc 为结构化内容（飞书卡片：指标面板、趋势图、排行表、异常条目）
+   */
   report(kind, today = todayIn(this.tz)) {
-    const keys = this.keyMap(), b = this.store.budgets();
-    const top = (rows, n, nameOf, total) => rows.filter(r => r.cost > 0.005).sort((x, y) => y.cost - x.cost).slice(0, n).map((r, i) => `${i + 1}. ${nameOf(r)} ${yuan(r.cost)}（${pct(total ? r.cost / total * 100 : 0)}）`);
+    const keys = this.keyMap(), b = this.store.budgets(), alertPct = b.alertPct || 80;
     const sumBy = (rows, f) => { const m = new Map(); for (const r of rows) { const k = f(r); m.set(k, (m.get(k) || 0) + (r.cost || 0)); } return [...m.entries()].map(([k, cost]) => ({ k, cost })); };
     const provSplit = rows => {
       const ps = sumBy(rows, r => r.provider || 'aliyun');
       return ps.length > 1 ? '按云厂商：' + ps.sort((x, y) => y.cost - x.cost).map(x => `${PROVIDER_NAMES[x.k] || x.k} ${yuan(x.cost)}`).join('，') : null;
     };
+    const budgetKpi = (cost, label = '月度预算') => {
+      if (!b.monthly) return [];
+      const used = cost / b.monthly * 100;
+      return [{ label, value: pct(used), tone: used >= 100 ? 'bad' : used >= alertPct ? 'warn' : null, sub: cost > b.monthly ? `超出 ${yuan(cost - b.monthly)}` : `预算 ${yuan(b.monthly)}` }];
+    };
+    const dirTag = d => (d.dir ? { text: `${d.label} ${d.dir === 'up' ? '↑' : '↓'} ${d.text.replace(/^[+−]/, '')}`, level: d.dir === 'up' ? 'bad' : 'good' } : null);
     if (kind === 'daily') {
       // 月累计按“昨日”所在的月份统计：每月 1 日的日报描述的是上月最后一天，应给出上月合计，而不是本月刚开始的累计
       const day = addDays(today, -1), cycle = day.slice(0, 7), isCur = cycle === today.slice(0, 7);
-      const rows = this.store.dailyByKey(addDays(day, -1), day);
-      const y = rows.filter(r => r.day === day), p = rows.filter(r => r.day !== day);
+      const rows14 = this.store.dailyByKey(addDays(day, -13), day);
+      const y = rows14.filter(r => r.day === day), p = rows14.filter(r => r.day === addDays(day, -1));
       const yc = y.reduce((s, r) => s + r.cost, 0), pc = p.reduce((s, r) => s + r.cost, 0);
       const { daily, month } = this.store.budgetUsage(cycle);
       // 月累计与预算使用率按账期（月）账单计算，与预算告警、概览预算条、/metrics 一致；日账单只用于预测
@@ -492,13 +637,21 @@ export class AlertService {
       const lines = [`**昨日（${day.slice(5)}）费用 ${yuan(yc)}**，较前一日 ${chg(yc, pc)}`];
       lines.push(`${isCur ? '本月累计' : `${cycle} 合计`} ${yuan(mtd)}${fc != null ? `，预计月末 ${yuan(fc)}` : ''}${b.monthly ? `，月度预算 ${yuan(b.monthly)}（已用 ${pct(mtd / b.monthly * 100)}）` : ''}`);
       const ps = provSplit(y); if (ps) lines.push(ps);
-      const tk = top(sumBy(y, r => r.id).map(x => ({ id: x.k, cost: x.cost })), 5, r => this.keyName(r.id, keys), yc);
-      if (tk.length) lines.push('', '#### 昨日 API Key Top 5', ...tk);
-      const tm = top(this.store.dailyByModel(day, day), 3, r => clean(r.model), yc);
-      if (tm.length) lines.push('', '#### 昨日模型 Top 3', ...tm);
       const an = this.evaluateAnomaly(today);
-      if (an.length) lines.push('', '#### 异常提示', ...an.map(i => i.text));
-      return { title: `费用日报 · ${day}`, level: 'info', lines, empty: yc < 0.005 && mtd < 0.005, period: today, path: `#/overview?from=${day}&to=${day}` };
+      const sections = [
+        { title: '昨日 API Key Top 5', rows: topRows(sumBy(y, r => r.id).map(x => ({ id: x.k, cost: x.cost })), 5, r => this.keyName(r.id, keys), yc) },
+        { title: '昨日模型 Top 3', rows: topRows(this.store.dailyByModel(day, day), 3, r => clean(r.model), yc) },
+        { title: '异常提示', items: an.map(i => ({ text: i.text, tag: i.tag, level: i.level })) },
+      ];
+      lines.push(...sectionLines(sections));
+      const d = delta('较前一日', yc, pc);
+      const doc = {
+        tags: [dirTag(d), an.length ? { text: `${an.length} 项异常`, level: 'warn' } : null],
+        kpis: [{ label: `昨日费用（${day.slice(5)}）`, value: yuan(yc), delta: d }, { label: isCur ? '本月累计' : `${cycle} 合计`, value: yuan(mtd), sub: fc != null ? `预计月末 ${yuan(fc)}` : '' }, ...budgetKpi(mtd)],
+        notes: ps ? [ps] : [], sections,
+        chart: dailyChart('近 14 日每日费用（元）', rows14, addDays(day, -13), day, x => (x === day ? '昨日' : '此前'), { 此前: BLUE_L, 昨日: BLUE }),
+      };
+      return { title: `费用日报 · ${day}`, level: 'info', lines, doc, empty: yc < 0.005 && mtd < 0.005, period: today, path: `#/overview?from=${day}&to=${day}` };
     }
     if (kind === 'weekly') {
       const last = isoWeek(addDays(isoWeek(today).from, -1)), prev = isoWeek(addDays(last.from, -1));
@@ -508,13 +661,21 @@ export class AlertService {
       const lines = [`**上周（${last.from.slice(5)} ~ ${last.to.slice(5)}）费用 ${yuan(c)}**，较前一周 ${chg(c, o)}，日均 ${yuan(c / 7)}`];
       const ps = provSplit(cur); if (ps) lines.push(ps);
       const kc = sumBy(cur, r => r.id), ko = new Map(sumBy(old, r => r.id).map(x => [x.k, x.cost]));
-      const tk = top(kc.map(x => ({ id: x.k, cost: x.cost })), 5, r => this.keyName(r.id, keys), c);
-      if (tk.length) lines.push('', '#### API Key Top 5', ...tk);
       const up = kc.map(x => ({ id: x.k, d: x.cost - (ko.get(x.k) || 0) })).filter(x => x.d >= 1).sort((x, y) => y.d - x.d).slice(0, 3);
-      if (up.length) lines.push('', '#### 增长最快', ...up.map(x => `${this.keyName(x.id, keys)} +${yuan(x.d)}`));
-      const tm = top(this.store.dailyByModel(last.from, last.to), 3, r => clean(r.model), c);
-      if (tm.length) lines.push('', '#### 模型 Top 3', ...tm);
-      return { title: `费用周报 · ${last.key}`, level: 'info', lines, empty: c < 0.005 && o < 0.005, period: last.key, path: `#/overview?from=${last.from}&to=${last.to}` };
+      const sections = [
+        { title: 'API Key Top 5', rows: topRows(kc.map(x => ({ id: x.k, cost: x.cost })), 5, r => this.keyName(r.id, keys), c) },
+        { title: '增长最快', rows: up.map(x => ({ name: this.keyName(x.id, keys), value: '+' + yuan(x.d) })) },
+        { title: '模型 Top 3', rows: topRows(this.store.dailyByModel(last.from, last.to), 3, r => clean(r.model), c) },
+      ];
+      lines.push(...sectionLines(sections));
+      const d = delta('较前一周', c, o);
+      const doc = {
+        tags: [dirTag(d)],
+        kpis: [{ label: `上周（${last.from.slice(5)} ~ ${last.to.slice(5)}）`, value: yuan(c), delta: d }, { label: '日均', value: yuan(c / 7), sub: `前一周日均 ${yuan(o / 7)}` }, { label: '有消费的 API Key', value: `${kc.filter(x => x.cost > 0.005).length} 个`, sub: `前一周 ${[...ko.values()].filter(v => v > 0.005).length} 个` }],
+        notes: ps ? [ps] : [], sections,
+        chart: dailyChart('近两周每日费用（元）', rows, prev.from, last.to, x => (x >= last.from ? '上周' : '前一周'), { 前一周: BLUE_L, 上周: BLUE }),
+      };
+      return { title: `费用周报 · ${last.key}`, level: 'info', lines, doc, empty: c < 0.005 && o < 0.005, period: last.key, path: `#/overview?from=${last.from}&to=${last.to}` };
     }
     // monthly
     const cycle = addMonths(today.slice(0, 7), -1), pcyc = addMonths(cycle, -1);
@@ -523,15 +684,26 @@ export class AlertService {
     const lines = [`**${cycle} 账期应付 ${yuan(c)}**，较上月 ${chg(c, o)}${g > c ? `，原价 ${yuan(g)}，优惠 ${yuan(g - c)}` : ''}`];
     if (b.monthly) lines.push(`月度预算 ${yuan(b.monthly)}，${c > b.monthly ? `超出 ${yuan(c - b.monthly)}` : `使用 ${pct(c / b.monthly * 100)}`}`);
     const ps = provSplit(rows); if (ps) lines.push(ps);
-    const tk = top(sumBy(rows, r => r.id).map(x => ({ id: x.k, cost: x.cost })), 5, r => this.keyName(r.id, keys), c);
-    if (tk.length) lines.push('', '#### API Key Top 5', ...tk);
     const cc = sumBy(rows, r => clean(keys.get(r.id)?.tag?.cost_center) || '未分配成本中心');
-    if (cc.length > 1 || (cc[0] && cc[0].k !== '未分配成本中心')) lines.push('', '#### 按成本中心', ...top(cc.map(x => ({ k: x.k, cost: x.cost })), 6, r => r.k, c));
-    const tm = top(this.store.monthByModel(cycle), 3, r => clean(r.model), c);
-    if (tm.length) lines.push('', '#### 模型 Top 3', ...tm);
-    // 月报在上月出账后发送：本地账期已定稿即发送；账单同步持续失败时最晚 10 日发送（避免永远不发）
-    const ready = isCycleFinal(cycle, today) && (!!this.store.getCycle(cycle)?.final || today >= addDays(addMonths(cycle, 1) + '-01', 9));
-    return { title: `费用月报 · ${cycle}`, level: 'info', lines, empty: c < 0.005 && o < 0.005, period: cycle, ready, path: `#/overview?cycle=${cycle}` };
+    const sections = [
+      { title: 'API Key Top 5', rows: topRows(sumBy(rows, r => r.id).map(x => ({ id: x.k, cost: x.cost })), 5, r => this.keyName(r.id, keys), c) },
+      { title: '按成本中心', rows: cc.length > 1 || (cc[0] && cc[0].k !== '未分配成本中心') ? topRows(cc, 6, r => r.k, c) : [] },
+      { title: '模型 Top 3', rows: topRows(this.store.monthByModel(cycle), 3, r => clean(r.model), c) },
+    ];
+    lines.push(...sectionLines(sections));
+    const d = delta('较上月', c, o), last = addDays(addMonths(cycle, 1) + '-01', -1);
+    const doc = {
+      tags: [dirTag(d), b.monthly && c > b.monthly ? { text: '超出预算', level: 'bad' } : null],
+      kpis: [{ label: `${cycle} 应付`, value: yuan(c), delta: d }, ...(g > 0.005 ? [{ label: '原价', value: yuan(g), sub: g - c >= 0.005 ? `优惠 ${yuan(g - c)}` : '无优惠抵扣' }] : []), ...budgetKpi(c, '预算使用')],
+      notes: ps ? [ps] : [], sections,
+      chart: dailyChart(`${cycle} 每日费用（元）`, this.store.dailyByKey(cycle + '-01', last), cycle + '-01', last, () => '每日应付', { 每日应付: BLUE }),
+    };
+    return { title: `费用月报 · ${cycle}`, level: 'info', lines, doc, empty: c < 0.005 && o < 0.005, period: cycle, ready: this.monthlyReady(today), path: `#/overview?cycle=${cycle}` };
+  }
+  /** 月报在上月出账后发送：本地账期已定稿即发送；账单同步持续失败时最晚 10 日发送（避免永远不发） */
+  monthlyReady(today = todayIn(this.tz)) {
+    const cycle = addMonths(today.slice(0, 7), -1);
+    return isCycleFinal(cycle, today) && (!!this.store.getCycle(cycle)?.final || today >= addDays(addMonths(cycle, 1) + '-01', 9));
   }
   /** 报表周期结束后，所有已配置云厂商是否都完成过一次（部分）成功的账单同步：用于判断“空报表”是否真的为空 */
   periodSynced(kind, today = todayIn(this.tz)) {
@@ -544,7 +716,12 @@ export class AlertService {
   /** 串行执行；某渠道失败时该渠道的条目保持未发送，下次检查时重试 */
   check(trigger = 'sync') {
     const run = async () => {
+      this.running = true;
+      try { return await body(); } finally { this.running = false; }
+    };
+    const body = async () => {
       if (this.stopping) return { skipped: 'stopping' };
+      this.applyArm(); // 先合并保存配置时登记的“新订阅基线”，再读取状态
       const s = this.settings();
       const chans = s.channels.filter(c => c.enabled);
       if (!chans.length) {
@@ -578,7 +755,8 @@ export class AlertService {
           const show = fresh.filter(i => !i.hidden);
           if (!show.length) { for (const i of fresh) sentMap(i.code)[i.code] = Date.now(); return; }
           const level = show.some(i => i.level === 'bad') ? 'bad' : show.every(i => i.level === 'good') ? 'good' : show.some(i => i.level === 'warn') ? 'warn' : 'info';
-          msgs.push({ event, title, level, lines: show.map(i => i.text), codes: fresh.map(i => i.code), mention: EVENT_TYPES[event].mention && level !== 'good', path });
+          const doc = { tags: [alertTag(event, level, show.length)], items: show.map(i => ({ text: i.text, body: i.body, tag: i.tag, level: i.level })), kpis: event === 'budget' && !scope ? get('budgetKpis', () => this.budgetKpis(today)) : null };
+          msgs.push({ event, title, level, lines: show.map(i => i.text), doc, codes: fresh.map(i => i.code), mention: EVENT_TYPES[event].mention && level !== 'good', path });
         };
         // 消息中的“查看详情”直达对应页面与统计周期（地址中带周期参数，打开即为下钻后的视图）
         if (ch.events.budget) alertMsg('budget', `预算告警 · ${cycle}${tag}`, scope ? get('budget', () => this.evaluateBudget(today)).filter(i => scope.keys.has(keyOf(i.code))) : get('budget', () => this.evaluateBudget(today)), `#/keys?cycle=${cycle}`);
@@ -592,7 +770,10 @@ export class AlertService {
           if (items.length) {
             const lines = items.slice(0, MAX_LINES).map(i => i.text);
             if (items.length > MAX_LINES) lines.push(`…另有 ${items.length - MAX_LINES} 项，请在“变更记录”中查看`);
-            msgs.push({ event: 'keyChange', title: `API Key 变更通知（${items.length} 项）`, level: items.some(i => i.level === 'warn') ? 'warn' : 'info', lines, changeTo: scannedTo, path: '#/changes' });
+            const level = items.some(i => i.level === 'warn') ? 'warn' : 'info';
+            const shown = items.slice(0, MAX_LINES).map(i => ({ text: i.text, body: i.body, tag: i.tag, level: i.level }));
+            if (items.length > MAX_LINES) shown.push({ text: `…另有 ${items.length - MAX_LINES} 项，请在“变更记录”中查看` });
+            msgs.push({ event: 'keyChange', title: `API Key 变更通知（${items.length} 项）`, level, lines, doc: { tags: [alertTag('keyChange', level, items.length)], items: shown }, changeTo: scannedTo, path: '#/changes' });
           } else if (scannedTo != null) st.lastChangeId[ch.id] = scannedTo; // 没有需要通知的变更：直接推进游标
         } else delete st.lastChangeId[ch.id];
         if (afterHour) {
@@ -603,7 +784,7 @@ export class AlertService {
             if (st.reports[ch.id][kind] === r.period) continue;
             // 空报表只有在该周期的账单确认已同步后才算“已发送”；否则（如刚配置密钥、回填尚未完成）稍后有数据时再发送
             if (r.empty) { if (get('synced:' + kind, () => this.periodSynced(kind, today))) st.reports[ch.id][kind] = r.period; continue; }
-            msgs.push({ event: kind, title: r.title, level: r.level, lines: r.lines, report: { kind, period: r.period }, path: r.path });
+            msgs.push({ event: kind, title: r.title, level: r.level, lines: r.lines, doc: r.doc, report: { kind, period: r.period }, path: r.path });
           }
         }
         for (const m of msgs) {
@@ -683,17 +864,49 @@ export class AlertService {
     const { html, text } = renderEmail({ brand, title, level, lines, overview, footer });
     return sendMail(this.smtpConfig(), { to: parseRecipients(recipients), subject: title, html, text }, { allowPrivate: this.allowPrivate, isPrivateIp });
   }
-  async send(ch, { webhook, secret }, { title, level, lines, today = todayIn(this.tz), mention = false, path = '', event = '' }) {
+  /**
+   * 飞书：依次尝试“完整卡片（含趋势图）→ 不含趋势图 → 简洁卡片”，只有飞书明确拒绝卡片内容时才降级（签名 / 关键词 / 限流等错误直接报错）；
+   * 被拒绝的样式按机器人地址记住（进程内），之后直接使用可用的样式，避免每条消息都先失败一次。返回实际使用的样式
+   */
+  async postFeishu(webhook, secret, variants) {
+    const fp = crypto.createHash('sha1').update(webhook).digest('hex').slice(0, 12);
+    this._fsSkip ||= new Map();
+    const skip = this._fsSkip.get(fp) || new Set();
+    const list = variants.filter(v => v.card && !skip.has(v.style));
+    if (!list.length) list.push(variants[variants.length - 1]);
+    let lastErr = null;
+    for (const v of list) {
+      const req = signRequest('feishu', webhook, secret, v.card, null);
+      const resp = await postJson(req.url, req.body, req.headers, this.allowPrivate);
+      try { checkResponse('feishu', resp); if (lastErr) this.log?.(`飞书卡片已改用“${v.label}”样式发送（${lastErr.message}）`); return v.style; }
+      catch (e) {
+        if (!feishuFormatError(resp) || v === list[list.length - 1]) throw e;
+        lastErr = e; skip.add(v.style); this._fsSkip.set(fp, skip);
+      }
+    }
+    throw lastErr;
+  }
+  async send(ch, { webhook, secret }, { title, level, lines, doc = null, today = todayIn(this.tz), mention = false, path = '', event = '' }) {
     const brand = clean(this.store.branding().name) || '大模型费用分析';
     const time = new Intl.DateTimeFormat('zh-CN', { timeZone: this.tz, hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date());
     const src = this.providers().map(p => PROVIDER_NAMES[p]).join(' / ') || '云厂商';
     const footer = `${brand} · 统计至 ${today} ${time} · 口径：应付金额（税前）· 数据来源：${src}费用中心`;
-    const link = this.publicUrl ? this.publicUrl.replace(/\/+$/, '') + '/' + (/^#\/[\w/?&=.~%-]*$/.test(path) ? path : '#/overview') : '';
+    const base = this.publicUrl ? this.publicUrl.replace(/\/+$/, '') + '/' : '';
+    const link = base ? base + (/^#\/[\w/?&=.~%-]*$/.test(path) ? path : '#/overview') : '';
     const type = ch.type;
     if (ALERT_TYPES[type]?.email) return this.sendEmail(webhook, { brand, title: `【${brand}】${title}`, level, lines, footer, event, today, scope: this.scopeOf(ch) });
     const mentions = mention && (ch.atAll || ch.atMobiles?.length) ? { all: !!ch.atAll, mobiles: ALERT_TYPES[type]?.mention === 'mobile' ? ch.atMobiles || [] : [] } : null;
     const fullTitle = `【${brand}】${title}`;
     const payload = buildMessage(type, { title: fullTitle, level, lines, footer, link, mentions });
+    if (type === 'feishu') {
+      const opt = { title, subtitle: `${brand} · 统计至 ${today.slice(5)} ${time}`, level, doc: doc || { items: lines.filter(l => l && !l.startsWith('#')).map(text => ({ text })) }, footer: `${brand} · 口径：应付金额（税前） · 数据来源：${src}费用中心`, link, mentions, links: link && !/^#\/overview/.test(path) ? [{ text: '成本概览', url: base + '#/overview' }] : [] };
+      const hasChart = !!doc?.chart;
+      return this.postFeishu(webhook, secret, [
+        { style: 'chart', label: '完整卡片', card: hasChart ? feishuCard({ ...opt, chart: true }) : null },
+        { style: 'card', label: '卡片（不含趋势图）', card: feishuCard({ ...opt, chart: false }) },
+        { style: 'plain', label: '简洁卡片', card: payload },
+      ]);
+    }
     const generic = { event: 'alert', title: fullTitle, level, items: lines.filter(l => l && !l.startsWith('#')).map(strip), text: [fullTitle, ...lines.map(l => (l.startsWith('#') ? l.replace(/^#+\s*/, '') : l ? '- ' + strip(l) : '')), footer].join('\n'), link: link || null, mentions, sentAt: new Date().toISOString() };
     const req = signRequest(type, webhook, secret, payload, generic);
     checkResponse(type, await postJson(req.url, req.body, req.headers, this.allowPrivate));
@@ -708,6 +921,14 @@ export class AlertService {
     if (ALERT_TYPES[ch.type]?.email) {
       return this.send(ch, creds, { title: '测试邮件', level: 'info', lines: ['这是一封测试邮件，收到即表示邮件服务器（SMTP）与收件人配置正确。', '邮件通知会在消息内容之后附上完整的成本概览：日报为昨日所在账期、周报为上周、月报为上月、告警为本月。以下为本月的成本概览。'] });
     }
-    await this.send(ch, creds, { title: '测试消息', level: 'info', mention: true, lines: ['这是一条测试消息，收到即表示通知渠道配置正确。', '告警（预算、费用异常、同步故障）满足条件时发送，同一条件每账期只通知一次；报表在每天设定的时间之后发送。'] });
+    const lines = ['这是一条测试消息，收到即表示通知渠道配置正确。', '保存配置不会立即推送：告警（预算、费用异常、同步故障）在条件出现时发送，同一条件每账期只通知一次；日报每天、周报每周一在设定时间发送，月报在上月出账后发送。'];
+    // 飞书：附上本月指标与近 14 日趋势，测试消息即可看到实际的卡片样式（并检验机器人是否接受图表组件）
+    let doc = null;
+    if (ch.type === 'feishu') {
+      let r = null;
+      try { r = this.report('daily'); } catch (e) { this.log?.('生成测试卡片指标失败：' + e.message); }
+      doc = { tags: [{ text: '测试', level: 'info' }], kpis: r?.doc.kpis || null, chart: r?.doc.chart || null, items: lines.map(text => ({ text })) };
+    }
+    return this.send(ch, creds, { title: '测试消息', level: 'info', mention: true, lines, doc });
   }
 }

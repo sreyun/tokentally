@@ -555,6 +555,22 @@ const ALERT_HINT = {
 };
 const RULE_LABEL = { pct: '达到预警阈值', over: '超出预算', forecast: '预计月末超出总预算', keys: '包含 API Key 预算' };
 const EVENT_ICON = { budget: 'wallet', anomaly: 'warn', sync: 'sync', keyChange: 'key', daily: 'calendar', weekly: 'calendar', monthly: 'calendar' };
+/** 飞书实际使用的卡片样式（机器人不接受图表 / 卡片组件时自动降级） */
+const STYLE_NOTE = { chart: '（飞书完整卡片：指标 + 趋势图 + 排行）', card: '（飞书卡片：该机器人不支持趋势图，已自动省略）', plain: '（飞书简洁卡片：该机器人不支持新版卡片组件）' };
+/** 报表预览：按飞书卡片的布局展示（指标面板 / 趋势柱状图 / 排行表 / 异常条目） */
+function cardPreview(r) {
+  const d = r.doc, TONE = { bad: 'bad', warn: 'warn', good: 'good', up: 'bad', down: 'good' }, TXT = { bad: 'bad-text', warn: 'warn-text', good: 'ok-text', up: 'bad-text', down: 'ok-text' };
+  const md = s => esc(s).replace(/\*\*(.+?)\*\*/g, '<b>$1</b>');
+  const delta = x => (x ? `<span class="muted">${esc(x.label)}</span> <span class="${TXT[x.dir] || 'muted'}">${x.dir === 'up' ? '↑ ' : x.dir === 'down' ? '↓ ' : ''}${esc(x.dir ? String(x.text).replace(/^[+−-]/, '') : x.text)}</span>` : '');
+  const tags = (d.tags || []).filter(Boolean).map(t => `<span class="pill ${TONE[t.level] || 'info'}">${esc(t.text)}</span>`).join('');
+  const kpis = d.kpis?.length ? `<div class="fc-kpis">${d.kpis.map(k => `<div><span>${esc(k.label)}</span><b class="${TXT[k.tone] || ''}">${esc(k.value)}</b><small>${k.delta ? delta(k.delta) : esc(k.sub || '')}</small></div>`).join('')}</div>` : '';
+  const max = Math.max(1e-9, ...(d.chart?.values || []).map(v => v.v));
+  const chart = d.chart?.values?.length ? `<div class="fc-sec">${esc(d.chart.title)}</div><div class="fc-chart" role="img" aria-label="${esc(d.chart.title)}">${d.chart.values.map(v => `<i style="height:${Math.max(2, v.v / max * 100).toFixed(1)}%;background:${esc(d.chart.colors?.[v.k] || '#3370FF')}" title="${esc(v.d)} · ¥${esc(v.v.toLocaleString('zh-CN', { minimumFractionDigits: 2 }))}"></i>`).join('')}</div>` : '';
+  const secs = (d.sections || []).filter(s => s.rows?.length || s.items?.length).map(s => `<div class="fc-sec">${esc(s.title)}</div>${s.rows?.length ? `<div class="fc-rows">${s.rows.map((x, i) => `<div><em>${i + 1}</em><span>${esc(x.name)}</span><b>${esc(x.value)}</b><small>${esc(x.share || '')}</small></div>`).join('')}</div>` : s.items.map(i => `<div class="fc-item"><span class="pill ${TONE[i.level] || 'info'}">${esc(i.tag || '提示')}</span> ${md(i.text)}</div>`).join('')}`).join('');
+  return `<div class="fc"><div class="fc-h"><div><b>${esc(r.title)}</b>${tags}</div>${r.empty ? '<span class="pill neutral">无费用，定时发送时将跳过</span>' : ''}</div>
+    <div class="fc-b">${kpis}${(d.notes || []).map(n => `<div class="fc-note">${esc(n)}</div>`).join('')}${chart}${secs}</div>
+    <div class="fc-f muted">飞书卡片预览 · 钉钉 / 企业微信 / 邮件为文本消息，内容相同</div></div>`;
+}
 
 async function alerts(el) {
   const { alerts: al } = await http('GET', '/api/admin/settings');
@@ -577,6 +593,7 @@ async function alerts(el) {
           <div class="ch-top"><span class="ch-ico">${icon(c.type === 'email' ? 'mail' : 'bell')}</span><div class="ch-t"><b>${esc(c.name)}</b><span class="muted">${esc(al.types[c.type]?.label || c.type)} · <span class="mono">${esc(c.webhookMasked || '未配置地址')}</span>${c.secretSet ? ' · 已加签' : ''}</span></div>
             <span class="state ${c.enabled ? 'on' : 'off'}">${c.enabled ? '已启用' : '已停用'}</span></div>
           <div class="ch-evs">${c.scopeLabel ? `<span class="tag info">${icon('filter')}范围：${esc(c.scopeLabel)}</span>` : ''}${Object.keys(evs).filter(k => c.events[k]).map(k => `<span class="tag">${icon(EVENT_ICON[k] || 'bell')}${esc(evs[k].label)}</span>`).join('') || '<span class="muted">未订阅任何事件</span>'}${c.atAll || c.atMobiles.length ? `<span class="tag warn">@ ${c.atAll ? '所有人' : ''}${c.atAll && c.atMobiles.length ? ' + ' : ''}${c.atMobiles.length ? c.atMobiles.length + ' 人' : ''}</span>` : ''}</div>
+          ${Object.keys(c.nextRuns || {}).length ? `<div class="ch-next">${icon('clock')}<span>下次报表：${Object.entries(c.nextRuns).map(([k, v]) => `${esc(evs[k]?.label.replace(/（.*）/, '') || k)} <b>${esc(v)}</b>`).join('<i>·</i>')}</span></div>` : ''}
           <div class="ch-foot"><span class="${c.lastError && (!c.lastSentAt || c.lastErrorAt > c.lastSentAt) ? 'bad-text' : 'muted'}">${c.lastError && (!c.lastSentAt || c.lastErrorAt > c.lastSentAt) ? `${esc(fmtTime(c.lastErrorAt))} 发送失败：${esc(c.lastError)}` : c.lastSentAt ? `最近发送 ${esc(fmtTime(c.lastSentAt))}` : '尚未发送'}</span>
             <span class="sp"></span><button class="btn sm" data-ch-test="${esc(c.id)}">${icon('send')}测试</button><button class="btn sm" data-ch-edit="${esc(c.id)}">${icon('edit')}编辑</button><button class="btn sm danger" data-ch-del="${esc(c.id)}">${icon('trash')}删除</button></div>
         </div>`).join('')}</div>` : `<div class="empty-mini">${icon('bell')}<div><b>尚未配置通知渠道</b><span class="muted">添加钉钉、飞书、企业微信群机器人、通用 Webhook 或邮件，接收预算告警、费用异常、同步故障与日报 / 周报 / 月报；邮件会附上完整的成本概览。</span></div></div>`}
@@ -625,8 +642,8 @@ async function alerts(el) {
     if (!extra.rules && rf?.dataset.dirty && !confirm('告警规则有未保存的修改，继续将丢弃这些修改。是否继续？')) return;
     const out = await http('PUT', '/api/admin/alerts', payload(channels, extra));
     if (rf) markClean(rf);
-    const r = out.check || {};
-    toast(r.error ? `${okMsg}，但发送失败：${r.error}` : r.sent ? `${okMsg}，并已发送 ${r.sent} 条当前满足条件的通知` : okMsg, r.error ? 'err' : '', 4500);
+    // 保存只保存、不推送：新订阅当前已到点的报表与已满足的告警条件不补发，之后按时间 / 条件推送
+    toast(out.armed ? `${okMsg}。不会立即推送：报表从下一次发送时间开始，告警在出现新的条件时发送` : okMsg, '', 5000);
     await refresh(el, () => alerts(el));
   };
   $('#addCh', el).onclick = () => editChannel(al, null, async ch => save([...al.channels, ch], {}, '渠道已添加'));
@@ -639,7 +656,7 @@ async function alerts(el) {
   el.querySelectorAll('[data-ch-test]').forEach(b => b.onclick = async () => {
     const c = al.channels.find(x => x.id === b.dataset.chTest);
     b.disabled = true;
-    try { await http('POST', '/api/admin/alerts/test', { channelId: c.id, type: c.type, atAll: c.atAll, atMobiles: c.atMobiles }); toast(`测试消息已发送到「${c.name}」，请在群中查看`); }
+    try { const r = await http('POST', '/api/admin/alerts/test', { channelId: c.id, type: c.type, atAll: c.atAll, atMobiles: c.atMobiles }); toast(`测试消息已发送到「${c.name}」${STYLE_NOTE[r.style] || ''}，请在群中查看`, '', 5000); }
     catch (ex) { toast(ex.message, 'err', 5000); } finally { b.disabled = false; }
   });
   $('#rForm', el).addEventListener('input', () => markDirty($('#rForm', el)));
@@ -662,8 +679,8 @@ async function alerts(el) {
     try {
       const r = await http('POST', '/api/admin/alerts/report', { kind: k, send, channelId: send ? $('#rCh', el).value : undefined });
       if (my !== seq || k !== kind) { if (send) toast('报表已发送'); return; }
-      box.innerHTML = `<div class="rp-t">${esc(r.title)}${r.empty ? ' <span class="pill neutral">无费用，定时发送时将跳过</span>' : ''}</div>${r.lines.map(l => (l === '' ? '<div class="rp-gap"></div>' : l.startsWith('#') ? `<div class="rp-h">${esc(l.replace(/^#+\s*/, ''))}</div>` : `<div class="rp-l">${esc(l).replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')}</div>`)).join('')}`;
-      if (send) toast('报表已发送');
+      box.innerHTML = r.doc ? cardPreview(r) : `<div class="rp-t">${esc(r.title)}${r.empty ? ' <span class="pill neutral">无费用，定时发送时将跳过</span>' : ''}</div>${r.lines.map(l => (l === '' ? '<div class="rp-gap"></div>' : l.startsWith('#') ? `<div class="rp-h">${esc(l.replace(/^#+\s*/, ''))}</div>` : `<div class="rp-l">${esc(l).replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')}</div>`)).join('')}`;
+      if (send) toast(`报表已发送${STYLE_NOTE[r.style] || ''}`, '', 4500);
     } catch (ex) { if (send) toast(ex.message, 'err', 5000); else if (my === seq) box.innerHTML = `<div class="bad-text">${esc(ex.message)}</div>`; }
   };
   el.querySelectorAll('[data-rk]').forEach(b => b.onclick = () => { kind = b.dataset.rk; el.querySelectorAll('[data-rk]').forEach(x => x.setAttribute('aria-pressed', String(x === b))); preview(); });
