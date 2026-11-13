@@ -12,9 +12,10 @@ export function render(v) {
     <div class="stat-strip">
       <div><span>账单条数</span><b>${lines.length.toLocaleString()}</b></div>
       <div><span>原价</span><b>${money(a.gross)}</b></div>
-      <div><span>优惠与优惠券</span><b>${money(a.gross - a.pretax)}</b></div>
+      <div><span>折扣</span><b>${money(a.gross - a.after)}</b></div>
+      <div><span>优惠后金额（未扣券）</span><b>${money(a.after)}</b></div>
+      <div><span>优惠券抵扣</span><b>${money(a.after - a.pretax)}</b></div>
       <div><span>应付金额</span><b>${money(a.pretax)}</b></div>
-      <div><span>优惠后金额</span><b>${money(a.after)}</b></div>
       <div><span>Token</span><b>${intFmt(totalTokens(a))}</b></div>
     </div>
     <section class="panel">

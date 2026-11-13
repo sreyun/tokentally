@@ -583,8 +583,8 @@ async function alerts(el) {
     <section class="panel c4"><div class="panel-h"><h3>告警规则</h3>${help('预算告警：同一阈值（含预算金额）每个账期每个渠道只通知一次。费用异常：每天报表时间之后检查“昨日费用 ≥ 前 7 日日均 × 倍数，且增量 ≥ 最小金额”。同步故障：同一云厂商同类同步连续失败 3 次时告警，恢复后通知。')}</div>
       <form id="rForm" class="form-grid" style="grid-template-columns:1fr 1fr">
         <div class="field full"><span>预算告警条件</span><div class="row" style="gap:6px 16px">${Object.entries(RULE_LABEL).map(([k, l]) => `<label class="chk"><input type="checkbox" name="rule_${k}" ${al.rules[k] ? 'checked' : ''}> ${l}</label>`).join('')}</div></div>
-        <label class="field"><span>异常倍数（×前 7 日日均）</span><input class="inp" type="number" name="ratio" min="1.2" max="20" step="0.1" value="${al.anomaly.ratio}"></label>
-        <label class="field"><span>异常最小增量（元）</span><input class="inp" type="number" name="minAmount" min="0" step="1" value="${al.anomaly.minAmount}"></label>
+        <label class="field" title="按原价（目录价）判断，不受优惠券 / 折扣集中抵扣的影响"><span>异常倍数（×前 7 日原价日均）</span><input class="inp" type="number" name="ratio" min="1.2" max="20" step="0.1" value="${al.anomaly.ratio}"></label>
+        <label class="field" title="昨日原价比前 7 日原价日均至少多出的金额"><span>异常最小增量（元，按原价）</span><input class="inp" type="number" name="minAmount" min="0" step="1" value="${al.anomaly.minAmount}"></label>
         <label class="chk full"><input type="checkbox" name="anomalyKeys" ${al.anomaly.keys ? 'checked' : ''}> 同时检测单个 API Key 的费用异常（最多列出 5 个）</label>
         <label class="field full"><span>报表与异常检查时间</span><select class="inp" name="reportHour">${Array.from({ length: 24 }, (_, h) => opt(h, `每天 ${p2(h)}:00 之后`, al.reportHour)).join('')}</select><small class="hint">账单通常延迟数小时入账，建议 9:00 之后发送，数据更完整</small></label>
         <div class="row full"><button class="btn primary" type="submit">保存规则</button></div>

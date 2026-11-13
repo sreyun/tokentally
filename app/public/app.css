@@ -261,6 +261,10 @@ select.inp.sm { padding-right: 24px; background-position: right 6px center; back
 .chips { display: flex; flex-wrap: wrap; gap: 6px; margin: -4px 0 12px; align-items: center; }
 .fchip { display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 4px 0 10px; border-radius: 999px; background: var(--accent-wash); color: var(--accent-text); font-size: 12px; border: 1px solid var(--accent-wash-2); animation: popin .18s var(--ease); }
 .fchip b { font-weight: 600; }
+.fchip.warn { background: color-mix(in srgb, var(--warn-wash) 80%, var(--surface)); color: var(--warn-ink); border-color: color-mix(in srgb, var(--warn) 40%, transparent); }
+.fchip.warn button:hover { background: var(--warn-wash); }
+.chips .chip-note { font-size: 12px; color: var(--muted); margin-right: 6px; }
+.filterbar .metric .seg button[aria-pressed="true"]:not([data-metric="pretax"]) { color: var(--warn-ink); }
 .fchip button { width: 20px; height: 20px; border-radius: 50%; border: 0; background: transparent; color: inherit; cursor: pointer; display: grid; place-items: center; }
 .fchip button:hover { background: var(--accent-wash-2); }
 
@@ -317,7 +321,7 @@ select.inp.sm { padding-right: 24px; background-position: right 6px center; back
 .kpi.hero .kpi-ico { background: linear-gradient(140deg, var(--accent-2), var(--accent)); color: var(--accent-ink); box-shadow: 0 4px 10px -4px rgb(var(--acc-rgb) / .6); }
 .kpi.hero .value { font-size: 42px; font-weight: 750; letter-spacing: -.03em; line-height: 1.1; margin: 10px 0 6px; }
 .kpi.hero { container-type: inline-size; }
-.kpi .stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); }
+.kpi .stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px 8px; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); }
 @container (max-width: 380px) { .kpi .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); row-gap: 10px; } }
 .kpi .stats div { min-width: 0; }
 .kpi .stats span { display: block; font-size: 11.5px; color: var(--muted); white-space: nowrap; }
@@ -409,7 +413,7 @@ select.inp.sm { padding-right: 24px; background-position: right 6px center; back
 
 /* 洞察 */
 /* 宽屏下“关键发现”不参与行高计算，与左侧趋势卡片等高、内部滚动 */
-@media (min-width: 1181px) { .panel.ins-panel { contain: size; } }
+.ins-panel .insights { grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); overflow: visible; }
 .insights { list-style: none; margin: 0; padding: 0 4px 0 0; display: grid; gap: 10px; overflow-y: auto; min-height: 0; flex: 1 1 auto; align-content: start; scrollbar-width: thin; }
 .ins { display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 10px; padding: 10px 12px; border-radius: var(--r); background: var(--surface-2); border: 1px solid var(--border); }
 .ins-ico { width: 28px; height: 28px; border-radius: 8px; display: grid; place-items: center; background: var(--accent-wash-2); color: var(--accent-text); }

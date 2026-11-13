@@ -19,7 +19,7 @@ import { PromClient, validateCalls, discover, fetchCalls, buildUsageRows, buildQ
 import { configureIpLoc, ipLoc, ipLocInfo } from './iploc.mjs';
 import { loadMasterKey, hashPassword, verifyPassword, burnPasswordCheck, checkPasswordPolicy, randomPassword, maskId, sha256 } from './crypto.mjs';
 
-const VERSION = '1.6.2';
+const VERSION = '1.6.3';
 
 /* ===================================================================
  * 系统日志：所有运行日志同时输出到控制台并写入数据库（system_log，保留 SYSTEM_LOG_DAYS 天），

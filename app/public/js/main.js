@@ -275,7 +275,8 @@ function countUp(root) {
   const items = [];
   for (const el of root.querySelectorAll('.kpi .value')) {
     const tn = [...el.childNodes].find(n => n.nodeType === 3 && /\d/.test(n.nodeValue));
-    const m = tn && tn.nodeValue.match(/^([^\d-]*)(-?[\d,]*\.?\d+)(.*)$/s);
+    // 只滚动纯数值（可带货币符号前缀与 % / 万 / 亿 等单位后缀），排名“第 3”、模型名等文本不动
+    const m = tn && tn.nodeValue.match(/^(\s*[¥$€£]?)(-?[\d,]*\.?\d+)(\s*(?:%|pp|万|亿|千|K|M|B)?\s*)$/);
     if (!m) continue;
     const target = parseFloat(m[2].replace(/,/g, ''));
     if (!Number.isFinite(target) || target === 0) continue;
@@ -487,7 +488,7 @@ function renderFilters(r) {
     <button class="btn" id="btnMore" aria-expanded="${ui.moreFilters}" aria-controls="moreFilters">${icon('filter')}更多筛选${moreCount ? `<span class="count">${moreCount}</span>` : ''}</button>
     <div class="search">${icon('search')}<input class="inp" type="search" data-f="q" value="${esc(f.q)}" placeholder="搜索 Key、模型、成本中心…（/）" title="搜索 Key、描述、模型、业务空间、成本中心、负责人（快捷键 /）" aria-label="关键字搜索（快捷键 /）"></div>
     </div>
-    <div class="metric"><span class="lbl">费用口径</span><div class="seg sm" role="group" aria-label="费用口径">${Object.entries(METRICS).map(([k, l]) => `<button type="button" data-metric="${k}" aria-pressed="${f.metric === k}" title="${k === 'pretax' ? '扣除优惠与优惠券后的税前金额' : k === 'gross' ? '官网目录价金额' : '扣除优惠后的金额'}">${l.replace('金额', '')}</button>`).join('')}</div></div>`;
+    <div class="metric"><span class="lbl">费用口径</span><div class="seg sm" role="group" aria-label="费用口径">${Object.entries(METRICS).map(([k, l]) => `<button type="button" data-metric="${k}" aria-pressed="${f.metric === k}" title="${METRIC_TIP[k]}">${l.replace('金额', '')}</button>`).join('')}</div></div>`;
   more.hidden = !ui.moreFilters;
   if (ui.moreFilters) {
     const dirs = fv('dir'), items = [...fv('item')].filter(Boolean).sort(), channels = [...fv('channel')].sort();
@@ -501,11 +502,21 @@ function renderFilters(r) {
       ${sel('channel', '调用渠道', '全部调用渠道', channels.map(c => opt(c, channelLabel(c), f.channel)).join(''))}`;
   }
   const act = Object.keys(FILTER_LABEL).filter(k => isSet(k, f[k]));
-  chips.hidden = !act.length;
-  chips.innerHTML = act.map(k => `<span class="fchip">${FILTER_LABEL[k]}：<b>${esc(filterValueLabel(k, f[k]))}</b><button type="button" data-unf="${k}" aria-label="移除筛选 ${FILTER_LABEL[k]}">${icon('x')}</button></span>`).join('')
+  // 费用口径保存在浏览器中并沿用到所有页面：非默认的“应付金额”时始终醒目提示，避免与费用中心账单对比时误以为数据不一致
+  const metricChip = f.metric !== 'pretax' && METRICS[f.metric]
+    ? `<span class="fchip warn" title="${esc(METRIC_TIP[f.metric])}">费用口径：<b>${f.metric === 'after' ? '优惠后金额（未扣除优惠券）' : '原价（未扣除任何优惠）'}</b><button type="button" data-metric="pretax" aria-label="恢复为应付金额">${icon('x')}</button></span><span class="chip-note">与费用中心的“应付金额”不同，点 × 恢复</span>`
+    : '';
+  chips.hidden = !act.length && !metricChip;
+  chips.innerHTML = metricChip + act.map(k => `<span class="fchip">${FILTER_LABEL[k]}：<b>${esc(filterValueLabel(k, f[k]))}</b><button type="button" data-unf="${k}" aria-label="移除筛选 ${FILTER_LABEL[k]}">${icon('x')}</button></span>`).join('')
     + (act.length > 1 ? '<button class="link" data-unf="*" style="font-size:12px;margin-left:4px">清除全部</button>' : '')
     + (act.length ? scopeSummary() : '');
 }
+/** 费用口径说明（与云厂商账单字段对应） */
+const METRIC_TIP = {
+  pretax: '应付金额 = 原价 − 折扣 − 优惠券 / 代金券 / 储值卡抵扣（税前），与费用中心账单的“应付金额”一致（默认口径）',
+  gross: '原价：按官网目录价计算的金额，未扣除任何折扣与优惠券',
+  after: '优惠后金额 = 原价 − 折扣，尚未扣除优惠券 / 代金券抵扣；有优惠券抵扣时高于应付金额',
+};
 /** 当前筛选范围摘要：关联的业务空间 / Key / 模型数量与费用占比 */
 function scopeSummary() {
   const L = filterLines();

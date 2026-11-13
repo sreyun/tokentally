@@ -53,8 +53,8 @@ export function tokenStatsHtml({ a, pa, daily, us, period, scope = 'key', provid
     </div>`;
 }
 
-const TOKS = [['in', '输入（非缓存）', 'var(--s1)'], ['hit', '缓存命中', 'var(--s3)'], ['out', '输出', 'var(--s2)'], ['emb', '向量', 'var(--s7)'], ['other', '其他', 'var(--other)']];
-const tType = l => (l.ioi.dir === 'in' ? (l.ioi.cache === 'hit' ? 'hit' : 'in') : ['out', 'emb'].includes(l.ioi.dir) ? l.ioi.dir : 'other');
+export const TOKS = [['in', '输入（非缓存）', 'var(--s1)'], ['hit', '缓存命中', 'var(--s3)'], ['out', '输出', 'var(--s2)'], ['emb', '向量', 'var(--s7)'], ['other', '其他', 'var(--other)']];
+export const tType = l => (l.ioi.dir === 'in' ? (l.ioi.cache === 'hit' ? 'hit' : 'in') : ['out', 'emb'].includes(l.ioi.dir) ? l.ioi.dir : 'other');
 
 /** 每日 Token（按类型堆叠） */
 export function drawDailyTokens(el, legendEl, daily, period, { onX, height = 240 } = {}) {

@@ -1,7 +1,7 @@
 /* =========================================================================
  * 自动洞察：基于当前筛选数据的确定性规则（不调用任何外部服务）
  * ========================================================================= */
-import { esc, money, pct, sum, uniq, metricVal, aggregate, aggAll, sortedAggs, DIMS, NONE_KEY, keyObj, keyShort,
+import { esc, money, pct, sum, uniq, metricVal, METRICS, ui, aggregate, aggAll, sortedAggs, DIMS, NONE_KEY, keyObj, keyShort,
   forecastOf, budgetOf, state, addDays, daysBetween, filterLines, activeFilterCount } from './core.js';
 
 const b = v => `<b>${esc(v)}</b>`;
@@ -86,19 +86,21 @@ export function computeInsights() {
     if (s1 >= 0.5) out.push({ level: 'warn', icon: 'layers', rank: 4, title: '费用高度集中', html: `${b(keyShort(ranked[0].key))} 占 ${b(pct(ranked[0].cost, cur.cost))}，前 3 个 Key 合计占 ${b((s3 * 100).toFixed(1) + '%')}。建议对该 Key 设置独立预算与告警。`, go: ranked[0].key !== NONE_KEY ? `#/key/${encodeURIComponent(ranked[0].key)}` : null, goLabel: '查看该 Key' });
   }
 
-  // 5. 异常日（均值 + 2σ 且 ≥ 1.5 倍日均）
+  // 5. 异常日（均值 + 2σ 且 ≥ 1.5 倍日均）：按原价（反映真实用量）判断。优惠券与折扣按云厂商实际抵扣的日期计入，
+  //    常让某几天的应付为 0，按应付判断会把优惠用完后的正常日误判为异常
   const yesterday = addDays(state.today, -1);
   const from = p.from, to = p.to < yesterday ? p.to : yesterday;
   if (to >= from) {
     const n = daysBetween(from, to);
     if (n >= 5) {
       const dm = new Map();
-      daily.forEach(l => { if (l.date >= from && l.date <= to) dm.set(l.date, (dm.get(l.date) || 0) + metricVal(l)); });
-      const vals = []; for (let d = from; d <= to; d = addDays(d, 1)) vals.push([d, dm.get(d) || 0]);
+      daily.forEach(l => { if (l.date >= from && l.date <= to) { const o = dm.get(l.date) || dm.set(l.date, { g: 0, v: 0 }).get(l.date); o.g += l.gross || 0; o.v += metricVal(l); } });
+      const vals = []; for (let d = from; d <= to; d = addDays(d, 1)) vals.push([d, dm.get(d)?.g || 0, dm.get(d)?.v || 0]);
       const mean = sum(vals, v => v[1]) / vals.length;
       const sd = Math.sqrt(sum(vals, v => (v[1] - mean) ** 2) / vals.length);
       const peaks = vals.filter(v => v[1] > mean + 2 * sd && v[1] > mean * 1.5).sort((a, c) => c[1] - a[1]);
-      if (peaks.length && mean > 0) out.push({ level: 'warn', icon: 'warn', rank: 2, title: `发现 ${peaks.length} 个费用异常日`, html: peaks.slice(0, 2).map(v => `${b(v[0].slice(5))} 费用 ${b(money(v[1]))}，为日均的 ${b((v[1] / mean).toFixed(1) + ' 倍')}`).join('；') + '。', day: peaks[0][0], dayLabel: `查看 ${peaks[0][0].slice(5)} 明细` });
+      const paid = v => (Math.abs(v[2] - v[1]) >= 0.005 ? `（${METRICS[ui.f.metric].replace('金额', '')} ${money(v[2])}）` : '');
+      if (peaks.length && mean > 0) out.push({ level: 'warn', icon: 'warn', rank: 2, title: `发现 ${peaks.length} 个用量异常日`, html: peaks.slice(0, 2).map(v => `${b(v[0].slice(5))} 原价 ${b(money(v[1]))}${paid(v)}，为原价日均的 ${b((v[1] / mean).toFixed(1) + ' 倍')}`).join('；') + '。', day: peaks[0][0], dayLabel: `查看 ${peaks[0][0].slice(5)} 明细` });
     }
   }
 

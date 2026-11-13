@@ -3,7 +3,7 @@
  *
  * 事件：
  *  - budget   预算告警：达到预警阈值 / 超出预算 / 预计月末超出总预算 / API Key 预算（同一阈值每账期每渠道只通知一次）
- *  - anomaly  费用异常：昨日费用 ≥ 前 7 日日均 × 倍数 且 增量 ≥ 最小金额（整体与单个 Key）
+ *  - anomaly  费用异常：昨日原价 ≥ 前 7 日原价日均 × 倍数 且 增量 ≥ 最小金额（整体与单个 Key；按原价判断，不受优惠集中抵扣影响）
  *  - sync     同步故障：某云厂商同一类同步连续失败 3 次；恢复后发送恢复通知
  *  - keyChange API Key 新增 / 删除 / 恢复
  *  - daily / weekly / monthly  日报（昨日）/ 周报（上周）/ 月报（上月出账后）
@@ -340,27 +340,33 @@ export class AlertService {
   }
 
   /* ---------- 费用异常（昨日 vs 前 7 日日均） ---------- */
+  /**
+   * 按原价（目录价，反映真实用量）判断：优惠券与折扣按云厂商实际抵扣的日期计入，常集中在某几天（当天应付为 0），
+   * 若按应付判断，优惠用完后的第一个正常日会被误判为“费用异常”（如生产 10-19：原价只比前 7 日高约 30%，按应付却是 5 倍）
+   */
   evaluateAnomaly(today = todayIn(this.tz)) {
     const a = this.settings().anomaly;
     const day = addDays(today, -1), from = addDays(day, -7);
     const rows = this.store.dailyByKey(from, day);
     const items = [];
     const check = (scope, vals, name) => {
-      const y = vals.get(day) || 0;
+      const yv = vals.get(day), y = yv?.g || 0;
       // 日均只按有记录的日期计算：新 Key / 新账号的前几天不能被未存在的日子（记为 0）拉低基数而连续误报
       const first = [...vals.keys()].sort()[0];
-      let base = 0, n = 0; for (let i = 1; i <= 7; i++) { const d = addDays(day, -i); if (first && d >= first) { base += vals.get(d) || 0; n++; } }
+      let base = 0, n = 0; for (let i = 1; i <= 7; i++) { const d = addDays(day, -i); if (first && d >= first) { base += vals.get(d)?.g || 0; n++; } }
       if (n < 3) return; // 历史不足 3 天，无法判断是否异常
       base /= n;
       if (y <= 0 || y <= base || y - base < Math.max(a.minAmount, 0.01)) return;
       if (base > 0 && y < base * a.ratio) return;
-      items.push({ code: `anomaly:${scope}:${day}`, level: 'warn', delta: y - base, text: `**${name}** ${day.slice(5)} 费用 ${yuan(y)}，为前 7 日日均 ${yuan(base)} 的 ${base > 0 ? (y / base).toFixed(1) + ' 倍' : '—（此前无消费）'}（+${yuan(y - base)}）` });
+      const paid = yv?.p || 0;
+      items.push({ code: `anomaly:${scope}:${day}`, level: 'warn', delta: y - base, text: `**${name}** ${day.slice(5)} 原价 ${yuan(y)}${Math.abs(paid - y) >= 0.005 ? `（应付 ${yuan(paid)}）` : ''}，为前 7 日原价日均 ${yuan(base)} 的 ${base > 0 ? (y / base).toFixed(1) + ' 倍' : '—（此前无消费）'}（+${yuan(y - base)}）` });
     };
+    const add = (m, d, r) => { const o = m.get(d) || m.set(d, { g: 0, p: 0 }).get(d); o.g += r.gross ?? r.cost ?? 0; o.p += r.cost || 0; };
     const total = new Map(), byKey = new Map();
     for (const r of rows) {
-      total.set(r.day, (total.get(r.day) || 0) + (r.cost || 0));
+      add(total, r.day, r);
       if (!byKey.has(r.id)) byKey.set(r.id, new Map());
-      byKey.get(r.id).set(r.day, (byKey.get(r.id).get(r.day) || 0) + (r.cost || 0));
+      add(byKey.get(r.id), r.day, r);
     }
     check('total', total, '整体');
     if (a.keys) {

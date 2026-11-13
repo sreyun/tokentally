@@ -128,7 +128,7 @@ export const ui = {
   period: { mode: 'month', cycle: '', preset: '30', from: '', to: '', ...LS.get('bc.period', {}) },
   f: { provider: '', ws: '', key: '', model: '', cc: '', owner: '', channel: '__all', dir: '', item: '', q: '', metric: LS.get('bc.metric', 'pretax') },
   moreFilters: false, onlySpent: false,
-  trendMode: 'daily', trendBy: 'key', compBy: 'ws', varBy: 'key', hmMetric: 'cost', adminTab: 'aliyun',
+  trendMode: 'daily', trendBy: 'key', tokMode: 'daily', tokBy: 'type', compBy: 'ws', varBy: 'key', hmMetric: 'cost', adminTab: 'aliyun',
   density: LS.get('bc.density', 'normal'),
 };
 /** 由 main.js 注入，供各视图调用，避免循环依赖 */

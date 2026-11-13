@@ -7,6 +7,7 @@ import {
 } from '../core.js';
 import { sparkline, columnChart, lineChart, rankList, divergingList, segbar, legendList, topParts, legendHtml, bindActivate, bindLegend } from '../charts.js';
 import { computeInsights, cacheSavings } from '../insights.js';
+import { TOKS, tType } from '../stats.js';
 import { computeFindings, SEVERITY } from './governance.js';
 
 /** 可选的分组维度：云厂商（多云时）、成本中心（设置了标签时） */
@@ -23,6 +24,8 @@ export function render(v) {
   const trendOpts = fixSeg('trendBy', dimOpts({ key: 'Key', model: '模型', ws: '业务空间' }));
   const compOpts = fixSeg('compBy', dimOpts({ ws: '业务空间', dir: 'Token 类型', channel: '渠道' }));
   const varOpts = fixSeg('varBy', dimOpts({ key: 'Key', model: '模型', ws: '空间' }));
+  const tokOpts = fixSeg('tokBy', { type: '类型', model: '模型', key: 'Key' });
+  if (!['daily', 'monthly'].includes(ui.tokMode)) ui.tokMode = 'daily';
   const lines = filterLines(), prevLines = filterLines(state.prev), daily = filterLines(state.daily);
   const cur = aggAll(lines), prev = aggAll(prevLines);
   const days = uniq(daily.map(l => l.date)).sort();
@@ -59,9 +62,11 @@ export function render(v) {
       <div class="value" title="${esc(money(cur.cost, 4))}">${money(cur.cost)}</div>
       <div class="trend">${deltaPill(cur.cost, prev.cost)}<span class="cmp">${esc(state.compareLabel)} ${money(prev.cost)}</span></div>
       <div class="stats">
-        <div><span>原价</span><b>${moneyShort(cur.gross)}</b></div>
-        <div><span>优惠与券</span><b>${moneyShort(cur.gross - cur.pretax)}</b></div>
-        <div><span>综合折扣</span><b>${cur.gross ? (disc * 100).toFixed(1) + '%' : '-'}</b></div>
+        <div title="按官网目录价计算"><span>原价</span><b>${moneyShort(cur.gross)}</b></div>
+        <div title="折扣与促销优惠（账单“优惠金额”）"><span>折扣</span><b>${moneyShort(cur.gross - cur.after)}</b></div>
+        <div title="优惠券 / 代金券 / 储值卡抵扣：按云厂商实际抵扣的日期计入，常集中在某几天"><span>优惠券抵扣</span><b>${moneyShort(cur.after - cur.pretax)}</b></div>
+        ${ui.f.metric === 'pretax' ? `<div title="原价 − 折扣，未扣除优惠券"><span>优惠后（未扣券）</span><b>${moneyShort(cur.after)}</b></div>` : `<div title="与费用中心账单一致"><span>应付金额</span><b>${moneyShort(cur.pretax)}</b></div>`}
+        <div title="1 − 应付 ÷ 原价"><span>综合折扣</span><b>${cur.gross ? (disc * 100).toFixed(1) + '%' : '-'}</b></div>
         <div><span>日均</span><b>${moneyShort(avgDay)}</b></div>
       </div>
       ${budget ? budgetBar(sum(lines, l => l.pretax), budget, fc ? forecastOf(daily, l => l.pretax).value : null) : ''}
@@ -78,14 +83,15 @@ export function render(v) {
   </div>
 
   <div class="bi">
-    <section class="panel c8">
+    <section class="panel c6">
       <div class="panel-h"><h3>费用趋势</h3>${help('每日：按日账单堆叠；累计：本期与上期按天累计对比（当月含月末预测）；月度：近 12 个账期的账期账单（取决于同步回溯月数）。点击图例按该项筛选全部页面；点击柱查看当日明细，点击柱中的某一段只看该项。')}
         <div class="actions">${ui.trendMode !== 'cum' ? segCtl('trendBy', trendOpts) : ''}${segCtl('trendMode', { daily: '每日', cum: '累计', monthly: '月度' })}</div></div>
       <div class="legend" id="trLegend"></div><div class="chart" id="trChart"></div>
     </section>
-    <section class="panel c4 ins-panel">
-      <div class="panel-h"><h3>关键发现</h3>${help('基于当前筛选数据自动生成：费用变化与驱动因素、预算与预测、集中度、异常日、缓存效率、治理风险等。')}</div>
-      <ul class="insights" id="insights"></ul>
+    <section class="panel c6">
+      <div class="panel-h"><h3>Token 趋势</h3>${help('每日：按日账单的 Token 用量堆叠；月度：近 12 个账期。可按 Token 类型（输入 / 缓存命中 / 输出 / 向量）、模型或 API Key 拆分；点击图例按该项筛选全部页面，点击柱查看当日明细。')}
+        <div class="actions">${segCtl('tokBy', tokOpts)}${segCtl('tokMode', { daily: '每日', monthly: '月度' })}</div></div>
+      <div class="legend" id="tkLegend"></div><div class="chart" id="tkChart"></div>
     </section>
 
     <section class="panel c6">
@@ -109,9 +115,15 @@ export function render(v) {
       <div class="panel-h"><h3>Key 治理</h3><span class="sub">风险与合规检查</span><div class="actions"><button class="btn ghost sm" data-go="#/governance">查看全部</button></div></div>
       <div id="gov"></div>
     </section>
+
+    <section class="panel c12 ins-panel">
+      <div class="panel-h"><h3>关键发现</h3>${help('基于当前筛选数据自动生成：费用变化与驱动因素、预算与预测、集中度、异常日、缓存效率、治理风险等。')}</div>
+      <ul class="insights" id="insights"></ul>
+    </section>
   </div>`;
 
   drawTrend(daily, days, avgDay, fc);
+  drawTokens(daily, days);
 
   // 关键发现
   const ins = computeInsights();
@@ -201,6 +213,59 @@ function peakText(days, dayCost) {
   return `${d.slice(5)} ${moneyShort(dayCost.get(d) || 0)}`;
 }
 
+/** 系列 ID → 全局筛选取值（空的业务空间 / 成本中心 / 负责人转换为“未归属”哨兵值） */
+const filterVal = (by, id) => (by === 'ws' ? id || NO_WS : by === 'cc' ? id || NO_CC : by === 'owner' ? id || NO_OWNER : id);
+/**
+ * 系列配色：已分配颜色的实体保持原色（跨视图一致）；空闲的色位依次分给当前范围内排名靠前的实体，最多 8 色，其余并为“其他”。
+ * 按日视图同样处理：筛选到全局前 7 名以外的实体时，不能全部并成一个灰色“其他”
+ */
+function colorSeries(dim, ranked) {
+  const colorOf = new Map(ranked.filter(id => dim.color(id) !== 'var(--other)').map(id => [id, dim.color(id)]));
+  const free = [1, 2, 3, 4, 5, 6, 7, 8].map(i => `var(--s${i})`).filter(c => ![...colorOf.values()].includes(c));
+  for (const id of ranked) { if (!free.length || colorOf.size >= 8) break; if (!colorOf.has(id)) colorOf.set(id, free.shift()); }
+  const colored = ranked.filter(id => colorOf.has(id));
+  const others = ranked.filter(id => !colorOf.has(id));
+  const series = colored.map(id => ({ id, label: dim.short(id), color: colorOf.get(id) }));
+  if (others.length) series.push({ id: '__other', label: others.length === 1 ? dim.short(others[0]) : `其他 ${others.length} 项`, color: 'var(--other)' });
+  return { series, colored };
+}
+
+/** Token 趋势：每日（按日账单）/ 月度（近 12 个账期），按 Token 类型、模型或 API Key 堆叠 */
+function drawTokens(daily, days) {
+  const el = $('#tkChart'), lg = $('#tkLegend');
+  if (!el) return;
+  const monthly = ui.tokMode === 'monthly', by = ui.tokBy;
+  const src = (monthly ? filterLines(state.history) : daily).filter(l => l.tokens > 0);
+  const xs = monthly ? uniq(src.map(l => l.date)).sort() : days;
+  let series, idOf, clickable = false;
+  if (by === 'type') {
+    idOf = tType;
+    const present = new Set(src.map(tType));
+    series = TOKS.filter(([t]) => present.has(t)).map(([id, label, color]) => ({ id, label, color }));
+  } else {
+    const dim = DIMS[by];
+    idOf = dim.of;
+    const tok = new Map(); for (const l of src) { const k = dim.of(l); tok.set(k, (tok.get(k) || 0) + l.tokens); }
+    const ranked = [...tok.entries()].sort((a, b) => b[1] - a[1]).map(e => e[0]);
+    const cs = colorSeries(dim, ranked);
+    const set = new Set(cs.colored);
+    const raw = idOf; idOf = l => (set.has(raw(l)) ? raw(l) : '__other');
+    series = cs.series; clickable = true;
+  }
+  const cell = new Map(); let total = 0;
+  for (const l of src) { const k = l.date + '|' + idOf(l); cell.set(k, (cell.get(k) || 0) + l.tokens); total += l.tokens; }
+  if (clickable) { lg.innerHTML = series.length > 1 ? legendHtml(series.map(s => ({ ...s, id: s.id === '__other' ? null : s.id })), '点击按此筛选') : ''; bindLegend(lg, id => app.setFilter({ [by]: filterVal(by, id) })); }
+  else lg.innerHTML = series.length > 1 ? legendHtml(series) : '';
+  const p = state.data.period, elapsed = Math.max(1, p.elapsedDays || xs.length);
+  columnChart(el, {
+    xs, series, cell: (x, id) => cell.get(x + '|' + id) || 0, height: 300, fmt: compact, avg: monthly || !total ? null : total / elapsed,
+    xLabel: x => (monthly ? x.slice(2) : x.slice(5)), tipTitle: x => (monthly ? `${x} 账期` : `${x}（周${WEEK[weekday(x)]}）`), weekend: !monthly,
+    aria: monthly ? '月度 Token 趋势' : '每日 Token 趋势', empty: monthly ? '暂无历史账期的 Token 用量' : '本期无 Token 用量（可能为按次计费的模型）',
+    onX: monthly ? x => app.setPeriod({ mode: 'month', cycle: x }) : x => app.openDay(x),
+    clickHint: monthly ? '点击切换到该账期' : '点击查看当日明细',
+  });
+}
+
 function drawTrend(daily, days, avgDay, fc) {
   const el = $('#trChart'), lg = $('#trLegend');
   const p = state.data.period;
@@ -230,33 +295,29 @@ function drawTrend(daily, days, avgDay, fc) {
       if (lastI >= 0 && endI > lastI) lines.push({ label: '月末预测', color: 'var(--s1)', values: fv, dashed: true, endLabel: `预测 ${moneyShort(fc.value)}` });
     }
     lg.innerHTML = legendHtml(lines.map(l => ({ label: l.label, color: l.color, line: true })));
-    lineChart(el, { xs, lines, height: 340, xLabel: i => (p.mode === 'month' ? `${i + 1}日` : addDays(p.from, i).slice(5)), tipTitle: i => (p.mode === 'month' ? `第 ${i + 1} 天（${addDays(p.from, i).slice(5)}）` : `第 ${i + 1} 天`), aria: '累计费用对比' });
+    lineChart(el, { xs, lines, height: 300, xLabel: i => (p.mode === 'month' ? `${i + 1}日` : addDays(p.from, i).slice(5)), tipTitle: i => (p.mode === 'month' ? `第 ${i + 1} 天（${addDays(p.from, i).slice(5)}）` : `第 ${i + 1} 天`), aria: '累计费用对比' });
     return;
   }
   const dim = DIMS[ui.trendBy], by = ui.trendBy;
   const src = ui.trendMode === 'monthly' ? filterLines(state.history) : daily;
   const xs = ui.trendMode === 'monthly' ? uniq(src.map(l => l.date)).sort() : days;
   const ranked = [...aggregate(src, dim.of).values()].filter(a => a.cost > 0).sort((a, b) => b.cost - a.cost).map(a => a.key);
-  /** 系列 ID → 全局筛选取值（空的业务空间 / 成本中心 / 负责人转换为“未归属”哨兵值） */
-  const fval = id => (by === 'ws' ? id || NO_WS : by === 'cc' ? id || NO_CC : by === 'owner' ? id || NO_OWNER : id);
-  // 已分配颜色的实体保持原色（跨视图一致）；空闲的色位依次分给当前范围内费用较高的实体，最多 8 色。
-  // 按日视图同样处理：筛选到全局前 7 名以外的实体时，不能全部并成一个灰色“其他”
-  const colorOf = new Map(ranked.filter(id => dim.color(id) !== 'var(--other)').map(id => [id, dim.color(id)]));
-  const free = [1, 2, 3, 4, 5, 6, 7, 8].map(i => `var(--s${i})`).filter(c => ![...colorOf.values()].includes(c));
-  for (const id of ranked) { if (!free.length || colorOf.size >= 8) break; if (!colorOf.has(id)) colorOf.set(id, free.shift()); }
-  const colored = ranked.filter(id => colorOf.has(id));
-  const others = ranked.filter(id => !colorOf.has(id));
-  const series = colored.map(id => ({ id, label: dim.short(id), color: colorOf.get(id) }));
-  if (others.length) series.push({ id: '__other', label: others.length === 1 ? dim.short(others[0]) : `其他 ${others.length} 项`, color: 'var(--other)' });
-  const cell = new Map();
-  for (const l of src) { const id = dim.of(l); const k = l.date + '|' + (colored.includes(id) ? id : '__other'); cell.set(k, (cell.get(k) || 0) + metricVal(l)); }
+  const fval = id => filterVal(by, id);
+  const { series, colored } = colorSeries(dim, ranked);
+  const cell = new Map(), dayAmt = new Map();
+  for (const l of src) {
+    const id = dim.of(l); const k = l.date + '|' + (colored.includes(id) ? id : '__other'); cell.set(k, (cell.get(k) || 0) + metricVal(l));
+    const a = dayAmt.get(l.date) || dayAmt.set(l.date, { gross: 0, pretax: 0 }).get(l.date); a.gross += l.gross || 0; a.pretax += l.pretax || 0;
+  }
+  /** 当日原价与优惠：优惠券、折扣按云厂商实际抵扣的日期计入（常集中在某几天），不按天均摊 */
+  const discNote = x => { const a = dayAmt.get(x); return a && a.gross - a.pretax >= 0.005 ? ` · 原价 ${money(a.gross)}，优惠与券 ${money(a.gross - a.pretax)}` : ''; };
   // 图例可点击：按该项筛选全部页面（单一系列时无图例）
   lg.innerHTML = series.length > 1 ? legendHtml(series.map(s => ({ ...s, id: s.id === '__other' ? null : s.id })), '点击按此筛选') : '';
   bindLegend(lg, id => app.setFilter({ [by]: fval(id) }));
   const monthly = ui.trendMode === 'monthly';
   columnChart(el, {
-    xs, series, cell: (x, id) => cell.get(x + "|" + id) || 0, height: 340, avg: monthly ? null : avgDay,
-    xLabel: x => (monthly ? x.slice(2) : x.slice(5)), tipTitle: x => (monthly ? `${x} 账期` : `${x}（周${WEEK[weekday(x)]}）`), weekend: !monthly,
+    xs, series, cell: (x, id) => cell.get(x + "|" + id) || 0, height: 300, avg: monthly ? null : avgDay,
+    xLabel: x => (monthly ? x.slice(2) : x.slice(5)), tipTitle: x => (monthly ? `${x} 账期` : `${x}（周${WEEK[weekday(x)]}）`) + discNote(x), weekend: !monthly,
     aria: monthly ? '月度费用趋势' : '每日费用趋势', empty: monthly ? '暂无历史账期数据（可在系统管理中调大回溯月数）' : '暂无按日账单数据',
     onX: monthly ? x => app.setPeriod({ mode: 'month', cycle: x }) : x => app.openDay(x),
     // 每日：点击柱段 → 当日明细（限定该项）；月度：点击柱段 → 切换到该账期并按该项筛选

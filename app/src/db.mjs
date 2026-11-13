@@ -640,7 +640,7 @@ export class Store {
   }
   /** 日报 / 周报 / 异常检测：日账单按 日 × Key 汇总（含 Token） */
   dailyByKey(from, to) {
-    return this.q(`SELECT period AS day, COALESCE(api_key_id, '') AS id, provider, SUM(pretax) AS cost, SUM(COALESCE(tokens, 0)) AS tokens
+    return this.q(`SELECT period AS day, COALESCE(api_key_id, '') AS id, provider, SUM(pretax) AS cost, SUM(gross) AS gross, SUM(COALESCE(tokens, 0)) AS tokens
       FROM bill_lines WHERE granularity = 'D' AND period >= ? AND period <= ? GROUP BY period, COALESCE(api_key_id, ''), provider`).all(from, to);
   }
   dailyByModel(from, to) {
