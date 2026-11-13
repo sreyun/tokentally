@@ -161,17 +161,18 @@ const rowLines = (rows, kind) => rows.map((r, i) => `${i + 1}. ${r.name} ${r.val
 /** 结构化分节 → 文本行（钉钉 / 企业微信 / 邮件 / 通用 Webhook / 通知记录使用） */
 const sectionLines = sections => sections.flatMap(s => (s.rows?.length ? ['', `#### ${s.title}${s.note ? `（${s.note}）` : ''}`, ...rowLines(s.rows, s.kind)] : s.items?.length ? ['', `#### ${s.title}`, ...s.items.map(i => i.text)] : []));
 /** Token 数量：≥1 亿显示“x.xx 亿”，≥1 万显示“x.x 万”，否则显示整数 */
-const tok = n => { n = Number(n) || 0; return n >= 1e8 ? (n / 1e8).toFixed(2) + ' 亿' : n >= 1e4 ? (n / 1e4).toLocaleString('zh-CN', { minimumFractionDigits: 1, maximumFractionDigits: 1 }) + ' 万' : Math.round(n).toLocaleString('zh-CN'); };
-/** 单位成本：每百万 Token 的应付金额 */
-const perM = (cost, tokens) => (tokens > 0 ? `¥${(cost / tokens * 1e6).toFixed(2)} / 百万 Token` : '—');
-const perMv = (cost, tokens) => (tokens > 0 ? `¥${(cost / tokens * 1e6).toFixed(2)}` : '—');
-/** Token 排行：[{ name, value: 'x 万', share }] */
 /**
  * Token 单位：默认用“亿”（最大值不少于 0.1 亿时整组统一用亿，如 0.29 亿，避免同一组里亿与万混用、趋势图标签过长），
  * 量很小的账号依次用“万”与“个”
  */
 const tokUnit = max => (max >= 1e7 ? { div: 1e8, unit: '亿', dec: 2 } : max >= 1e4 ? { div: 1e4, unit: '万', dec: 1 } : { div: 1, unit: '', dec: 0 });
 const tokIn = (n, u) => (Number(n || 0) / u.div).toLocaleString('zh-CN', { minimumFractionDigits: u.dec, maximumFractionDigits: u.dec }) + (u.unit ? ' ' + u.unit : '');
+/** Token 数量（指标面板等单个数值）：与排行、趋势图同一规则——不少于 0.1 亿用“亿”，否则用“万”，很小时用整数 */
+const tok = n => tokIn(n, tokUnit(Number(n) || 0));
+/** 单位成本：每百万 Token 的应付金额 */
+const perM = (cost, tokens) => (tokens > 0 ? `¥${(cost / tokens * 1e6).toFixed(2)} / 百万 Token` : '—');
+const perMv = (cost, tokens) => (tokens > 0 ? `¥${(cost / tokens * 1e6).toFixed(2)}` : '—');
+/** Token 排行：[{ name, value: 'x 万', share }] */
 /** Token 排行：[{ name, value: 'x.xx 亿', share }]，同一区块统一单位 */
 const tokRows = (rows, n, nameOf, total) => {
   const list = rows.filter(r => (r.tokens || 0) > 0).sort((x, y) => y.tokens - x.tokens).slice(0, n), u = tokUnit(list[0]?.tokens || 0);
@@ -197,6 +198,7 @@ function tokenChart(title, rows, from, to, kOf, colors) {
   const c = dailyChart(`${title}（${u.unit || '个'}）`, rows, from, to, kOf, colors, r => r.tokens || 0, 1 / u.div);
   return c && { ...c, unit: u.unit || '个' };
 }
+const pause = ms => (ms > 0 ? new Promise(r => setTimeout(r, ms)) : Promise.resolve());
 const BLUE = '#3370FF', BLUE_L = '#B7CBF9', TEAL = '#14A38B', TEAL_L = '#A7DED4';
 
 /**
@@ -476,7 +478,7 @@ export class AlertService {
     const st = o.stats, tag = `（${scope.label}）`;
     const rowsOf = list => list.filter(x => x.cost > 0.005).map(x => ({ name: clean(x.name), value: yuan(x.cost), share: st.cost ? pct(x.cost / st.cost * 100) : '' }));
     const scopeNote = `推送范围：${scope.label}`;
-    const budgetKpi = st.budget ? [{ label: '范围内 Key 预算', value: pct(st.cost / st.budget * 100), tone: st.cost >= st.budget ? 'bad' : null, sub: `预算 ${yuan(st.budget)}` }] : [];
+    const budgetKpi = st.budget ? [{ label: '范围内 Key 预算使用率', value: pct(st.cost / st.budget * 100), tone: st.cost >= st.budget ? 'bad' : null, sub: `预算 ${yuan(st.budget)}` }] : [];
     if (kind === 'daily') {
       const day = addDays(today, -1);
       const rows14 = this.store.dailyByKey(addDays(day, -13), day).filter(r => scope.keys.has(r.id));
@@ -488,8 +490,8 @@ export class AlertService {
       const d = delta('较前一日', yc, pc);
       const doc = {
         tags: [{ text: '指定范围', level: 'info' }],
-        kpis: [{ label: `昨日费用（${day.slice(5)}）`, value: yuan(yc), delta: d }, { label: `${st.label} 合计`, value: yuan(st.cost), sub: st.forecast != null ? `预计月末 ${yuan(st.forecast)}` : '' }, ...budgetKpi],
-        usage: [{ label: '昨日 Token', value: tok(yt), delta: udelta('较前一日', yt, pt) }, { label: `${st.label} Token`, value: tok(st.tokens) }, { label: '昨日单位成本', value: perMv(yc, yt), sub: '每百万 Token' }],
+        kpis: [{ label: '昨日费用（元）', value: yuan(yc), delta: d }, { label: `${st.label} 合计（元）`, value: yuan(st.cost), sub: st.forecast != null ? `预计月末 ${yuan(st.forecast)}` : '' }, ...budgetKpi],
+        usage: [{ label: '昨日 Token', value: tok(yt), delta: udelta('较前一日', yt, pt) }, { label: `${st.label} Token`, value: tok(st.tokens) }, { label: '昨日单位成本（元）', value: perMv(yc, yt), sub: '每百万 Token' }],
         notes: [scopeNote], sections,
         chart: dailyChart('近 14 日每日费用（元）', rows14, addDays(day, -13), day, x => (x === day ? '昨日' : '此前'), { 此前: BLUE_L, 昨日: BLUE }),
         tokenChart: tokenChart('近 14 日每日 Token', rows14, addDays(day, -13), day, x => (x === day ? '昨日' : '此前'), { 此前: TEAL_L, 昨日: TEAL }),
@@ -497,13 +499,13 @@ export class AlertService {
       return { title: `费用日报 · ${day}${tag}`, level: 'info', lines, doc, empty: yc < 0.005 && st.cost < 0.005, period: today, ready: true, path: '#/overview' };
     }
     const period = kind === 'weekly' ? isoWeek(addDays(isoWeek(today).from, -1)).key : addMonths(today.slice(0, 7), -1);
-    const tRows = list => (list || []).map(x => ({ name: clean(x.name), value: tok(x.tokens), share: st.tokens ? pct(x.tokens / st.tokens * 100) : '' }));
+    const tRows = list => { const u = tokUnit(Math.max(0, ...(list || []).map(x => x.tokens || 0))); return (list || []).map(x => ({ name: clean(x.name), value: tokIn(x.tokens, u), share: st.tokens ? pct(x.tokens / st.tokens * 100) : '' })); };
     const pb = kind === 'weekly' ? '范围内上周总' : `范围内 ${period} 总`;
     const sections = [{ title: 'API Key Top 5', rows: rowsOf(st.topKeys), ...head('cost', 'API Key', pb + '费用') }, { title: '模型 Top 3', rows: rowsOf(st.topModels), ...head('cost', '模型', pb + '费用') }, { title: 'Token 用量 · API Key Top 5', rows: tRows(st.tokenKeys), ...head('token', 'API Key', pb + ' Token') }, { title: 'Token 用量 · 模型 Top 3', rows: tRows(st.tokenModels), ...head('token', '模型', pb + ' Token') }];
     const lines = [`**${kind === 'weekly' ? '上周' : period + ' 账期'}费用 ${yuan(st.cost)}**，较${st.prevLabel} ${chg(st.cost, st.prevCost)}`, `Token ${tok(st.tokens)}，较${st.prevLabel} ${chg(st.tokens || 0, st.prevTokens || 0)}${st.tokens > 0 ? `，单位成本 ${perM(st.cost, st.tokens)}` : ''}`, scopeNote, ...sectionLines(sections)];
     const d = delta('较' + st.prevLabel, st.cost, st.prevCost);
-    const doc = { tags: [{ text: '指定范围', level: 'info' }], kpis: [{ label: kind === 'weekly' ? '上周费用' : `${period} 应付`, value: yuan(st.cost), delta: d }, { label: st.prevLabel, value: yuan(st.prevCost) }, ...(kind === 'monthly' ? budgetKpi : [])],
-      usage: [{ label: kind === 'weekly' ? '上周 Token' : `${period} Token`, value: tok(st.tokens), delta: udelta('较' + st.prevLabel, st.tokens || 0, st.prevTokens || 0) }, { label: '单位成本', value: perMv(st.cost, st.tokens), sub: '每百万 Token' }], notes: [scopeNote], sections };
+    const doc = { tags: [{ text: '指定范围', level: 'info' }], kpis: [{ label: kind === 'weekly' ? '上周费用（元）' : `${period} 应付（元）`, value: yuan(st.cost), delta: d }, { label: `${st.prevLabel}（元）`, value: yuan(st.prevCost) }, ...(kind === 'monthly' ? budgetKpi : [])],
+      usage: [{ label: kind === 'weekly' ? '上周 Token' : `${period} Token`, value: tok(st.tokens), delta: udelta('较' + st.prevLabel, st.tokens || 0, st.prevTokens || 0) }, { label: '单位成本（元）', value: perMv(st.cost, st.tokens), sub: '每百万 Token' }], notes: [scopeNote], sections };
     return { title: `${kind === 'weekly' ? '费用周报' : '费用月报'} · ${period}${tag}`, level: 'info', lines, doc, empty: st.cost < 0.005 && st.prevCost < 0.005, period, ready: kind === 'monthly' ? globalReady : true, path: '#/overview' };
   }
 
@@ -556,9 +558,9 @@ export class AlertService {
     const cycle = today.slice(0, 7), { month, daily } = this.store.budgetUsage(cycle);
     const total = month.reduce((x, y) => x + (y.cost || 0), 0), used = total / b.monthly * 100, fc = this.forecast(daily, cycle, today);
     return [
-      { label: '本月应付', value: yuan(total), sub: fc != null ? `预计月末 ${yuan(fc)}` : '' },
-      { label: '月度预算', value: yuan(b.monthly), sub: `预警阈值 ${b.alertPct || 80}%` },
-      { label: '已用', value: pct(used), tone: used >= 100 ? 'bad' : used >= (b.alertPct || 80) ? 'warn' : null, sub: total > b.monthly ? `超出 ${yuan(total - b.monthly)}` : `剩余 ${yuan(b.monthly - total)}` },
+      { label: '本月应付（元）', value: yuan(total), sub: fc != null ? `预计月末 ${yuan(fc)}` : '' },
+      { label: '月度预算（元）', value: yuan(b.monthly), sub: `预警阈值 ${b.alertPct || 80}%` },
+      { label: '预算使用率', value: pct(used), tone: used >= 100 ? 'bad' : used >= (b.alertPct || 80) ? 'warn' : null, sub: total > b.monthly ? `超出 ${yuan(total - b.monthly)}` : `剩余 ${yuan(b.monthly - total)}` },
     ];
   }
   /** 兼容旧接口 */
@@ -666,7 +668,7 @@ export class AlertService {
       const ps = sumBy(rows, r => r.provider || 'aliyun');
       return ps.length > 1 ? '按云厂商：' + ps.sort((x, y) => y.cost - x.cost).map(x => `${PROVIDER_NAMES[x.k] || x.k} ${yuan(x.cost)}`).join('，') : null;
     };
-    const budgetKpi = (cost, label = '月度预算') => {
+    const budgetKpi = (cost, label = '月度预算使用率') => {
       if (!b.monthly) return [];
       const used = cost / b.monthly * 100;
       return [{ label, value: pct(used), tone: used >= 100 ? 'bad' : used >= alertPct ? 'warn' : null, sub: cost > b.monthly ? `超出 ${yuan(cost - b.monthly)}` : `预算 ${yuan(b.monthly)}` }];
@@ -693,16 +695,16 @@ export class AlertService {
       const sections = [
         { title: '昨日 API Key Top 5', rows: topRows(byKeyY, 5, r => this.keyName(r.id, keys), yc), ...head('cost', 'API Key', '昨日总费用') },
         { title: '昨日模型 Top 3', rows: topRows(byModelY, 3, r => clean(r.model), yc), ...head('cost', '模型', '昨日总费用') },
+        { title: '异常提示', items: an.map(i => ({ text: i.text, tag: i.tag, level: i.level })) },
         { title: '昨日 Token 用量 · API Key Top 5', rows: tokRows(byKeyY, 5, r => this.keyName(r.id, keys), yt), ...head('token', 'API Key', '昨日总 Token') },
         { title: '昨日 Token 用量 · 模型 Top 3', rows: tokRows(byModelY, 3, r => clean(r.model), yt), ...head('token', '模型', '昨日总 Token') },
-        { title: '异常提示', items: an.map(i => ({ text: i.text, tag: i.tag, level: i.level })) },
       ];
       lines.push(...sectionLines(sections));
       const d = delta('较前一日', yc, pc);
       const doc = {
         tags: [dirTag(d), an.length ? { text: `${an.length} 项异常`, level: 'warn' } : null],
-        kpis: [{ label: `昨日费用（${day.slice(5)}）`, value: yuan(yc), delta: d }, { label: isCur ? '本月累计' : `${cycle} 合计`, value: yuan(mtd), sub: fc != null ? `预计月末 ${yuan(fc)}` : '' }, ...budgetKpi(mtd)],
-        usage: [{ label: '昨日 Token', value: tok(yt), delta: udelta('较前一日', yt, pt) }, { label: isCur ? '本月累计 Token' : `${cycle} Token`, value: tok(mt) }, { label: '昨日单位成本', value: perMv(yc, yt), sub: '每百万 Token' }],
+        kpis: [{ label: '昨日费用（元）', value: yuan(yc), delta: d }, { label: isCur ? '本月累计（元）' : `${cycle} 合计（元）`, value: yuan(mtd), sub: fc != null ? `预计月末 ${yuan(fc)}` : '' }, ...budgetKpi(mtd)],
+        usage: [{ label: '昨日 Token', value: tok(yt), delta: udelta('较前一日', yt, pt) }, { label: isCur ? '本月累计 Token' : `${cycle} Token`, value: tok(mt) }, { label: '昨日单位成本（元）', value: perMv(yc, yt), sub: '每百万 Token' }],
         notes: ps ? [ps] : [], sections,
         chart: dailyChart('近 14 日每日费用（元）', rows14, addDays(day, -13), day, x => (x === day ? '昨日' : '此前'), { 此前: BLUE_L, 昨日: BLUE }),
         tokenChart: tokenChart('近 14 日每日 Token', rows14, addDays(day, -13), day, x => (x === day ? '昨日' : '此前'), { 此前: TEAL_L, 昨日: TEAL }),
@@ -732,9 +734,9 @@ export class AlertService {
       const d = delta('较前一周', c, o);
       const doc = {
         tags: [dirTag(d)],
-        kpis: [{ label: `上周（${last.from.slice(5)} ~ ${last.to.slice(5)}）`, value: yuan(c), delta: d }, { label: '日均', value: yuan(c / 7), sub: `前一周日均 ${yuan(o / 7)}` }, { label: '有消费的 API Key', value: `${kc.filter(x => x.cost > 0.005).length} 个`, sub: `前一周 ${[...ko.values()].filter(v => v > 0.005).length} 个` }],
-        usage: [{ label: '上周 Token', value: tok(ct), delta: udelta('较前一周', ct, ot) }, { label: '日均 Token', value: tok(ct / 7), sub: `前一周日均 ${tok(ot / 7)}` }, { label: '单位成本', value: perMv(c, ct), sub: '每百万 Token' }],
-        notes: ps ? [ps] : [], sections,
+        kpis: [{ label: '上周费用（元）', value: yuan(c), delta: d }, { label: '日均费用（元）', value: yuan(c / 7), sub: `前一周日均 ${yuan(o / 7)}` }, { label: '有消费的 API Key', value: `${kc.filter(x => x.cost > 0.005).length} 个`, sub: `前一周 ${[...ko.values()].filter(v => v > 0.005).length} 个` }],
+        usage: [{ label: '上周 Token', value: tok(ct), delta: udelta('较前一周', ct, ot) }, { label: '日均 Token', value: tok(ct / 7), sub: `前一周日均 ${tok(ot / 7)}` }, { label: '单位成本（元）', value: perMv(c, ct), sub: '每百万 Token' }],
+        notes: [`统计周期：${last.from} ~ ${last.to}（较前一周 ${prev.from.slice(5)} ~ ${prev.to.slice(5)}）`, ...(ps ? [ps] : [])], sections,
         chart: dailyChart('近两周每日费用（元）', rows, prev.from, last.to, x => (x >= last.from ? '上周' : '前一周'), { 前一周: BLUE_L, 上周: BLUE }),
         tokenChart: tokenChart('近两周每日 Token', rows, prev.from, last.to, x => (x >= last.from ? '上周' : '前一周'), { 前一周: TEAL_L, 上周: TEAL }),
       };
@@ -763,8 +765,8 @@ export class AlertService {
     const mdaily = this.store.dailyByKey(cycle + '-01', last);
     const doc = {
       tags: [dirTag(d), b.monthly && c > b.monthly ? { text: '超出预算', level: 'bad' } : null],
-      kpis: [{ label: `${cycle} 应付`, value: yuan(c), delta: d }, ...(g > 0.005 ? [{ label: '原价', value: yuan(g), sub: g - c >= 0.005 ? `优惠 ${yuan(g - c)}` : '无优惠抵扣' }] : []), ...budgetKpi(c, '预算使用')],
-      usage: [{ label: `${cycle} Token`, value: tok(ct), delta: udelta('较上月', ct, ot) }, { label: '日均 Token', value: tok(ct / mdays) }, { label: '单位成本', value: perMv(c, ct), sub: '每百万 Token' }],
+      kpis: [{ label: `${cycle} 应付（元）`, value: yuan(c), delta: d }, ...(g > 0.005 ? [{ label: '原价（元）', value: yuan(g), sub: g - c >= 0.005 ? `优惠 ${yuan(g - c)}` : '无优惠抵扣' }] : []), ...budgetKpi(c, '预算使用率')],
+      usage: [{ label: `${cycle} Token`, value: tok(ct), delta: udelta('较上月', ct, ot) }, { label: '日均 Token', value: tok(ct / mdays) }, { label: '单位成本（元）', value: perMv(c, ct), sub: '每百万 Token' }],
       notes: ps ? [ps] : [], sections,
       chart: dailyChart(`${cycle} 每日费用（元）`, mdaily, cycle + '-01', last, () => '每日应付', { 每日应付: BLUE }),
       tokenChart: tokenChart(`${cycle} 每日 Token`, mdaily, cycle + '-01', last, () => '每日 Token', { '每日 Token': TEAL }),
@@ -858,8 +860,12 @@ export class AlertService {
             msgs.push({ event: kind, title: r.title, level: r.level, lines: r.lines, doc: r.doc, report: { kind, period: r.period }, path: r.path });
           }
         }
+        let first = true;
         for (const m of msgs) {
           if (this.stopping) break; // 服务正在退出：不再开始新的推送，剩余消息在重启后发送
+          // 同一渠道的相邻消息间隔 0.4 秒：预算 / 异常 / 日报 / 周报 / 月报可能同时到点，连续发送容易触发机器人限流（飞书每秒 5 条）
+          if (!first) await pause(this.sendGapMs ?? 400);
+          first = false;
           try {
             await this.send(ch, sec, { ...m, today });
           } catch (e) {
@@ -965,17 +971,20 @@ export class AlertService {
   async postFeishu(webhook, secret, variants) {
     const fp = crypto.createHash('sha1').update(webhook).digest('hex').slice(0, 12);
     this._fsSkip ||= new Map();
-    const skip = this._fsSkip.get(fp) || new Set();
+    // 被拒绝的样式记住 24 小时：机器人 / 客户端之后支持了图表等组件时能恢复完整样式，不必等服务重启
+    const now = Date.now(), skip = this._fsSkip.get(fp) || new Map();
+    for (const [k, t] of skip) if (now - t > 24 * 3600_000) skip.delete(k);
     const list = variants.filter(v => v.card && !skip.has(v.style));
     if (!list.length) list.push(variants[variants.length - 1]);
     let lastErr = null;
     for (const v of list) {
+      if (lastErr) await pause(this.sendGapMs ?? 300); // 降级重发间隔，避免触发限流
       const req = signRequest('feishu', webhook, secret, v.card, null);
       const resp = await postJson(req.url, req.body, req.headers, this.allowPrivate);
       try { checkResponse('feishu', resp); if (lastErr) this.log?.(`飞书卡片已改用“${v.label}”样式发送（${lastErr.message}）`); return v.style; }
       catch (e) {
         if (!feishuFormatError(resp) || v === list[list.length - 1]) throw e;
-        lastErr = e; skip.add(v.style); this._fsSkip.set(fp, skip);
+        lastErr = e; skip.set(v.style, Date.now()); this._fsSkip.set(fp, skip);
       }
     }
     throw lastErr;
