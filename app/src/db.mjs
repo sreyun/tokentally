@@ -547,7 +547,9 @@ export class Store {
   /* ---------------- 成本中心 / 负责人标签 ---------------- */
   listKeyTags() { return this.q('SELECT * FROM key_tags').all(); }
   setKeyTag(id, { costCenter = '', owner = '', note = '' }, by = '') {
-    const cc = String(costCenter || '').trim().slice(0, 40), ow = String(owner || '').trim().slice(0, 40), nt = String(note || '').trim().slice(0, 200);
+    // 截断时不切开表情等代理对（否则保存的是孤立的半个字符，页面、报表与邮件中显示为乱码）
+    const cut = (s, n) => String(s || '').trim().slice(0, n).replace(/[\uD800-\uDBFF]$/, '');
+    const cc = cut(costCenter, 40), ow = cut(owner, 40), nt = cut(note, 200);
     if (!cc && !ow && !nt) { this.q('DELETE FROM key_tags WHERE api_key_id = ?').run(id); return null; }
     this.q(`INSERT INTO key_tags(api_key_id, cost_center, owner, note, updated_at, updated_by) VALUES(?,?,?,?,?,?)
       ON CONFLICT(api_key_id) DO UPDATE SET cost_center=excluded.cost_center, owner=excluded.owner, note=excluded.note, updated_at=excluded.updated_at, updated_by=excluded.updated_by`)
@@ -729,9 +731,11 @@ export class Store {
     return { month, daily };
   }
   /** 日报 / 周报 / 异常检测：日账单按 日 × Key 汇总（含 Token） */
-  dailyByKey(from, to) {
-    return this.q(`SELECT period AS day, COALESCE(api_key_id, '') AS id, provider, SUM(pretax) AS cost, SUM(gross) AS gross, SUM(COALESCE(tokens, 0)) AS tokens
-      FROM bill_lines WHERE granularity = 'D' AND period >= ? AND period <= ? GROUP BY period, COALESCE(api_key_id, ''), provider`).all(from, to);
+  /** 按日 × Key 的费用；withWs 时再按账单行的业务空间分组（ws），供推送范围按与成本概览相同的规则过滤 */
+  dailyByKey(from, to, withWs = false) {
+    const ws = withWs ? ", COALESCE(workspace_id, '')" : '';
+    return this.q(`SELECT period AS day, COALESCE(api_key_id, '') AS id, provider${withWs ? ", COALESCE(workspace_id, '') AS ws" : ''}, SUM(pretax) AS cost, SUM(gross) AS gross, SUM(COALESCE(tokens, 0)) AS tokens
+      FROM bill_lines WHERE granularity = 'D' AND period >= ? AND period <= ? GROUP BY period, COALESCE(api_key_id, ''), provider${ws}`).all(from, to);
   }
   dailyByModel(from, to) {
     return this.q(`SELECT model, SUM(pretax) AS cost, SUM(COALESCE(tokens, 0)) AS tokens FROM bill_lines WHERE granularity = 'D' AND period >= ? AND period <= ? GROUP BY model`).all(from, to);

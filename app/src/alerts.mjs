@@ -19,7 +19,7 @@ import crypto from 'node:crypto';
 import { todayIn, hourIn, addDays, addMonths, isCycleFinal, PROVIDER_NAMES } from './sync.mjs';
 import { dayStartSec } from './prom.mjs';
 import { sendMail, parseRecipients, normalizeSmtp, SMTP_SECURITY } from './smtp.mjs';
-import { renderOverviewHtml, renderEmail } from './overview-mail.mjs';
+import { renderOverviewHtml, renderEmail, scopePredicate } from './overview-mail.mjs';
 import { feishuCard, feishuFormatError } from './feishu-card.mjs';
 import { feishuAppLink } from './share.mjs';
 
@@ -142,8 +142,10 @@ function postJson(url, body, headers, allowPrivate) {
 const yuan = n => (n < 0 ? '-' : '') + '¥' + Math.abs(Number(n || 0)).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const pct = n => (Number.isFinite(n) ? n.toFixed(1) + '%' : '-');
 const chg = (a, b) => (b > 0 ? `${a >= b ? '+' : '−'}${Math.abs((a - b) / b * 100).toFixed(1)}%` : a > 0 ? '新增' : '持平');
+/** 按长度截断且不切开表情等代理对：切开后 JSON 中为孤立的 \ud83d，机器人与邮件中显示为乱码 */
+export const cut = (s, n) => String(s ?? '').slice(0, n).replace(/[\uD800-\uDBFF]$/, '');
 /** 描述来自云厂商 Key 备注，去掉可构成 Markdown 链接/格式的字符 */
-export const clean = s => String(s || '').replace(/[[\]()<>*_`#|\\~]/g, '').replace(/\s+/g, ' ').trim().slice(0, 40);
+export const clean = s => cut(String(s || '').replace(/[[\]()<>*_`#|\\~]/g, '').replace(/\s+/g, ' ').trim(), 40);
 const strip = s => String(s).replace(/\*\*/g, '');
 /** 涨跌（飞书卡片着色用）：{ label, text: '+2.0%', dir: up / down / null } */
 const delta = (label, a, b) => ({ label, text: chg(a, b), dir: b > 0 && Math.abs(a - b) >= 0.005 ? (a > b ? 'up' : 'down') : null });
@@ -471,6 +473,15 @@ export class AlertService {
     const label = `${sc.type === 'key' ? 'API Key' : '业务空间'} ${names.slice(0, 3).join('、')}${names.length > 3 ? ` 等 ${names.length} 个` : ''}`;
     return { type: sc.type, ids: sc.ids, keys: keySet, label, sig: crypto.createHash('sha1').update(sc.type + ':' + [...sc.ids].sort().join(',')).digest('hex').slice(0, 10) };
   }
+  /**
+   * 按推送范围过滤按日账单（dailyByKey(from, to, true) 的结果）：与成本概览、邮件、分享链接使用同一规则——
+   * 业务空间范围同时匹配账单行的业务空间与 Key 当前所属的业务空间。此前只按“范围内的 Key”过滤，
+   * 业务空间下不属于任何 Key 的费用被漏掉，同一条报表中的“昨日费用”与“本月合计”口径不一致
+   */
+  scopeRows(rows, scope, keys = this.keyMap()) {
+    const pred = scope && scopePredicate(scope, keys);
+    return pred ? rows.filter(r => pred({ api_key_id: r.id, workspace_id: r.ws || '' })) : rows;
+  }
   /** 限定范围的报表：摘要按范围重新计算（邮件中另附范围内的成本概览） */
   scopedReport(kind, today, scope, globalReady = true) {
     const keys = this.keyMap();
@@ -481,7 +492,7 @@ export class AlertService {
     const budgetKpi = st.budget ? [{ label: '范围内 Key 预算使用率', value: pct(st.cost / st.budget * 100), tone: st.cost >= st.budget ? 'bad' : null, sub: `预算 ${yuan(st.budget)}` }] : [];
     if (kind === 'daily') {
       const day = addDays(today, -1);
-      const rows14 = this.store.dailyByKey(addDays(day, -13), day).filter(r => scope.keys.has(r.id));
+      const rows14 = this.scopeRows(this.store.dailyByKey(addDays(day, -13), day, true), scope, keys);
       const y = rows14.filter(r => r.day === day), pd = rows14.filter(r => r.day === addDays(day, -1));
       const yc = y.reduce((s, r) => s + r.cost, 0), pc = pd.reduce((s, r) => s + r.cost, 0), yt = y.reduce((s, r) => s + (r.tokens || 0), 0), pt = pd.reduce((s, r) => s + (r.tokens || 0), 0);
       const byKey = new Map(); for (const r of y) { const a = byKey.get(r.id) || byKey.set(r.id, { id: r.id, cost: 0, tokens: 0 }).get(r.id); a.cost += r.cost; a.tokens += r.tokens || 0; }
@@ -588,7 +599,7 @@ export class AlertService {
   evaluateAnomaly(today = todayIn(this.tz), scope = null) {
     const a = this.settings().anomaly;
     const day = addDays(today, -1), from = addDays(day, -7);
-    const rows = this.store.dailyByKey(from, day).filter(r => !scope || scope.keys.has(r.id));
+    const rows = scope ? this.scopeRows(this.store.dailyByKey(from, day, true), scope) : this.store.dailyByKey(from, day);
     const items = [];
     const check = (scope, vals, name) => {
       const yv = vals.get(day), y = yv?.g || 0;

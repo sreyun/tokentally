@@ -40,7 +40,7 @@ export class ShareService {
     const id = hashOf(token), now = Date.now();
     const d = Math.min(SHARE_DAYS.max, Math.max(SHARE_DAYS.min, Math.round(Number(days) || SHARE_DAYS.def)));
     const expiresAt = now + d * 864e5;
-    this.store.addShare({ id, title: String(title).slice(0, 120), spec, scope: scope && scope.type !== 'all' ? scope : null, channelId, channelName, event, createdBy, createdAt: now, expiresAt });
+    this.store.addShare({ id, title: String(title).slice(0, 120).replace(/[\uD800-\uDBFF]$/, ''), spec, scope: scope && scope.type !== 'all' ? scope : null, channelId, channelName, event, createdBy, createdAt: now, expiresAt });
     return { token, id, expiresAt, url: `${this.publicUrl}/share#${token}` };
   }
 

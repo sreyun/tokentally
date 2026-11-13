@@ -38,7 +38,8 @@ export function normalizeSmtp(s = {}, cur = {}) {
   if (/[\r\n]/.test(username)) throw new Error('用户名格式不正确');
   const fromAddr = typeof s.fromAddr === 'string' ? s.fromAddr.trim() : cur.fromAddr || '';
   if (fromAddr && !EMAIL_RE.test(fromAddr)) throw new Error('发件人邮箱格式不正确');
-  const fromName = typeof s.fromName === 'string' ? s.fromName.replace(/[\r\n<>"]/g, '').trim().slice(0, 40) : cur.fromName || '';
+  // 截断时不切开表情等代理对：半个字符编码进邮件头后，发件人名称显示为乱码
+  const fromName = typeof s.fromName === 'string' ? s.fromName.replace(/[\r\n<>"]/g, '').trim().slice(0, 40).replace(/[\uD800-\uDBFF]$/, '') : cur.fromName || '';
   return { host, port, security, username, fromAddr, fromName };
 }
 

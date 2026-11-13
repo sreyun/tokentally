@@ -11,7 +11,7 @@ import crypto from 'node:crypto';
 import { config } from './config.mjs';
 import { Store, PROVIDERS } from './db.mjs';
 import { SyncService, todayIn, addDays, addMonths, isCycleFinal, hourIn, PROVIDER_LIST } from './sync.mjs';
-import { AlertService, ALERT_TYPES, EVENT_TYPES, MAX_CHANNELS, validateWebhook, cleanMobiles, isPrivateIp, cleanScope } from './alerts.mjs';
+import { AlertService, ALERT_TYPES, EVENT_TYPES, MAX_CHANNELS, validateWebhook, cleanMobiles, isPrivateIp, cleanScope, cut } from './alerts.mjs';
 import { selfTest, AliyunClient, explainAliyunError, callLog, MS_REGIONS, BSS_ENDPOINTS } from './aliyun.mjs';
 import { tc3SelfTest, TencentClient, explainTencentError, TC_REGIONS, TC_SITES } from './tencent.mjs';
 import { seedDemo, clearDemo, demoStale } from './demo.mjs';
@@ -22,7 +22,7 @@ import { ShareService, filterData, SHARE_DAYS } from './share.mjs';
 import { scopePredicate } from './overview-mail.mjs';
 import { loadMasterKey, hashPassword, verifyPassword, burnPasswordCheck, checkPasswordPolicy, randomPassword, maskId, sha256 } from './crypto.mjs';
 
-const VERSION = '1.9.4';
+const VERSION = '1.9.5';
 
 /* ===================================================================
  * 系统日志：所有运行日志同时输出到控制台并写入数据库（system_log，保留 SYSTEM_LOG_DAYS 天），
@@ -819,7 +819,7 @@ async function putSettings(body, ctx) {
   }
   if (body.branding) {
     const b = body.branding, cur = store.branding();
-    const txt = (v, max, d) => (typeof v === 'string' ? v.replace(/[<>"'`\\\u0000-\u001f]/g, '').trim().slice(0, max) || d : d);
+    const txt = (v, max, d) => (typeof v === 'string' ? cut(v.replace(/[<>"'`\\\u0000-\u001f]/g, '').trim(), max) || d : d);
     const next = { name: txt(b.name, 24, cur.name), subtitle: txt(b.subtitle, 48, ''), accent: ACCENTS.includes(b.accent) ? b.accent : (cur.accent || 'blue') };
     applies.push(() => { store.setSetting('branding', next); diff('branding', cur, next); });
   }
@@ -1205,7 +1205,7 @@ route('PUT', '/api/admin/alerts', async (req, res, ctx) => {
     used.add(id);
     const type = Object.hasOwn(ALERT_TYPES, raw.type) ? raw.type : old?.type;
     if (!type) throw new HttpError(400, '不支持的通知类型');
-    const name = String(raw.name || '').replace(/[<>"'`\\\u0000-\u001f]/g, '').trim().slice(0, 30) || ALERT_TYPES[type].label;
+    const name = cut(String(raw.name || '').replace(/[<>"'`\\\u0000-\u001f]/g, '').trim(), 30) || ALERT_TYPES[type].label;
     const sec = old ? alerts.secretsOf(id) : { webhook: '', secret: '' };
     const webhookIn = typeof raw.webhook === 'string' ? raw.webhook.trim() : '';
     const secretIn = typeof raw.secret === 'string' ? raw.secret.trim() : '';
@@ -1418,7 +1418,7 @@ route('POST', '/api/admin/shares', async (req, res, ctx) => {
     if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(cycle) || cycle > today.slice(0, 7)) throw new HttpError(400, '账期无效');
     spec = { mode: 'month', cycle };
   }
-  const title = String(b.title || '').replace(/[<>"'`\\\u0000-\u001f]/g, '').trim().slice(0, 60) || `成本概览 · ${specLabel(spec)}`;
+  const title = cut(String(b.title || '').replace(/[<>"'`\\\u0000-\u001f]/g, '').trim(), 60) || `成本概览 · ${specLabel(spec)}`;
   const days = int(b.days, SHARE_DAYS.min, SHARE_DAYS.max, alerts.settings().shareDays);
   const l = shares.create({ title, spec, createdBy: ctx.user.username, days });
   store.audit(ctx.user.username, ctx.ip, 'share.create', { title, period: specLabel(spec), days });
