@@ -25,15 +25,15 @@ export function money(n, d = 2) {
 }
 export const moneyFine = n => money(n, Math.abs(n) > 0 && Math.abs(n) < 0.01 ? 6 : 4);
 const compactFmt = new Intl.NumberFormat('zh-CN', { notation: 'compact', maximumFractionDigits: 2 });
-export const compact = n => (n == null ? '-' : compactFmt.format(n));
+export const compact = n => (n == null ? '—' : compactFmt.format(n));
 export const moneyShort = n => (Math.abs(n) >= 1e5 ? (n < 0 ? '-' : '') + curSym() + compact(Math.abs(n)) : money(n));
 export const signedMoney = n => (n > 0 ? '+' : n < 0 ? '−' : '') + money(Math.abs(n));
 const intFmter = new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 0 });
-export const intFmt = n => (n == null ? '-' : intFmter.format(Math.round(n)));
-export const numFmt = (n, d = 3) => (n == null ? '-' : Number(n).toLocaleString('zh-CN', { maximumFractionDigits: d }));
-export const pct = (a, b, d = 1) => (b ? (a / b * 100).toFixed(d) + '%' : '-');
+export const intFmt = n => (n == null ? '—' : intFmter.format(Math.round(n)));
+export const numFmt = (n, d = 3) => (n == null ? '—' : Number(n).toLocaleString('zh-CN', { maximumFractionDigits: d }));
+export const pct = (a, b, d = 1) => (b ? (a / b * 100).toFixed(d) + '%' : '—');
 export function fmtTime(v, withTime = true) {
-  if (v == null || v === '') return '-';
+  if (v == null || v === '') return '—';
   const d = new Date(typeof v === 'string' && !/^\d+$/.test(v) ? v : Number(v));
   if (isNaN(d)) return String(v);
   return `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}` + (withTime ? ` ${p2(d.getHours())}:${p2(d.getMinutes())}` : '');

@@ -8,7 +8,7 @@ import { addDays, addMonths } from './sync.mjs';
 
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const yuan = n => (n < 0 ? '-' : '') + '¥' + Math.abs(Number(n || 0)).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-const pct = (a, b, d = 1) => (b ? (a / b * 100).toFixed(d) + '%' : '-');
+const pct = (a, b, d = 1) => (b ? (a / b * 100).toFixed(d) + '%' : '—');
 const compact = n => { n = Number(n || 0); const a = Math.abs(n); return a >= 1e8 ? (n / 1e8).toFixed(2) + '亿' : a >= 1e4 ? (n / 1e4).toFixed(2) + '万' : Math.round(n).toLocaleString('zh-CN'); };
 const daysBetween = (a, b) => Math.round((Date.parse(b + 'T00:00:00Z') - Date.parse(a + 'T00:00:00Z')) / 864e5) + 1;
 const lastDayOf = c => addDays(addMonths(c, 1) + '-01', -1);
@@ -86,9 +86,9 @@ function rankTable(items, { total: tot, nameHead, extra }) {
 
 /**
  * 生成成本概览 HTML。spec: { mode: 'month', cycle } | { mode: 'range', from, to }
- * ctx: { store, today, brand, link, governance }
+ * ctx: { store, today, link（“在系统中查看”按钮地址）, scope（推送范围，null 为全部）, tz（账单时区） }
  */
-export function renderOverviewHtml(spec, { store, today, link = '', scope = null }) {
+export function renderOverviewHtml(spec, { store, today, link = '', scope = null, tz = 'Asia/Shanghai' }) {
   const keys = new Map(store.listApiKeys().map(k => [k.api_key_id, k]));
   const wsNames = new Map(store.listWorkspaces().map(w => [w.workspace_id, w.name || w.workspace_name]));
   const inScope = scopePredicate(scope, keys);
@@ -157,7 +157,7 @@ export function renderOverviewHtml(spec, { store, today, link = '', scope = null
     <div style="font-size:13px;color:#334155">${esc(label)} · 应付金额</div>
     <div style="font-size:34px;font-weight:800;color:#0f172a;letter-spacing:-0.5px;margin:6px 0 2px">${yuan(cur.cost)}</div>
     <div style="font-size:13px;color:#64748b">${delta(cur.cost, pv.cost)} 较${esc(prevLabel)} ${yuan(pv.cost)}</div>
-    <table role="presentation" cellpadding="0" cellspacing="0" style="margin-top:10px"><tr>${stat('原价', yuan(cur.gross))}${stat('折扣', yuan(discount))}${stat('优惠券抵扣', yuan(coupons))}${stat('综合折扣', cur.gross ? pct(cur.gross - cur.cost, cur.gross) : '-')}${stat('日均', yuan(avgDay))}</tr></table>
+    <table role="presentation" cellpadding="0" cellspacing="0" style="margin-top:10px"><tr>${stat('原价', yuan(cur.gross))}${stat('折扣', yuan(discount))}${stat('优惠券抵扣', yuan(coupons))}${stat('综合折扣', cur.gross ? pct(cur.gross - cur.cost, cur.gross) : '—')}${stat('日均', yuan(avgDay))}</tr></table>
     ${budgetHtml}</div>`;
 
   /* 2. 指标 */
@@ -214,14 +214,30 @@ export function renderOverviewHtml(spec, { store, today, link = '', scope = null
   const vmax = Math.max(...vars.map(v => Math.abs(v.d)), 0) || 1;
   const variance = vars.length ? `<table role="presentation" cellpadding="0" cellspacing="0" style="width:100%;border-collapse:collapse">${vars.map(v => `<tr><td style="${S.td}">${esc(keyName(v.id))}</td><td style="${S.td}">${bar(Math.abs(v.d), vmax, v.d > 0 ? '#e34948' : '#2a78d6', 110)}</td><td style="${S.td};text-align:right;font-weight:600;white-space:nowrap;color:${v.d > 0 ? '#b42318' : '#15803d'}">${v.d > 0 ? '+' : '−'}${yuan(Math.abs(v.d)).replace('-', '')}</td><td style="${S.td};text-align:right;white-space:nowrap">${delta(v.c, v.p)}</td></tr>`).join('')}</table>` : '<div style="color:#64748b;font-size:13px">与上期相比没有变化</div>';
 
-  /* 7. Key 治理（与页面规则一致的核心项） */
+  /*
+   * 7. Key 治理：核心项与“Key 治理”页面的规则一致（此前邮件的规则更粗，数量与页面对不上）——
+   *  - 已删除仍计费：只统计删除日（账单时区）之后的费用，删除前的正常消费不算；账单中有、Key 列表中没有的 Key 同样计入
+   *  - 已禁用仍计费：近 7 天仍有费用（禁用没有时间记录，本期早些时候、禁用前的消费不算）
+   *  - 权限过宽：授权类型为“全部”或可访问全部模型，且 IP 白名单为空或包含 0.0.0.0/0、::/0
+   */
   const spent = new Set(keyItems.map(a => a.key).filter(Boolean));
   const gov = [];
-  const disabledSpent = [...spent].filter(id => keys.get(id)?.disabled || keys.get(id)?.deleted_at);
-  if (disabledSpent.length) gov.push(['高', '#b42318', '已禁用 / 已删除仍产生费用', disabledSpent]);
-  const noDesc = [...spent].filter(id => keys.has(id) && !String(keys.get(id).description || '').trim());
+  const dayOf = ts => { try { return new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(Number(ts))); } catch { return new Date(Number(ts)).toISOString().slice(0, 10); } };
+  const c7 = new Map(); for (const r of store.dailyByKey(addDays(today, -6), today)) if (r.id) c7.set(r.id, (c7.get(r.id) || 0) + (r.cost || 0));
+  const deletedSpent = [...spent].filter(id => {
+    const k = keys.get(id);
+    if (!k) return true; // 不在当前 Key 列表（账单中出现的已删除 Key）
+    if (!k.deleted_at) return false;
+    const del = dayOf(k.deleted_at);
+    return daily.filter(l => l.api_key_id === id && l.period > del).reduce((s, l) => s + (l.pretax || 0), 0) > 0.005;
+  });
+  const disabledSpent = [...spent].filter(id => { const k = keys.get(id); return k && !k.deleted_at && k.disabled && (c7.get(id) || 0) > 0.005; });
+  if (deletedSpent.length || disabledSpent.length) gov.push(['高', '#b42318', '已删除 / 已禁用仍产生费用', [...deletedSpent, ...disabledSpent]]);
+  const noDesc = [...spent].filter(id => !String(keys.get(id)?.description || '').trim());
   if (noDesc.length) gov.push(['中', '#8a5a00', '有消费但无描述', noDesc]);
-  const broad = [...keys.values()].filter(k => (!scopeKeys || scopeKeys.has(k.api_key_id)) && !k.deleted_at && !k.disabled && k.allow_all_models && !(k.access_ips && !/^\s*(\[\s*\]|0\.0\.0\.0\/0)?\s*$/.test(k.access_ips))).map(k => k.api_key_id);
+  const ipsOf = k => { try { const v = JSON.parse(k.access_ips || '[]'); return Array.isArray(v) ? v.map(String) : []; } catch { return String(k.access_ips || '').split(/[\s,]+/).filter(Boolean); } };
+  const ipOpen = k => { const ips = ipsOf(k); return !ips.length || ips.some(ip => ip === '0.0.0.0/0' || ip === '::/0'); };
+  const broad = [...keys.values()].filter(k => (!scopeKeys || scopeKeys.has(k.api_key_id)) && !k.deleted_at && !k.disabled && (k.auth_type === 'All' || !!k.allow_all_models) && ipOpen(k)).map(k => k.api_key_id);
   if (broad.length) gov.push(['中', '#8a5a00', '权限过宽（全部模型 + IP 不限）', broad]);
   const govHtml = gov.length ? `<table role="presentation" cellpadding="0" cellspacing="0" style="width:100%;border-collapse:collapse">${gov.map(([lv, c, name, list]) => `<tr><td style="${S.td};width:36px"><span style="display:inline-block;padding:1px 6px;border-radius:9px;background:${c}1a;color:${c};font-size:11px;font-weight:600">${lv}</span></td><td style="${S.td}">${esc(name)}<div style="font-size:11px;color:#64748b">${esc(list.slice(0, 5).map(keyName).join('、'))}${list.length > 5 ? ` 等 ${list.length} 个` : ''}</div></td><td style="${S.td};text-align:right;font-weight:600">${list.length}</td></tr>`).join('')}</table>` : '<div style="color:#15803d;font-size:13px">未发现治理问题</div>';
 

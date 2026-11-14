@@ -125,7 +125,7 @@ export function render(v) {
       <div><span>启用 / 禁用 / 已删除</span><b>${all.filter(k => k.source === 'api' && k.disabled !== true).length} / ${all.filter(k => k.disabled === true).length} / ${all.filter(k => k.source === 'deleted').length}</b></div>
       <div><span>本期有消费</span><b>${spent.length}</b></div>
       <div><span>本期费用 · ${METRICS[ui.f.metric]}</span><b>${money(total)}</b></div>
-      <div><span>最高占比</span><b title="${esc(top ? top.desc : '')}">${top && top.cost > 0 ? pct(top.cost, total) : '-'}</b></div>
+      <div><span>最高占比</span><b title="${esc(top ? top.desc : '')}">${top && top.cost > 0 ? pct(top.cost, total) : '—'}</b></div>
       ${month ? `<div><span>设预算 / 超（预计超）</span><b>${withBudget.length} / <span class="${over.length ? 'bad-text' : ''}">${over.length}</span></b></div>` : ''}
     </div>
     <section class="panel">
@@ -151,15 +151,15 @@ export function render(v) {
     { key: 'status', label: '状态', fmt: (x, r) => `<span class="state ${r.st}">${esc(x)}</span>${r.deletedAt ? `<span class="sub">${fmtTime(r.deletedAt, false)}</span>` : ''}` },
     { key: 'cost', label: `费用（${METRICS[ui.f.metric]}）`, align: 'r', fmt: x => dataBar(x, max), csv: r => r.cost.toFixed(6) },
     { key: 'chg', label: state.compareLabel, align: 'r', fmt: (x, r) => deltaPill(r.cost, r.prevCost), csv: r => r.chg.toFixed(6) },
-    { key: 'share', label: '占比', align: 'r', fmt: x => (x ? (x * 100).toFixed(1) + '%' : '-'), csv: r => (r.share * 100).toFixed(2) + '%' },
+    { key: 'share', label: '占比', align: 'r', fmt: x => (x ? (x * 100).toFixed(1) + '%' : '—'), csv: r => (r.share * 100).toFixed(2) + '%' },
   );
   if (month) cols.push({ key: 'budgetUse', label: '预算使用', fmt: (x, r) => budgetCell(r), sortVal: r => (r.budget ? r.budgetUsed / r.budget : -1), csv: r => (r.budget ? `${(r.budgetUsed / r.budget * 100).toFixed(1)}%` : '') });
   cols.push(
     { key: 'tIn', label: '输入 Token', align: 'r', fmt: x => intFmt(x) },
     { key: 'tOut', label: '输出 Token', align: 'r', fmt: x => intFmt(x) },
-    { key: 'hit', label: '缓存命中率', align: 'r', fmt: x => (x == null ? '-' : (x * 100).toFixed(1) + '%'), sortVal: r => r.hit ?? -1, csv: r => (r.hit == null ? '' : (r.hit * 100).toFixed(2) + '%') },
-    { key: 'perM', label: '¥/百万Token', title: '费用 ÷ 总 Token × 10⁶', align: 'r', fmt: x => (x == null ? '-' : money(x)), sortVal: r => r.perM ?? -1 },
-    { key: 'dayTok', label: '日均 Token', title: '总 Token ÷ 统计周期内已过的自然日数', align: 'r', fmt: x => (x ? compact(x) : '-'), csv: r => Math.round(r.dayTok) },
+    { key: 'hit', label: '缓存命中率', align: 'r', fmt: x => (x == null ? '—' : (x * 100).toFixed(1) + '%'), sortVal: r => r.hit ?? -1, csv: r => (r.hit == null ? '' : (r.hit * 100).toFixed(2) + '%') },
+    { key: 'perM', label: '¥/百万Token', title: '费用 ÷ 总 Token × 10⁶', align: 'r', fmt: x => (x == null ? '—' : money(x)), sortVal: r => r.perM ?? -1 },
+    { key: 'dayTok', label: '日均 Token', title: '总 Token ÷ 统计周期内已过的自然日数', align: 'r', fmt: x => (x ? compact(x) : '—'), csv: r => Math.round(r.dayTok) },
     ...(hasUsage ? [
       { key: 'requests', label: '请求数', title: REQ_SRC, align: 'r', fmt: x => (x == null ? '<span class="muted">—</span>' : intFmt(x)), sortVal: r => r.requests ?? -1 },
       { key: 'tokPer', label: '单次均 Token', title: '单次平均 Token = 总 Token ÷ 请求数（阿里云取同日同 Key 同模型的账单 Token）', align: 'r', fmt: x => (x == null ? '<span class="muted">—</span>' : intFmt(x)), sortVal: r => r.tokPer ?? -1, csv: r => (r.tokPer == null ? '' : Math.round(r.tokPer)) },

@@ -414,7 +414,8 @@ function renderPeriod() {
   const sel = $('#cycleSel');
   sel.innerHTML = Array.from({ length: 18 }, (_, i) => addMonths(cur, -i)).map(c => {
     const [y, m] = c.split('-');
-    return `<option value="${c}">${y} 年 ${Number(m)} 月${c === cur ? '（本月）' : ''}${synced.has(c) ? '' : ' · 未同步'}</option>`;
+    // 当前选中的账期由右侧徽标显示状态（未同步 / 未出账 / 已出账），选项文字不再重复，窄屏下少占宽度
+    return `<option value="${c}">${y} 年 ${Number(m)} 月${c === cur ? '（本月）' : ''}${synced.has(c) || c === p.cycle ? '' : ' · 未同步'}</option>`;
   }).join('');
   sel.value = p.cycle;
   const s = synced.get(p.cycle);
@@ -649,7 +650,10 @@ function syncSummary() {
 }
 function renderSyncBtn() {
   const x = syncSummary();
-  $('#btnSync').innerHTML = `<span class="dot ${x.dot}"></span><span>${esc(x.text)}</span>`;
+  // 中等宽度（≤1180px）只显示状态圆点，文字放在悬停提示与无障碍名称中
+  $('#btnSync').innerHTML = `<span class="dot ${x.dot}"></span><span class="tb-hide-md">${esc(x.text)}</span>`;
+  $('#btnSync').title = x.text;
+  $('#btnSync').setAttribute('aria-label', '数据同步状态：' + x.text);
   if (popKind === 'sync') renderSyncPop();
 }
 function renderUser() {

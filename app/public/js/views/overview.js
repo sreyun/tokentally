@@ -66,7 +66,7 @@ export function render(v) {
         <div title="折扣与促销优惠（账单“优惠金额”）"><span>折扣</span><b>${moneyShort(cur.gross - cur.after)}</b></div>
         <div title="优惠券 / 代金券 / 储值卡抵扣：按云厂商实际抵扣的日期计入，常集中在某几天"><span>优惠券抵扣</span><b>${moneyShort(cur.after - cur.pretax)}</b></div>
         ${ui.f.metric === 'pretax' ? `<div title="原价 − 折扣，未扣除优惠券"><span>优惠后（未扣券）</span><b>${moneyShort(cur.after)}</b></div>` : `<div title="与费用中心账单一致"><span>应付金额</span><b>${moneyShort(cur.pretax)}</b></div>`}
-        <div title="1 − 应付 ÷ 原价"><span>综合折扣</span><b>${cur.gross ? (disc * 100).toFixed(1) + '%' : '-'}</b></div>
+        <div title="1 − 应付 ÷ 原价"><span>综合折扣</span><b>${cur.gross ? (disc * 100).toFixed(1) + '%' : '—'}</b></div>
         <div><span>日均</span><b>${moneyShort(avgDay)}</b></div>
       </div>
       ${budget ? budgetBar(sum(lines, l => l.pretax), budget, fc ? forecastOf(daily, l => l.pretax).value : null) : ''}
@@ -137,7 +137,7 @@ export function render(v) {
   })), { total: cur.cost, showDelta: true, onClick: it => (it.id === NONE_KEY ? app.setFilter({ key: NONE_KEY }, '#/detail') : app.go(`#/key/${encodeURIComponent(it.id)}`)) });
   rankList($('#rkModels'), sortedAggs(byModel).map((a, i) => ({
     id: a.key, label: a.key, sub: `${a.keys.size} 个 Key`, value: a.cost, prev: pByModel.get(a.key)?.cost ?? 0, color: DIMS.model.color(a.key),
-    tip: i >= 12 ? '' : tipRows(a.key, [['费用', money(a.cost)], ['占比', pct(a.cost, cur.cost)], ['上期', money(pByModel.get(a.key)?.cost || 0)], ['Token', compact(totalTokens(a))], ['每百万 Token', totalTokens(a) ? money(a.cost / totalTokens(a) * 1e6) : '-']]),
+    tip: i >= 12 ? '' : tipRows(a.key, [['费用', money(a.cost)], ['占比', pct(a.cost, cur.cost)], ['上期', money(pByModel.get(a.key)?.cost || 0)], ['Token', compact(totalTokens(a))], ['每百万 Token', totalTokens(a) ? money(a.cost / totalTokens(a) * 1e6) : '—']]),
   })), { total: cur.cost, showDelta: true, onClick: it => app.openModel(it.id) });
 
   // 构成
@@ -208,7 +208,7 @@ function sparkTip(title, days, vals, fmt) {
   return tipRows(title, [['最高', `${fmt(hi[1])}（${hi[0].slice(5)}）`], ['最低', `${fmt(lo[1])}（${lo[0].slice(5)}）`], ['最近', `${fmt(last[1])}（${last[0].slice(5)}）`]]);
 }
 function peakText(days, dayCost) {
-  if (!days.length) return '-';
+  if (!days.length) return '—';
   const d = days.reduce((a, c) => ((dayCost.get(c) || 0) > (dayCost.get(a) || 0) ? c : a), days[0]);
   return `${d.slice(5)} ${moneyShort(dayCost.get(d) || 0)}`;
 }

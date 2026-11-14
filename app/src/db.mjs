@@ -244,7 +244,9 @@ export class Store {
     if (status === 'all') status = '';
     const now = Date.now(), where = status === 'active' ? 'WHERE revoked_at IS NULL AND expires_at > ?' : status === 'expired' ? 'WHERE revoked_at IS NULL AND expires_at <= ?' : status === 'revoked' ? 'WHERE revoked_at IS NOT NULL AND ? > 0' : 'WHERE ? > 0';
     return this.q(`SELECT id, title, spec, scope, channel_id, channel_name, event, created_by, created_at, expires_at, revoked_at, revoked_by, views, last_view_at, last_view_ip
-      FROM share_links ${where} ORDER BY created_at DESC LIMIT ?`).all(now, Math.min(1000, Math.max(1, limit))).map(r => ({ ...r, spec: JSON.parse(r.spec), scope: r.scope ? JSON.parse(r.scope) : null }));
+      FROM share_links ${where} ORDER BY created_at DESC LIMIT ?`).all(now, Math.min(1000, Math.max(1, limit)))
+      // 与 getShare 一致：个别记录无法解析（如数据库被手工修改）时跳过该条，不能让整个链接列表报错
+      .flatMap(r => { try { return [{ ...r, spec: JSON.parse(r.spec), scope: r.scope ? JSON.parse(r.scope) : null }]; } catch { return []; } });
   }
   shareStats() {
     const now = Date.now();

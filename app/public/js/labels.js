@@ -44,7 +44,7 @@ const KEY_LABEL = { username: '用户', role: '角色', name: '名称', channel:
 
 const fmtSize = n => (n >= 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(n / 1024)) + ' KB');
 const list = (a, f = x => x) => (Array.isArray(a) ? a.map(f).filter(Boolean).join('、') : '');
-const ipSrc = o => (!o ? '-' : o.ipSource === 'xff' ? `X-Forwarded-For（可信代理 ${o.hops || 1} 层）` : { env: '跟随环境变量 TRUST_PROXY', direct: '直连（使用连接地址）', realip: 'X-Real-IP' }[o.ipSource] || o.ipSource);
+const ipSrc = o => (!o ? '—' : o.ipSource === 'xff' ? `X-Forwarded-For（可信代理 ${o.hops || 1} 层）` : { env: '跟随环境变量 TRUST_PROXY', direct: '直连（使用连接地址）', realip: 'X-Real-IP' }[o.ipSource] || o.ipSource);
 const keyName = id => { try { const k = state.apiKeys.get(id); return k?.description ? `${k.description}（${id}）` : keyShort(id); } catch { return id; } };
 /** 告警渠道密钥变更项：“渠道名.webhook / .secret / .secret.clear / .secret.reset / .removed” */
 function chField(f) {
@@ -52,7 +52,7 @@ function chField(f) {
   if (!m) return f;
   return { webhook: `${m[1]} 更换 Webhook`, secret: `${m[1]} 更换加签密钥`, 'secret.clear': `${m[1]} 清除加签密钥`, 'secret.reset': `${m[1]} 更换机器人，已清除旧密钥`, removed: `删除渠道 ${m[1]}` }[m[2]];
 }
-const val = v => (v == null || v === '' ? '-' : typeof v === 'boolean' ? (v ? '是' : '否') : Array.isArray(v) ? v.map(val).join('、') : typeof v === 'object' ? JSON.stringify(v) : String(v));
+const val = v => (v == null || v === '' ? '—' : typeof v === 'boolean' ? (v ? '是' : '否') : Array.isArray(v) ? v.map(val).join('、') : typeof v === 'object' ? JSON.stringify(v) : String(v));
 
 /** 各操作的详情：[[标签, 文本], ...]；标签为空表示整句说明 */
 const DESC = {
@@ -64,7 +64,7 @@ const DESC = {
   'share.revoke': d => [['链接', d.id === 'all' ? '全部有效链接' : d.id], ['撤销数量', d.count]],
   'settings.update': d => [['修改项', list(d.fields, f => SETTING[f] || f)]],
   'user.create': d => [['用户', d.username], ['角色', ROLE[d.role] || d.role]],
-  'user.update': d => [['用户', d.username], ['修改', list(d.fields, f => (f === 'pw_changed_at' ? '' : USER_FIELD[f] || f)) || '-']],
+  'user.update': d => [['用户', d.username], ['修改', list(d.fields, f => (f === 'pw_changed_at' ? '' : USER_FIELD[f] || f)) || '—']],
   'user.delete': d => [['用户', d.username]],
   'user.bootstrap': d => [['用户', d.username]],
   'user.unlock.cli': d => [['用户', d.username]],
@@ -84,10 +84,10 @@ const DESC = {
     d.reportHour != null && ['报表发送', `每天 ${p2(d.reportHour)}:00`],
     d.fields?.length && ['密钥变更', list(d.fields, chField)],
   ],
-  'alert.test': d => [['渠道', `${d.channel || '-'}（${CH_TYPE[d.type] || d.type}）`]],
+  'alert.test': d => [['渠道', `${d.channel || '—'}（${CH_TYPE[d.type] || d.type}）`], d.warning && ['提示', d.warning]],
   'alert.test.fail': d => [['渠道类型', CH_TYPE[d.type] || d.type], ['错误', d.error]],
   'alert.sent': d => [['事件', EVENT[d.event] || d.event], ['渠道', d.channel], d.items != null && ['条目', `${d.items} 条`], d.trigger && ['触发', TRIGGER[d.trigger] || d.trigger]],
-  'alert.report.send': d => [['报表', EVENT[d.kind] || d.kind], ['渠道', d.channel], d.scope && ['推送范围', d.scope]],
+  'alert.report.send': d => [['报表', EVENT[d.kind] || d.kind], ['渠道', d.channel], d.scope && ['推送范围', d.scope], d.warning && ['提示', d.warning]],
   'smtp.update': d => [['修改项', list(d.fields, f => SMTP_FIELD[f] || f)]],
   'smtp.test': d => [['收件人', d.to]],
   'smtp.test.fail': d => [['收件人', d.to], ['错误', d.error]],

@@ -100,8 +100,10 @@ flowchart LR
 - [x] Cost centers, budgets, alerts, reports, demo mode, backups, metrics
 - [x] Alibaba Cloud call counts via CloudMonitor Prometheus
 - [x] Business analysis, linked filters and multi-level drill-down
+- [x] Email reports with the full cost overview, per-workspace / per-key channel scope, read-only share links
 - [ ] More platforms (Volcengine Ark, Baidu Qianfan, …)
-- [ ] Excel reports & scheduled email, SSO / LDAP
+- [ ] Cost-center (department) budgets and alerts
+- [ ] Excel reports, SSO / LDAP
 
 ## Contributing
 

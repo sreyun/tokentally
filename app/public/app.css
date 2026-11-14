@@ -134,16 +134,20 @@ a { color: var(--accent-text); }
 .app.collapsed .nav-item[aria-current="page"]::before { left: -12px; }
 
 .main-col { min-width: 0; display: flex; flex-direction: column; }
-.topbar { position: sticky; top: 0; z-index: 30; height: var(--topbar-h); background: color-mix(in srgb, var(--page) 80%, transparent); backdrop-filter: saturate(1.4) blur(12px); -webkit-backdrop-filter: saturate(1.4) blur(12px); border-bottom: 1px solid transparent; display: flex; align-items: center; gap: 10px; padding: 0 20px 0 12px; transition: border-color .2s, background-color .2s, box-shadow .2s; }
+.topbar { position: sticky; top: 0; z-index: 30; min-height: var(--topbar-h); background: color-mix(in srgb, var(--page) 80%, transparent); backdrop-filter: saturate(1.4) blur(12px); -webkit-backdrop-filter: saturate(1.4) blur(12px); border-bottom: 1px solid transparent; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 6px 20px 6px 12px; transition: border-color .2s, background-color .2s, box-shadow .2s; }
 .topbar.scrolled { border-bottom-color: var(--border); background: color-mix(in srgb, var(--surface) 86%, transparent); box-shadow: 0 8px 24px -20px rgba(15,23,42,.5); }
 .loadbar { position: absolute; left: 0; right: 0; bottom: -1px; height: 2px; overflow: hidden; pointer-events: none; }
 .loadbar::after { content: ""; position: absolute; top: 0; bottom: 0; width: 30%; background: var(--accent); transform: translateX(-100%); opacity: 0; }
 .loading .loadbar::after { opacity: 1; animation: loadbar 1s ease-in-out infinite; }
 @keyframes loadbar { from { transform: translateX(-100%); } to { transform: translateX(340%); } }
-.page-title { display: flex; flex-direction: column; min-width: 0; flex: 1 1 auto; line-height: 1.25; }
+/* 标题至少显示 4 个字；顶栏放不下时周期控件 / 右侧按钮整体换行（此前固定一行，图标按钮被压缩、标题只剩“成…”，日期框会盖住右侧按钮） */
+.page-title { display: flex; flex-direction: column; min-width: 72px; flex: 1 1 72px; line-height: 1.25; }
+#btnCollapse, #periodBox { flex: none; }
 .page-title h1 { margin: 0; font-size: 16.5px; font-weight: 700; letter-spacing: -.01em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .page-title span { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .tb-group { display: flex; align-items: center; gap: 6px; flex: none; }
+.tb-right { display: flex; align-items: center; gap: 10px; flex: none; margin-left: auto; }
+.tb-right > * { flex: none; }
 .tb-sep { width: 1px; height: 24px; background: var(--border-strong); margin: 0 4px; }
 .content { padding: 16px 20px 40px; width: 100%; max-width: 1760px; margin: 0 auto; }
 .content.dim { opacity: .55; transition: opacity .15s; pointer-events: none; }
@@ -193,7 +197,7 @@ select.inp.sm { padding-right: 24px; background-position: right 6px center; back
 .field { display: flex; flex-direction: column; gap: 5px; font-size: 12.5px; color: var(--ink-2); min-width: 0; }
 .field > span { font-weight: 500; white-space: nowrap; }
 .field .inp { width: 100%; }
-.form-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 14px 16px; }
+.form-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(240px, 100%), 1fr)); gap: 14px 16px; }
 .form-grid .full { grid-column: 1 / -1; }
 /* 窄栏中的固定两列表单（告警规则）：标签较长时允许折行（不折行会溢出到相邻一栏，1024~1440 宽与手机上标签重叠），同一行的输入框底部对齐 */
 .form-grid.wrap-labels { align-items: end; }
@@ -297,7 +301,9 @@ select.inp.sm { padding-right: 24px; background-position: right 6px center; back
 .panel-h { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; min-height: 28px; flex-wrap: wrap; }
 .panel-h h3 { margin: 0; font-size: 14.5px; font-weight: 650; letter-spacing: -.005em; line-height: 1.35; display: flex; align-items: center; gap: 6px; white-space: nowrap; }
 .panel-h .sub { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 1 1 0; }
-.panel-h .actions { margin-left: auto; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.panel-h .actions { margin-left: auto; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; max-width: 100%; }
+/* 很窄的屏幕（320px）上分段按钮组放不下时在组内换行，不撑出页面 */
+.panel-h .actions .seg { flex-wrap: wrap; max-width: 100%; }
 .help { display: inline-grid; place-items: center; width: 16px; height: 16px; border-radius: 50%; color: var(--faint); cursor: help; }
 .help .ico { width: 14px; height: 14px; }
 .panel-body { flex: 1; min-height: 0; }
@@ -416,7 +422,7 @@ select.inp.sm { padding-right: 24px; background-position: right 6px center; back
 
 /* 洞察 */
 /* 宽屏下“关键发现”不参与行高计算，与左侧趋势卡片等高、内部滚动 */
-.ins-panel .insights { grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); overflow: visible; }
+.ins-panel .insights { grid-template-columns: repeat(auto-fill, minmax(min(340px, 100%), 1fr)); overflow: visible; }
 .insights { list-style: none; margin: 0; padding: 0 4px 0 0; display: grid; gap: 10px; overflow-y: auto; min-height: 0; flex: 1 1 auto; align-content: start; scrollbar-width: thin; }
 .ins { display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 10px; padding: 10px 12px; border-radius: var(--r); background: var(--surface-2); border: 1px solid var(--border); }
 .ins-ico { width: 28px; height: 28px; border-radius: 8px; display: grid; place-items: center; background: var(--accent-wash-2); color: var(--accent-text); }
@@ -552,7 +558,7 @@ table.dt { border-collapse: separate; border-spacing: 0; width: 100%; font-size:
 @keyframes sk { to { background-position: -200% 0; } }
 
 /* KV 信息 */
-.kv { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px 20px; font-size: 13px; }
+.kv { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(200px, 100%), 1fr)); gap: 12px 20px; font-size: 13px; }
 .kv > div { min-width: 0; }
 .kv span { display: block; color: var(--muted); font-size: 11.5px; margin-bottom: 2px; }
 .kv b { font-weight: 500; overflow-wrap: anywhere; }
@@ -602,9 +608,14 @@ details.note div { margin-top: 8px; line-height: 1.8; max-width: 1100px; }
 .app.screen .content { max-width: none; }
 
 /* ---------------- 响应式 ---------------- */
-@media (max-width: 1180px) {
+/* 1280px 以下顶栏只显示同步状态圆点与头像（文字在悬停提示中），页面副标题隐藏，顶栏保持一行 */
+@media (max-width: 1280px) {
   .page-title span { display: none; }
   .tb-hide-md { display: none !important; }
+  .sync-btn { padding: 0 10px; }
+}
+@media (max-width: 1180px) {
+  #cycleSel { max-width: 210px; }
 }
 @media (max-width: 900px) {
   .app, .app.collapsed { grid-template-columns: minmax(0, 1fr); }
@@ -696,7 +707,7 @@ details.note div { margin-top: 8px; line-height: 1.8; max-width: 1100px; }
 .sync-card-h { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
 .sync-card-h .prov { margin-left: 0; }
 .sync-card-h b { font-weight: 600; }
-.sync-card .kv { grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); }
+.sync-card .kv { grid-template-columns: repeat(auto-fill, minmax(min(220px, 100%), 1fr)); }
 
 /* 对话框 */
 dialog.modal { width: min(520px, calc(100vw - 32px)); }
@@ -722,7 +733,7 @@ dialog.modal .dlg-b { max-height: calc(100vh - 140px); }
 .ch-evs { display: flex; flex-wrap: wrap; gap: 6px; }
 .ch-evs .tag { margin-left: 0; }
 .ch-evs .tag.info { background: var(--accent-wash-2); color: var(--accent-text); }
-.scope-list { margin-top: 8px; max-height: 220px; overflow: auto; display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 4px 14px; padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--r); background: var(--surface-2); scrollbar-width: thin; }
+.scope-list { margin-top: 8px; max-height: 220px; overflow: auto; display: grid; grid-template-columns: repeat(auto-fill, minmax(min(260px, 100%), 1fr)); gap: 4px 14px; padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--r); background: var(--surface-2); scrollbar-width: thin; }
 .scope-list .chk { white-space: normal; align-items: flex-start; line-height: 1.45; }
 .scope-list .chk input { margin-top: 2px; flex: none; }
 .ch-next { display: flex; align-items: flex-start; gap: 6px; font-size: 12px; color: var(--ink-3); line-height: 1.5; }

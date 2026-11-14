@@ -93,12 +93,12 @@ export function validateWebhook(type, raw, { allowPrivate = false } = {}) {
   u.hash = '';
   return u.href;
 }
-/** 展示用：只显示协议、主机与路径前缀，隐藏 access_token / key 等凭据 */
 /** 收件人脱敏：ab***@example.com 等 N 个 */
 export function maskEmails(raw) {
   const list = String(raw || '').split(/,\s*/).filter(Boolean);
   return list.slice(0, 3).map(e => e.replace(/^(.{1,2})[^@]*(@.*)$/, '$1***$2')).join(', ') + (list.length > 3 ? ` 等 ${list.length} 个` : '');
 }
+/** 展示用：只显示协议、主机与路径前缀，隐藏 access_token / key 等凭据 */
 export function maskWebhook(href) {
   try { const u = new URL(href); return `${u.protocol}//${u.host}${u.pathname.length > 18 ? u.pathname.slice(0, 18) + '…' : u.pathname}${u.search ? '?…' : ''}`; } catch { return ''; }
 }
@@ -140,13 +140,22 @@ function postJson(url, body, headers, allowPrivate) {
 
 /* ---------------- 消息格式 ---------------- */
 const yuan = n => (n < 0 ? '-' : '') + '¥' + Math.abs(Number(n || 0)).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-const pct = n => (Number.isFinite(n) ? n.toFixed(1) + '%' : '-');
+const pct = n => (Number.isFinite(n) ? n.toFixed(1) + '%' : '—');
 const chg = (a, b) => (b > 0 ? `${a >= b ? '+' : '−'}${Math.abs((a - b) / b * 100).toFixed(1)}%` : a > 0 ? '新增' : '持平');
 /** 按长度截断且不切开表情等代理对：切开后 JSON 中为孤立的 \ud83d，机器人与邮件中显示为乱码 */
 export const cut = (s, n) => String(s ?? '').slice(0, n).replace(/[\uD800-\uDBFF]$/, '');
-/** 描述来自云厂商 Key 备注，去掉可构成 Markdown 链接/格式的字符 */
-export const clean = s => cut(String(s || '').replace(/[[\]()<>*_`#|\\~]/g, '').replace(/\s+/g, ' ').trim(), 40);
+/** 来自云厂商的文本（Key 备注、错误信息等）：去掉可构成 Markdown 链接/格式的字符，合并空白，按长度截断 */
+export const cleanText = (s, n) => cut(String(s || '').replace(/[[\]()<>*_`#|\\~]/g, '').replace(/\s+/g, ' ').trim(), n);
+/** 名称（Key 描述、模型、业务空间、成本中心等）：最多 40 个字符 */
+export const clean = s => cleanText(s, 40);
 const strip = s => String(s).replace(/\*\*/g, '');
+/**
+ * 邮件发送结果中被服务器拒绝的收件人（sendMail 返回 { accepted, rejected }，如“typo@example.com（550）”）→ 提示文字；没有时为 null。
+ * 地址与渠道卡片一致做脱敏（ty***@example.com）：收件人列表只写不回显，提示中不能露出完整地址
+ */
+export const rejectedNote = res => (Array.isArray(res?.rejected) && res.rejected.length
+  ? `部分收件人被邮件服务器拒绝：${res.rejected.slice(0, 5).map(r => String(r).replace(/^(.{1,2})[^@]*(@.*)$/, '$1***$2')).join('、')}${res.rejected.length > 5 ? ` 等 ${res.rejected.length} 个` : ''}`
+  : null);
 /** 涨跌（飞书卡片着色用）：{ label, text: '+2.0%', dir: up / down / null } */
 const delta = (label, a, b) => ({ label, text: chg(a, b), dir: b > 0 && Math.abs(a - b) >= 0.005 ? (a > b ? 'up' : 'down') : null });
 /** 排行：[{ name, value, share }]；与文本消息中的“1. 名称 ¥金额（占比）”一一对应 */
@@ -162,7 +171,6 @@ const head = (kind, name, basis) => ({
 const rowLines = (rows, kind) => rows.map((r, i) => `${i + 1}. ${r.name} ${r.value}${kind === 'token' ? ' Token' : ''}${r.share ? `（占 ${r.share}）` : ''}`);
 /** 结构化分节 → 文本行（钉钉 / 企业微信 / 邮件 / 通用 Webhook / 通知记录使用） */
 const sectionLines = sections => sections.flatMap(s => (s.rows?.length ? ['', `#### ${s.title}${s.note ? `（${s.note}）` : ''}`, ...rowLines(s.rows, s.kind)] : s.items?.length ? ['', `#### ${s.title}`, ...s.items.map(i => i.text)] : []));
-/** Token 数量：≥1 亿显示“x.xx 亿”，≥1 万显示“x.x 万”，否则显示整数 */
 /**
  * Token 单位：默认用“亿”（最大值不少于 0.1 亿时整组统一用亿，如 0.29 亿，避免同一组里亿与万混用、趋势图标签过长），
  * 量很小的账号依次用“万”与“个”
@@ -174,7 +182,6 @@ const tok = n => tokIn(n, tokUnit(Number(n) || 0));
 /** 单位成本：每百万 Token 的应付金额 */
 const perM = (cost, tokens) => (tokens > 0 ? `¥${(cost / tokens * 1e6).toFixed(2)} / 百万 Token` : '—');
 const perMv = (cost, tokens) => (tokens > 0 ? `¥${(cost / tokens * 1e6).toFixed(2)}` : '—');
-/** Token 排行：[{ name, value: 'x 万', share }] */
 /** Token 排行：[{ name, value: 'x.xx 亿', share }]，同一区块统一单位 */
 const tokRows = (rows, n, nameOf, total) => {
   const list = rows.filter(r => (r.tokens || 0) > 0).sort((x, y) => y.tokens - x.tokens).slice(0, n), u = tokUnit(list[0]?.tokens || 0);
@@ -448,7 +455,7 @@ export class AlertService {
       ...s,
       channels: s.channels.map(c => {
         const sec = this.secretsOf(c.id), cs = st.channels[c.id] || {};
-        return { ...c, scopeLabel: this.scopeOf(c)?.label || '', webhookSet: !!sec.webhook, webhookMasked: c.type === 'email' ? maskEmails(sec.webhook) : maskWebhook(sec.webhook), secretSet: !!sec.secret, undecryptable: !!sec.undecryptable, lastSentAt: cs.lastSentAt || null, lastError: cs.lastError || null, lastErrorAt: cs.lastErrorAt || null, nextRuns: c.enabled ? this.nextRuns(c, st, today, hour, s.reportHour) : {} };
+        return { ...c, scopeLabel: this.scopeOf(c)?.label || '', webhookSet: !!sec.webhook, webhookMasked: c.type === 'email' ? maskEmails(sec.webhook) : maskWebhook(sec.webhook), secretSet: !!sec.secret, undecryptable: !!sec.undecryptable, lastSentAt: cs.lastSentAt || null, lastError: cs.lastError || null, lastErrorAt: cs.lastErrorAt || null, lastWarning: cs.lastWarning || null, lastWarningAt: cs.lastWarningAt || null, nextRuns: c.enabled ? this.nextRuns(c, st, today, hour, s.reportHour) : {} };
       }),
       enabled: s.channels.some(c => c.enabled),
       shareAvailable: !!this.shares?.available,
@@ -485,7 +492,7 @@ export class AlertService {
   /** 限定范围的报表：摘要按范围重新计算（邮件中另附范围内的成本概览） */
   scopedReport(kind, today, scope, globalReady = true) {
     const keys = this.keyMap();
-    const o = renderOverviewHtml(this.overviewSpec(kind, today), { store: this.store, today, scope });
+    const o = renderOverviewHtml(this.overviewSpec(kind, today), { store: this.store, today, scope, tz: this.tz });
     const st = o.stats, tag = `（${scope.label}）`;
     const rowsOf = list => list.filter(x => x.cost > 0.005).map(x => ({ name: clean(x.name), value: yuan(x.cost), share: st.cost ? pct(x.cost / st.cost * 100) : '' }));
     const scopeNote = `推送范围：${scope.label}`;
@@ -643,7 +650,8 @@ export class AlertService {
         const name = `${PROVIDER_NAMES[p]}${kind === 'meta' ? ' API Key 同步' : '账单同步'}`;
         if (runs[0].status === 'error') {
           const { n, anchor } = this.store.errorStreak(kind, p);
-          if (n >= 3) items.push({ code: `sync:${p}:${kind}:${anchor}`, level: 'bad', tag: '故障', text: `**${name}连续失败 ${n} 次**：${clean(runs[0].error).slice(0, 80) || '未知错误'}` });
+          // 错误信息最多 120 字（此前经 clean() 截断为 40 字，阿里云 / 腾讯云的错误码与说明常被截掉一半，无法据此排查）
+          if (n >= 3) items.push({ code: `sync:${p}:${kind}:${anchor}`, level: 'bad', tag: '故障', text: `**${name}连续失败 ${n} 次**：${cleanText(runs[0].error, 120) || '未知错误'}` });
         } else {
           const { n, anchor } = this.store.errorStreak(kind, p, runs[0].id);
           if (n >= 3) items.push({ code: `syncok:${p}:${kind}:${anchor}`, level: 'good', tag: '已恢复', text: `**${name}已恢复**：此前连续失败 ${n} 次` });
@@ -790,10 +798,16 @@ export class AlertService {
     };
     return { title: `费用月报 · ${cycle}`, level: 'info', lines, doc, empty: c < 0.005 && o < 0.005, period: cycle, ready: this.monthlyReady(today), path: `#/overview?cycle=${cycle}` };
   }
-  /** 月报在上月出账后发送：本地账期已定稿即发送；账单同步持续失败时最晚 10 日发送（避免永远不发） */
+  /**
+   * 月报在上月出账后发送：每个已配置云厂商的上月账期都已定稿即发送；账单同步持续失败时最晚 10 日发送（避免永远不发）。
+   * 此前按已有的账期记录取最小值，某个已配置的云厂商还没有该账期的记录（如新接入、首次回溯尚未完成）时被忽略，月报会缺少它的费用
+   */
   monthlyReady(today = todayIn(this.tz)) {
     const cycle = addMonths(today.slice(0, 7), -1);
-    return isCycleFinal(cycle, today) && (!!this.store.getCycle(cycle)?.final || today >= addDays(addMonths(cycle, 1) + '-01', 9));
+    if (!isCycleFinal(cycle, today)) return false;
+    const provs = this.providers();
+    const final = provs.length ? provs.every(p => !!this.store.getCycle(cycle, p)?.final) : !!this.store.getCycle(cycle)?.final;
+    return final || today >= addDays(addMonths(cycle, 1) + '-01', 9);
   }
   /** 报表周期结束后，所有已配置云厂商是否都完成过一次（部分）成功的账单同步：用于判断“空报表”是否真的为空 */
   periodSynced(kind, today = todayIn(this.tz)) {
@@ -883,8 +897,9 @@ export class AlertService {
           // 同一渠道的相邻消息间隔 0.4 秒：预算 / 异常 / 日报 / 周报 / 月报可能同时到点，连续发送容易触发机器人限流（飞书每秒 5 条）
           if (!first) await pause(this.sendGapMs ?? 400);
           first = false;
+          let res = null;
           try {
-            await this.send(ch, sec, { ...m, today });
+            res = await this.send(ch, sec, { ...m, today });
           } catch (e) {
             const msg = String(e.message || e).slice(0, 300);
             st.channels[ch.id] = { ...(st.channels[ch.id] || {}), lastError: msg, lastErrorAt: Date.now() };
@@ -897,7 +912,11 @@ export class AlertService {
           for (const c of m.codes || []) sentMap(c)[c] = now;
           if (m.report) st.reports[ch.id][m.report.kind] = m.report.period;
           if (m.changeTo) st.lastChangeId[ch.id] = m.changeTo;
-          st.channels[ch.id] = { ...(st.channels[ch.id] || {}), lastSentAt: now, lastError: null, lastErrorAt: null };
+          // 邮件：部分收件人被邮件服务器拒绝（如地址拼写错误、邮箱不存在）时，其余收件人照常收到，渠道卡片提示被拒绝的地址。
+          // 此前被拒绝的地址被静默忽略，管理员无从得知某人一直收不到报表
+          const warn = rejectedNote(res);
+          if (warn) this.log(`邮件发送（${ch.name}）：${warn}`);
+          st.channels[ch.id] = { ...(st.channels[ch.id] || {}), lastSentAt: now, lastError: null, lastErrorAt: null, lastWarning: warn, lastWarningAt: warn ? now : null };
           st.history = [{ at: now, ch: ch.id, chName: ch.name, event: m.event, level: m.level, title: m.title, items: m.lines.filter(l => l && !l.startsWith('#')).slice(0, 8).map(strip) }, ...(st.history || [])].slice(0, 30);
           // 每条送达后立即记录：此前整批发完才保存，进程在批量推送中途退出（升级重启）时，已送达的消息重启后会再推送一次
           this.saveState(st);
@@ -960,7 +979,7 @@ export class AlertService {
     const ck = `${JSON.stringify(spec)}|${scope?.sig || 'all'}|${link}|${today}`, now = Date.now();
     this._ov = (this._ov || new Map());
     for (const [k, v] of this._ov) if (now - v.t > 60_000) this._ov.delete(k);
-    try { overview = this._ov.get(ck)?.o || renderOverviewHtml(spec, { store: this.store, today, link, scope }); this._ov.set(ck, { t: now, o: overview }); } catch (e) { this.log?.(`生成成本概览邮件内容失败：${e.message}`); }
+    try { overview = this._ov.get(ck)?.o || renderOverviewHtml(spec, { store: this.store, today, link, scope, tz: this.tz }); this._ov.set(ck, { t: now, o: overview }); } catch (e) { this.log?.(`生成成本概览邮件内容失败：${e.message}`); }
     const { html, text } = renderEmail({ brand, title, level, lines, overview, footer, share });
     return sendMail(this.smtpConfig(), { to: parseRecipients(recipients), subject: title, html, text }, { allowPrivate: this.allowPrivate, isPrivateIp });
   }

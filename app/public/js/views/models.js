@@ -75,10 +75,10 @@ export function render(v) {
       <div><span>使用模型</span><b>${rows.filter(r => r.cost > 0).length}</b></div>
       <div><span>本期费用 · ${METRICS[ui.f.metric]}</span><b>${money(all.cost)}</b></div>
       <div><span>Token 总量</span><b title="${intFmt(tok)}">${compact(tok)}</b></div>
-      <div><span>平均 ¥/百万Token</span><b>${tok ? money(all.cost / tok * 1e6) : '-'}</b></div>
-      <div><span>缓存命中率</span><b>${all.tIn ? pct(all.tCache, all.tIn) : '-'}</b></div>
-      <div><span>输出 / 输入</span><b>${all.tIn ? (all.tOut / all.tIn * 100).toFixed(1) + '%' : '-'}</b></div>
-      <div><span>单价最高（>10 万 Token）</span><b title="${esc(priciest?.model || '')}">${priciest ? esc(priciest.model) : '-'}</b></div>
+      <div><span>平均 ¥/百万Token</span><b>${tok ? money(all.cost / tok * 1e6) : '—'}</b></div>
+      <div><span>缓存命中率</span><b>${all.tIn ? pct(all.tCache, all.tIn) : '—'}</b></div>
+      <div><span>输出 / 输入</span><b>${all.tIn ? (all.tOut / all.tIn * 100).toFixed(1) + '%' : '—'}</b></div>
+      <div><span>单价最高（>10 万 Token）</span><b title="${esc(priciest?.model || '')}">${priciest ? esc(priciest.model) : '—'}</b></div>
       ${reqN ? `<div><span>请求次数</span><b title="${esc(REQ_SRC)}">${compact(reqN)}</b></div><div><span>单次平均 Token</span><b>${intFmt(reqTok / reqN)}</b></div>` : ''}
     </div>
     <section class="panel"><div class="panel-h"><h3>模型明细</h3><span class="sub">点击行查看模型详情（Token 与调用统计、使用该模型的 Key、每日费用、计费项）</span>
@@ -101,12 +101,12 @@ export function render(v) {
       { key: 'chg', label: state.compareLabel, align: 'r', fmt: (x, r) => deltaPill(r.cost, r.prev), sortVal: r => r.cost - r.prev, csv: r => (r.cost - r.prev).toFixed(6) },
       { key: 'share', label: '占比', align: 'r', fmt: x => (x * 100).toFixed(1) + '%' },
       { key: 'tIn', label: '输入 Token', align: 'r', fmt: x => intFmt(x) },
-      { key: 'hit', label: '缓存命中率', align: 'r', fmt: x => (x == null ? '-' : (x * 100).toFixed(1) + '%'), sortVal: r => r.hit ?? -1 },
+      { key: 'hit', label: '缓存命中率', align: 'r', fmt: x => (x == null ? '—' : (x * 100).toFixed(1) + '%'), sortVal: r => r.hit ?? -1 },
       { key: 'tOut', label: '输出 Token', align: 'r', fmt: x => intFmt(x) },
-      { key: 'ioRatio', label: '输出/输入', align: 'r', fmt: x => (x == null ? '-' : (x * 100).toFixed(1) + '%'), sortVal: r => r.ioRatio ?? -1 },
-      { key: 'tEmb', label: '向量 Token', align: 'r', fmt: x => (x ? intFmt(x) : '-') },
-      { key: 'perM', label: '¥/百万Token', align: 'r', fmt: x => (x == null ? '-' : money(x)), sortVal: r => r.perM ?? -1 },
-      { key: 'dayTok', label: '日均 Token', title: '总 Token ÷ 统计周期内已过的自然日数', align: 'r', fmt: x => (x ? compact(x) : '-'), csv: r => Math.round(r.dayTok) },
+      { key: 'ioRatio', label: '输出/输入', align: 'r', fmt: x => (x == null ? '—' : (x * 100).toFixed(1) + '%'), sortVal: r => r.ioRatio ?? -1 },
+      { key: 'tEmb', label: '向量 Token', align: 'r', fmt: x => (x ? intFmt(x) : '—') },
+      { key: 'perM', label: '¥/百万Token', align: 'r', fmt: x => (x == null ? '—' : money(x)), sortVal: r => r.perM ?? -1 },
+      { key: 'dayTok', label: '日均 Token', title: '总 Token ÷ 统计周期内已过的自然日数', align: 'r', fmt: x => (x ? compact(x) : '—'), csv: r => Math.round(r.dayTok) },
       ...(hasUsage ? [
         { key: 'requests', label: '请求数', title: REQ_SRC, align: 'r', fmt: x => (x == null ? '<span class="muted">—</span>' : intFmt(x)), sortVal: r => r.requests ?? -1 },
         { key: 'failRate', label: '失败率', align: 'r', fmt: x => (x == null ? '<span class="muted">—</span>' : `<span class="${x >= 0.05 ? 'bad-text' : x >= 0.01 ? 'warn-text' : ''}">${(x * 100).toFixed(2)}%</span>`), sortVal: r => r.failRate ?? -1, csv: r => (r.failRate == null ? '' : (r.failRate * 100).toFixed(2) + '%') },
@@ -141,7 +141,7 @@ export function render(v) {
     columns: [
       { key: 'model', label: '模型', cls: 'mono' },
       { key: 'label', label: '计费项', fmt: (x, r) => `${esc(x)}<span class="sub mono">${esc(r.io)}</span>` },
-      { key: 'price', label: '单价', align: 'r', fmt: (x, r) => (x !== '' ? `${esc(x)}<span class="sub">${esc(r.priceUnit)}</span>` : '-'), sortVal: r => num(r.price) },
+      { key: 'price', label: '单价', align: 'r', fmt: (x, r) => (x !== '' ? `${esc(x)}<span class="sub">${esc(r.priceUnit)}</span>` : '—'), sortVal: r => num(r.price) },
       { key: 'usage', label: '用量', align: 'r', fmt: (x, r) => `${intFmt(x)}<span class="sub">${esc(r.unit)}</span>` },
       { key: 'tokens', label: 'Token', align: 'r', fmt: x => intFmt(x) },
       { key: 'gross', label: '原价', align: 'r', fmt: x => money(x) },
@@ -290,7 +290,7 @@ export function openModel(model, scope = null) {
     onRowClick: r => { d.close(); const entity = scope && typeof scope === 'object' && !scope.global; app.setFilter({ ...scopeFilter(scope), model, item: r.io }, '#/detail', !!entity); },
     columns: [
       { key: 'label', label: '计费项', fmt: (x, r) => `${esc(x)}<span class="sub mono">${esc(r.io)}</span>` },
-      { key: 'price', label: '单价', align: 'r', fmt: (x, r) => (x !== '' ? `${esc(x)}<span class="sub">${esc(r.unit)}</span>` : '-'), sortVal: r => num(r.price) },
+      { key: 'price', label: '单价', align: 'r', fmt: (x, r) => (x !== '' ? `${esc(x)}<span class="sub">${esc(r.unit)}</span>` : '—'), sortVal: r => num(r.price) },
       { key: 'tokens', label: 'Token', align: 'r', fmt: x => intFmt(x) },
       { key: 'cost', label: '费用', align: 'r', fmt: x => money(x) },
       { key: 'share', label: '占比', align: 'r', fmt: x => (x * 100).toFixed(1) + '%' },

@@ -119,7 +119,7 @@ export function render(v) {
       <div><span>本期有费用</span><b>${withCost.length}</b></div>
       <div><span>关联 API Key</span><b>${sum(rows, r => r.keys)}</b></div>
       <div><span>本期费用 · ${METRICS[ui.f.metric]}</span><b>${money(total)}</b></div>
-      <div><span>最高占比</span><b title="${esc(withCost[0]?.name || '')}">${withCost[0] ? `${esc(withCost[0].name)} ${pct(withCost[0].cost, total)}` : '-'}</b></div>
+      <div><span>最高占比</span><b title="${esc(withCost[0]?.name || '')}">${withCost[0] ? `${esc(withCost[0].name)} ${pct(withCost[0].cost, total)}` : '—'}</b></div>
       ${unassigned ? `<div><span>${esc(dimName(dim, NONE_OF[dim]))}</span><b class="${unassigned.cost > 0 ? 'warn-text' : ''}">${money(unassigned.cost)}${total ? `<small class="muted"> ${pct(unassigned.cost, total)}</small>` : ''}</b></div>` : ''}
     </div>
     <div class="bi">
@@ -171,10 +171,10 @@ export function render(v) {
     { key: 'keys', label: 'API Key', title: '本期有账单的 Key / 关联的全部 Key', align: 'r', fmt: (x, r) => `${r.active}<span class="muted"> / ${x}</span>`, csv: r => `${r.active}/${r.keys}` },
     { key: 'cost', label: `费用（${METRICS[ui.f.metric]}）`, align: 'r', fmt: x => dataBar(x, max), csv: r => r.cost.toFixed(6) },
     { key: 'chg', label: state.compareLabel, align: 'r', fmt: (x, r) => deltaPill(r.cost, r.prev), csv: r => r.chg.toFixed(6) },
-    { key: 'share', label: '占比', align: 'r', fmt: x => (x ? (x * 100).toFixed(1) + '%' : '-'), csv: r => (r.share * 100).toFixed(2) + '%' },
-    { key: 'tokens', label: '总 Token', align: 'r', fmt: x => (x ? compact(x) : '-'), csv: r => Math.round(r.tokens) },
-    { key: 'perM', label: '¥/百万Token', align: 'r', fmt: x => (x == null ? '-' : money(x)), sortVal: r => r.perM ?? -1, csv: r => (r.perM == null ? '' : r.perM.toFixed(4)) },
-    { key: 'hit', label: '缓存命中率', align: 'r', fmt: x => (x == null ? '-' : (x * 100).toFixed(1) + '%'), sortVal: r => r.hit ?? -1, csv: r => (r.hit == null ? '' : (r.hit * 100).toFixed(2) + '%') },
+    { key: 'share', label: '占比', align: 'r', fmt: x => (x ? (x * 100).toFixed(1) + '%' : '—'), csv: r => (r.share * 100).toFixed(2) + '%' },
+    { key: 'tokens', label: '总 Token', align: 'r', fmt: x => (x ? compact(x) : '—'), csv: r => Math.round(r.tokens) },
+    { key: 'perM', label: '¥/百万Token', align: 'r', fmt: x => (x == null ? '—' : money(x)), sortVal: r => r.perM ?? -1, csv: r => (r.perM == null ? '' : r.perM.toFixed(4)) },
+    { key: 'hit', label: '缓存命中率', align: 'r', fmt: x => (x == null ? '—' : (x * 100).toFixed(1) + '%'), sortVal: r => r.hit ?? -1, csv: r => (r.hit == null ? '' : (r.hit * 100).toFixed(2) + '%') },
     ...(hasUsage ? [
       { key: 'requests', label: '请求数', align: 'r', fmt: x => (x == null ? '<span class="muted">—</span>' : intFmt(x)), sortVal: r => r.requests ?? -1 },
       { key: 'tokPer', label: '单次均 Token', align: 'r', fmt: x => (x == null ? '<span class="muted">—</span>' : intFmt(x)), sortVal: r => r.tokPer ?? -1, csv: r => (r.tokPer == null ? '' : Math.round(r.tokPer)) },
@@ -249,7 +249,7 @@ function drillTree(el, lines, prevLines, dim) {
       out.push(`<tr class="tr-lv${lvl}"><td class="tree-name" style="--lv:${lvl}">${lvl < 2 ? `<button type="button" class="tg" data-tg="${esc(path)}" aria-expanded="${isOpen}" aria-label="${isOpen ? '收起' : '展开'}">${icon('chevR')}</button>` : '<span class="tg-sp"></span>'}<span class="tree-label">${nameCell(lvl, n, path, anc)}</span>${sub ? `<span class="muted tree-sub">${esc(sub)}</span>` : ''}</td>
         <td class="r">${esc(money(n.agg.cost))}</td><td class="r">${deltaPill(n.agg.cost, n.prev)}</td>
         <td class="r"><span class="share-bar" title="占上级 ${pct(n.agg.cost, parentCost)}"><i style="width:${parentCost ? Math.min(100, n.agg.cost / parentCost * 100).toFixed(1) : 0}%"></i></span>${pct(n.agg.cost, parentCost)}</td>
-        <td class="r">${tok ? compact(tok) : '-'}</td><td class="r">${tok ? money(n.agg.cost / tok * 1e6) : '-'}</td></tr>`);
+        <td class="r">${tok ? compact(tok) : '—'}</td><td class="r">${tok ? money(n.agg.cost / tok * 1e6) : '—'}</td></tr>`);
       if (isOpen) walk(n.kids, lvl + 1, path, n.agg.cost, [...anc, n.id]);
     }
     if (list.length > shown.length) out.push(`<tr class="tr-more"><td colspan="6" style="--lv:${lvl}" class="tree-name muted">另有 ${list.length - shown.length} 项（合计 ${esc(money(sum(list.slice(TREE_LIMIT), n => n.agg.cost)))}）未展开显示，可在明细表或成本分摊中查看</td></tr>`);
@@ -399,10 +399,10 @@ export function renderDetail(v, arg) {
     { key: 'status', label: '状态', fmt: (x, r) => `<span class="state ${r.stc}">${esc(x)}</span>` },
     { key: 'cost', label: `费用（${METRICS[ui.f.metric]}）`, align: 'r', fmt: x => dataBar(x, kmax), csv: r => r.cost.toFixed(6) },
     { key: 'chg', label: state.compareLabel, align: 'r', fmt: (x, r) => deltaPill(r.cost, r.prev), sortVal: r => r.cost - r.prev, csv: r => (r.cost - r.prev).toFixed(6) },
-    { key: 'share', label: '占比', align: 'r', fmt: x => (x ? (x * 100).toFixed(1) + '%' : '-'), csv: r => (r.share * 100).toFixed(2) + '%' },
-    { key: 'tokens', label: '总 Token', align: 'r', fmt: x => (x ? compact(x) : '-'), csv: r => Math.round(r.tokens) },
-    { key: 'perM', label: '¥/百万Token', align: 'r', fmt: x => (x == null ? '-' : money(x)), sortVal: r => r.perM ?? -1 },
-    { key: 'hit', label: '缓存命中率', align: 'r', fmt: x => (x == null ? '-' : (x * 100).toFixed(1) + '%'), sortVal: r => r.hit ?? -1 },
+    { key: 'share', label: '占比', align: 'r', fmt: x => (x ? (x * 100).toFixed(1) + '%' : '—'), csv: r => (r.share * 100).toFixed(2) + '%' },
+    { key: 'tokens', label: '总 Token', align: 'r', fmt: x => (x ? compact(x) : '—'), csv: r => Math.round(r.tokens) },
+    { key: 'perM', label: '¥/百万Token', align: 'r', fmt: x => (x == null ? '—' : money(x)), sortVal: r => r.perM ?? -1 },
+    { key: 'hit', label: '缓存命中率', align: 'r', fmt: x => (x == null ? '—' : (x * 100).toFixed(1) + '%'), sortVal: r => r.hit ?? -1 },
     ...(kHasUsage ? [
       { key: 'requests', label: '请求数', align: 'r', fmt: x => (x == null ? '<span class="muted">—</span>' : intFmt(x)), sortVal: r => r.requests ?? -1 },
       { key: 'tokPer', label: '单次均 Token', align: 'r', fmt: x => (x == null ? '<span class="muted">—</span>' : intFmt(x)), sortVal: r => r.tokPer ?? -1, csv: r => (r.tokPer == null ? '' : Math.round(r.tokPer)) },

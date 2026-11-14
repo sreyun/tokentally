@@ -96,7 +96,7 @@ async function aliyun(el) {
   callsPanel(callsBox, s.aliyunCalls, reloadCalls);
 }
 function akPanel(el, s, reload) {
-  const a = s.aliyun, ss = SECRET[a.secretState] || ['-', ''];
+  const a = s.aliyun, ss = SECRET[a.secretState] || ['—', ''];
   el.innerHTML = `<div class="bi">
     <section class="panel c7"><div class="panel-h"><h3>阿里云 RAM 用户 AccessKey</h3>${help('使用 RAM 用户 AccessKey 调用百炼与费用中心只读接口；Secret 只写不回显，以 AES-256-GCM 加密后存入 SQLite，主密钥与数据分离保存。')}</div>
       <div class="kv" style="margin-bottom:16px">
@@ -300,7 +300,7 @@ function callsPanel(box, c, reload) {
 /* ---------------- 腾讯云接入 ---------------- */
 async function tencent(el) {
   const s = await http('GET', '/api/admin/settings');
-  const t = s.tencent, ss = SECRET[t.secretState] || ['-', ''];
+  const t = s.tencent, ss = SECRET[t.secretState] || ['—', ''];
   const REG = { 'ap-guangzhou': '华南地区（广州）ap-guangzhou', 'ap-singapore': '亚太东南（新加坡）ap-singapore' };
   el.innerHTML = `<div class="bi">
     <section class="panel c7"><div class="panel-h"><h3>腾讯云 CAM API 密钥</h3>${help('使用 CAM 子用户 API 密钥（SecretId / SecretKey）调用大模型服务平台 TokenHub 与计费只读接口；SecretKey 只写不回显，以 AES-256-GCM 加密保存。')}</div>
@@ -393,7 +393,7 @@ async function sync(el) {
       { key: 'kind', label: '类型', fmt: x => (x === 'meta' ? 'Key / 空间' : '账单') },
       { key: 'trig', label: '触发', fmt: x => esc(trigLabel(x)) },
       { key: 'started_at', label: '开始', fmt: x => fmtTime(x) },
-      { key: 'dur', label: '耗时', align: 'r', fmt: (x, r) => (r.finished_at ? ((r.finished_at - r.started_at) / 1000).toFixed(1) + 's' : '-'), sortVal: r => (r.finished_at || 0) - r.started_at },
+      { key: 'dur', label: '耗时', align: 'r', fmt: (x, r) => (r.finished_at ? ((r.finished_at - r.started_at) / 1000).toFixed(1) + 's' : '—'), sortVal: r => (r.finished_at || 0) - r.started_at },
       { key: 'status', label: '结果', fmt: x => `<span class="pill ${RUN[x]?.[1] || 'neutral'}">${RUN[x]?.[0] || esc(x)}</span>` },
       { key: 'api_calls', label: '调用', align: 'r' },
       { key: 'detail', label: '详情', cls: 'wrap-cell', sortable: false, fmt: (x, r) => esc(runSummary(r)) },
@@ -598,7 +598,7 @@ async function alerts(el) {
             <span class="state ${c.enabled ? 'on' : 'off'}">${c.enabled ? '已启用' : '已停用'}</span></div>
           <div class="ch-evs">${c.scopeLabel ? `<span class="tag info">${icon('filter')}范围：${esc(c.scopeLabel)}</span>` : ''}${Object.keys(evs).filter(k => c.events[k]).map(k => `<span class="tag">${icon(EVENT_ICON[k] || 'bell')}${esc(evs[k].label)}</span>`).join('') || '<span class="muted">未订阅任何事件</span>'}${c.share ? `<span class="tag info">${icon('link')}附交互报表链接</span>` : ''}${c.atAll || c.atMobiles.length ? `<span class="tag warn">@ ${c.atAll ? '所有人' : ''}${c.atAll && c.atMobiles.length ? ' + ' : ''}${c.atMobiles.length ? c.atMobiles.length + ' 人' : ''}</span>` : ''}</div>
           ${Object.keys(c.nextRuns || {}).length ? `<div class="ch-next">${icon('clock')}<span>下次报表：${Object.entries(c.nextRuns).map(([k, v]) => `${esc(evs[k]?.label.replace(/（.*）/, '') || k)} <b>${esc(v)}</b>`).join('<i>·</i>')}</span></div>` : ''}
-          <div class="ch-foot"><span class="${c.lastError && (!c.lastSentAt || c.lastErrorAt > c.lastSentAt) ? 'bad-text' : 'muted'}">${c.lastError && (!c.lastSentAt || c.lastErrorAt > c.lastSentAt) ? `${esc(fmtTime(c.lastErrorAt))} 发送失败：${esc(c.lastError)}` : c.lastSentAt ? `最近发送 ${esc(fmtTime(c.lastSentAt))}` : '尚未发送'}</span>
+          <div class="ch-foot"><span class="${c.lastError && (!c.lastSentAt || c.lastErrorAt > c.lastSentAt) ? 'bad-text' : c.lastSentAt && c.lastWarning ? 'warn-text' : 'muted'}">${c.lastError && (!c.lastSentAt || c.lastErrorAt > c.lastSentAt) ? `${esc(fmtTime(c.lastErrorAt))} 发送失败：${esc(c.lastError)}` : c.lastSentAt ? `最近发送 ${esc(fmtTime(c.lastSentAt))}${c.lastWarning ? `，${esc(c.lastWarning)}` : ''}` : '尚未发送'}</span>
             <span class="sp"></span><button class="btn sm" data-ch-test="${esc(c.id)}">${icon('send')}测试</button><button class="btn sm" data-ch-edit="${esc(c.id)}">${icon('edit')}编辑</button><button class="btn sm danger" data-ch-del="${esc(c.id)}">${icon('trash')}删除</button></div>
         </div>`).join('')}</div>` : `<div class="empty-mini">${icon('bell')}<div><b>尚未配置通知渠道</b><span class="muted">添加钉钉、飞书、企业微信群机器人、通用 Webhook 或邮件，接收预算告警、费用异常、同步故障与日报 / 周报 / 月报；邮件会附上完整的成本概览。</span></div></div>`}
     </section>
@@ -665,7 +665,7 @@ async function alerts(el) {
   el.querySelectorAll('[data-ch-test]').forEach(b => b.onclick = async () => {
     const c = al.channels.find(x => x.id === b.dataset.chTest);
     b.disabled = true;
-    try { const r = await http('POST', '/api/admin/alerts/test', { channelId: c.id, type: c.type, atAll: c.atAll, atMobiles: c.atMobiles }); toast(`测试消息已发送到「${c.name}」${STYLE_NOTE[r.style] || ''}，请在群中查看`, '', 5000); }
+    try { const r = await http('POST', '/api/admin/alerts/test', { channelId: c.id, type: c.type, atAll: c.atAll, atMobiles: c.atMobiles }); r.warning ? toast(`测试邮件已发送到「${c.name}」，但${r.warning}`, 'err', 8000) : toast(`测试消息已发送到「${c.name}」${STYLE_NOTE[r.style] || ''}，请在群中查看`, '', 5000); }
     catch (ex) { toast(ex.message, 'err', 5000); } finally { b.disabled = false; }
   });
   $('#rForm', el).addEventListener('input', () => markDirty($('#rForm', el)));
@@ -689,10 +689,10 @@ async function alerts(el) {
     if (!send) box.innerHTML = '<div class="nodata">加载中…</div>';
     try {
       const r = await http('POST', '/api/admin/alerts/report', { kind: k, send, channelId: chId });
-      if (my !== seq || k !== kind || chId !== ($('#rCh', el).value || undefined)) { if (send) toast('报表已发送'); return; }
+      if (my !== seq || k !== kind || chId !== ($('#rCh', el).value || undefined)) { if (send) toast(r.warning ? `报表已发送；${r.warning}` : '报表已发送', r.warning ? 'err' : '', r.warning ? 8000 : 2800); return; }
       const scopeNote = r.scope ? `<div class="hint" style="margin:0 0 8px">${icon('filter')} 该渠道限定推送范围：${esc(r.scope)}，以下为范围内的报表</div>` : '';
       box.innerHTML = scopeNote + (r.doc ? cardPreview(r) : `<div class="rp-t">${esc(r.title)}${r.empty ? ' <span class="pill neutral">无费用，定时发送时将跳过</span>' : ''}</div>${r.lines.map(l => (l === '' ? '<div class="rp-gap"></div>' : l.startsWith('#') ? `<div class="rp-h">${esc(l.replace(/^#+\s*/, ''))}</div>` : `<div class="rp-l">${esc(l).replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')}</div>`)).join('')}`);
-      if (send) toast(`报表已发送${r.scope ? `（范围：${r.scope}）` : ''}${STYLE_NOTE[r.style] || ''}`, '', 4500);
+      if (send) toast(`报表已发送${r.scope ? `（范围：${r.scope}）` : ''}${STYLE_NOTE[r.style] || ''}${r.warning ? `；${r.warning}` : ''}`, r.warning ? 'err' : '', r.warning ? 8000 : 4500);
     } catch (ex) { if (send) toast(ex.message, 'err', 5000); else if (my === seq) box.innerHTML = `<div class="bad-text">${esc(ex.message)}</div>`; }
   };
   el.querySelectorAll('[data-rk]').forEach(b => b.onclick = () => { kind = b.dataset.rk; el.querySelectorAll('[data-rk]').forEach(x => x.setAttribute('aria-pressed', String(x === b))); preview(); });
@@ -850,7 +850,7 @@ function editChannel(al, c, onSave) {
       $('[data-test]', form).onclick = async e => {
         const fd = new FormData(form), btn = e.currentTarget;
         btn.disabled = true;
-        try { const r = await http('POST', '/api/admin/alerts/test', { channelId: c?.id, type: fd.get('type'), webhook: fd.get('webhook') || '', secret: fd.get('secret') || '', atAll: fd.get('atAll') === 'on', atMobiles: fd.get('atMobiles') || '', scope: form._scope(), share: shareOf(fd) }); toast(`测试消息已发送${STYLE_NOTE[r.style] || ''}，请在群中查看`, '', 5000); }
+        try { const r = await http('POST', '/api/admin/alerts/test', { channelId: c?.id, type: fd.get('type'), webhook: fd.get('webhook') || '', secret: fd.get('secret') || '', atAll: fd.get('atAll') === 'on', atMobiles: fd.get('atMobiles') || '', scope: form._scope(), share: shareOf(fd) }); r.warning ? toast(`测试邮件已发送，但${r.warning}`, 'err', 8000) : toast(`测试消息已发送${STYLE_NOTE[r.style] || ''}，请在群中查看`, '', 5000); }
         catch (ex) { toast(ex.message, 'err', 5000); } finally { btn.disabled = false; }
       };
     },
@@ -1064,7 +1064,7 @@ async function security(el) {
 
 /** IP 归属地离线库状态 */
 function ipDbText(db) {
-  if (!db) return '-';
+  if (!db) return '—';
   if (!db.v4 && !db.v6) return `<span class="warn-text">未安装</span>，只区分内网 / 公网${db.errors?.length ? `（${esc(db.errors.join('；'))}）` : ''}`;
   const one = (x, v) => (x ? `IPv${v} ${x.builtin ? '内置' : esc(x.file)}（数据 ${fmtTime(x.createdAt, false)}）` : `IPv${v} 未安装`);
   return `ip2region 离线库 · ${one(db.v4, 4)} · ${one(db.v6, 6)}`;
@@ -1264,7 +1264,7 @@ const PRODUCT = { bss: '阿里云 BssOpenApi', modelstudio: '阿里云 ModelStud
 async function calls(el) {
   const { calls: list } = await http('GET', '/api/admin/calls');
   const fail = list.filter(c => !c.ok).length;
-  el.innerHTML = `<div class="stat-strip"><div><span>最近调用</span><b>${list.length}</b></div><div><span>失败</span><b class="${fail ? 'bad-text' : ''}">${fail}</b></div><div><span>平均耗时</span><b>${list.length ? Math.round(sum(list, c => c.ms) / list.length) + ' ms' : '-'}</b></div></div>
+  el.innerHTML = `<div class="stat-strip"><div><span>最近调用</span><b>${list.length}</b></div><div><span>失败</span><b class="${fail ? 'bad-text' : ''}">${fail}</b></div><div><span>平均耗时</span><b>${list.length ? Math.round(sum(list, c => c.ms) / list.length) + ' ms' : '—'}</b></div></div>
     <section class="panel"><div class="panel-h"><h3>云 API 调用日志</h3><span class="sub">最近 300 次（阿里云 + 腾讯云），仅内存保存，不含任何密钥</span></div><div id="cTbl"></div></section>`;
   table('calls', $('#cTbl', el), {
     sort: 'ts', pageSize: 50, stickyFirst: false, empty: '暂无调用',

@@ -151,9 +151,9 @@ export function render(v, id) {
       { key: 'chg', label: state.compareLabel, align: 'r', fmt: (x, r) => deltaPill(r.cost, r.prev), sortVal: r => r.cost - r.prev },
       { key: 'share', label: '占比', align: 'r', fmt: x => (x * 100).toFixed(1) + '%' },
       { key: 'tIn', label: '输入 Token', align: 'r', fmt: x => intFmt(x) },
-      { key: 'hit', label: '缓存命中率', align: 'r', fmt: x => (x == null ? '-' : (x * 100).toFixed(1) + '%'), sortVal: r => r.hit ?? -1 },
+      { key: 'hit', label: '缓存命中率', align: 'r', fmt: x => (x == null ? '—' : (x * 100).toFixed(1) + '%'), sortVal: r => r.hit ?? -1 },
       { key: 'tOut', label: '输出 Token', align: 'r', fmt: x => intFmt(x) },
-      { key: 'perM', label: '¥/百万Token', align: 'r', fmt: x => (x == null ? '-' : money(x)), sortVal: r => r.perM ?? -1 },
+      { key: 'perM', label: '¥/百万Token', align: 'r', fmt: x => (x == null ? '—' : money(x)), sortVal: r => r.perM ?? -1 },
       { key: 'days', label: '使用天数', align: 'r' },
       ...(us ? [
         { key: 'req', label: '请求数', align: 'r', fmt: x => (x == null ? '—' : intFmt(x)), sortVal: r => r.req ?? -1 },
@@ -178,7 +178,7 @@ export function render(v, id) {
     columns: [
       { key: 'model', label: '模型', cls: 'mono' },
       { key: 'label', label: '计费项', fmt: (x, r) => `${esc(x)}<span class="sub mono">${esc(r.io)}</span>` },
-      { key: 'price', label: '单价', align: 'r', fmt: (x, r) => (x !== '' ? `${esc(x)}<span class="sub">${esc(r.priceUnit)}</span>` : '-'), sortVal: r => num(r.price) },
+      { key: 'price', label: '单价', align: 'r', fmt: (x, r) => (x !== '' ? `${esc(x)}<span class="sub">${esc(r.priceUnit)}</span>` : '—'), sortVal: r => num(r.price) },
       { key: 'usage', label: '用量', align: 'r', fmt: (x, r) => `${intFmt(x)}<span class="sub">${esc(r.unit)}</span>` },
       { key: 'tokens', label: 'Token', align: 'r', fmt: x => intFmt(x) },
       { key: 'gross', label: '原价', align: 'r', fmt: x => money(x) },
