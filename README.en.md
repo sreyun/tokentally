@@ -27,7 +27,7 @@ LLM API keys multiply quickly — support, marketing, R&D and analytics teams ea
 - **Where did the money go?** Which key spent how much, on which models?
 - **Who pays?** Costs can't be charged back to teams or projects.
 - **Why the spike?** A leaked or misused key is discovered only at month end.
-- **Will we overspend?** No per-key budgets, forecasts or alerts.
+- **Will we overspend?** No per-key or per-department budgets, forecasts or alerts.
 - **Key hygiene?** Keys without descriptions, with overly broad permissions, idle, or deleted-but-still-billing.
 
 TokenTally syncs keys and bills (read-only) into a local SQLite database, analyses them by key / model / cost center / cloud, and pushes budget, anomaly and sync alerts to DingTalk, Feishu (Lark), WeCom or any webhook.
@@ -39,7 +39,17 @@ TokenTally syncs keys and bills (read-only) into a local SQLite database, analys
 - **Linked filters & drill-down** — pick a workspace and the key and model filters only list what belongs to it; conflicting filters are cleared automatically. A workspace → key → model drill tree, plus clickable legends, bar segments, heatmap cells, matrix cells and bill-detail cells. Filters and the period live in the URL, so views can be shared and the browser Back button undoes a drill-down step; alert and report links open the matching page and period.
 - **Business analysis** — cost by workspace (or cost center / owner / cloud) with a detail page per workspace listing all of its keys, models, key × model matrix and trends.
 - **Token & call statistics** — token structure, cache hit rate, unit cost, daily average and peak for every key and model, plus requests, success rate and average tokens / cost per request (Tencent TokenHub usage; Alibaba Cloud via the CloudMonitor Prometheus instance that Bailian monitoring exports to).
+- **Budgets** — a monthly total budget plus monthly budgets per **cost center (department)** and per API key, all on payable amount. Cost-center spend is the month's bills grouped by each key's current cost-center tag; the unassigned bucket ("未分配成本中心") covers untagged keys and spend without a key and can have its own budget. Usage shows in business analysis (grouped by cost center), the cost-center detail page, key governance (over / forecast over budget) and the monthly report's cost-center ranking.
 - **Alerts & reports** — up to 5 channels; budget, spend anomaly, sync failure, key changes, plus daily / weekly / monthly reports with @mentions and signed webhooks.
+
+  | Alert | Fires when | Dedupe |
+  |---|---|---|
+  | Budget | Total, cost-center or key budget reaches the warning threshold or is exceeded; total budget forecast to be exceeded by month end | Once per threshold per cycle per channel |
+  | Spend anomaly | Yesterday's list price ≥ 7-day average × ratio and the increase ≥ minimum amount (overall and per key) | Once per day |
+  | Sync failure | Same sync type of a cloud fails 3 times in a row; recovery notice afterwards | Once per incident |
+  | Key change | API key created / deleted / restored | Once per change |
+
+  Channels can be scoped to workspaces or keys: a scoped channel gets budget alerts for keys in scope and for cost centers whose keys are all in scope (never the total budget). Saving settings never back-sends — new conditions alert on the next check.
 - **Key governance** — automatic findings with severity and advice.
 - **Security first** — AES-256-GCM encrypted credentials, read-only cloud permissions, password re-confirmation for sensitive actions, CSRF / CSP / rate limiting / audit log, SSRF-safe webhooks.
 - **Zero dependencies** — only Node.js 24 built-ins (`node:http`, `node:sqlite`, `node:crypto`), no npm packages, no build step; `docker compose` deployment, automatic backups, Prometheus metrics, white-label branding.
@@ -101,8 +111,8 @@ flowchart LR
 - [x] Alibaba Cloud call counts via CloudMonitor Prometheus
 - [x] Business analysis, linked filters and multi-level drill-down
 - [x] Email reports with the full cost overview, per-workspace / per-key channel scope, read-only share links
+- [x] Cost-center (department) budgets and alerts
 - [ ] More platforms (Volcengine Ark, Baidu Qianfan, …)
-- [ ] Cost-center (department) budgets and alerts
 - [ ] Excel reports, SSO / LDAP
 
 ## Contributing

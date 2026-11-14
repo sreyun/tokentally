@@ -1,5 +1,6 @@
 /* Key 治理：基于规则的风险与合规检查 */
-import { $, esc, state, ui, app, money, sum, addDays, keyShort, keyDesc, wsName, budgetOf, forecastOf, isCurrentMonth, NONE_KEY, icon, help, fmtTime, PROVIDERS, provTag, hasTags, dimLink, NO_WS } from '../core.js';
+import { $, esc, state, ui, app, money, sum, addDays, keyShort, keyDesc, wsName, budgetOf, forecastOf, isCurrentMonth, NONE_KEY, icon, help, fmtTime, PROVIDERS, provTag, hasTags, dimLink, NO_WS,
+  ccBudgetOf, hasCcBudgets, ccName, dimVal, groupHash } from '../core.js';
 import { table } from '../table.js';
 
 export const SEVERITY = { high: { label: '高', cls: 'bad', order: 0 }, medium: { label: '中', cls: 'warn', order: 1 }, low: { label: '低', cls: 'neutral', order: 2 } };
@@ -8,6 +9,8 @@ const RULES = {
   disabled_billing: { name: '已禁用仍产生费用', severity: 'high', advice: '核实禁用时间与账单日期，排查是否存在其他调用来源。' },
   over_budget: { name: '已超出预算', severity: 'high', advice: '评估用量合理性，调整预算或在云厂商控制台限制该 Key 的调用（腾讯云 TokenHub 可设置 Key 额度上限）。' },
   forecast_over: { name: '预计超出预算', severity: 'medium', advice: '按当前日均推算月末将超预算，建议提前评估或调整。' },
+  cc_over_budget: { name: '成本中心已超出预算', severity: 'high', advice: '与成本中心负责人确认用量是否合理，调整预算；可在“业务分析 → 成本中心”详情中查看主要的 Key 与模型并限制调用。' },
+  cc_forecast_over: { name: '成本中心预计超出预算', severity: 'medium', advice: '按当前日均推算月末将超出该成本中心的预算，建议提前与负责人评估或调整预算。' },
   spike: { name: '费用突增', severity: 'medium', advice: '近 7 天日均显著高于此前，排查是否存在异常或滥用调用。' },
   no_desc: { name: '有消费但无描述', severity: 'medium', advice: '在云厂商控制台为该 Key 补充描述（项目/负责人），或在本系统设置成本中心与负责人。' },
   no_cc: { name: '有消费但未分配成本中心', severity: 'low', advice: '在“Key 分析 → 归属设置”中为该 Key 指定成本中心与负责人，便于按部门/项目分摊。' },
@@ -80,6 +83,23 @@ function computeFindingsRaw() {
       if (!k.workspaceId && k.provider !== 'tencent') add('no_ws', '未归属任何业务空间');
     }
   }
+  // 成本中心预算（自然月）：按应付金额统计整个成本中心本期的费用（未分配成本中心含无 API Key 的费用），与预算告警口径一致
+  if (month && hasCcBudgets()) {
+    const ccCost = new Map(), ccDaily = new Map();
+    for (const l of state.lines) { const g = dimVal.cc(l); ccCost.set(g, (ccCost.get(g) || 0) + l.pretax); }
+    for (const l of state.daily) { const g = dimVal.cc(l); if (!ccDaily.has(g)) ccDaily.set(g, []); ccDaily.get(g).push(l); }
+    for (const cc of Object.keys(state.budgets.costCenters || {})) {
+      const budget = ccBudgetOf(cc);
+      if (!budget) continue;
+      const c = ccCost.get(cc) || 0;
+      const add = (rule, detail) => out.push({ rule, ruleName: RULES[rule].name, severity: RULES[rule].severity, advice: RULES[rule].advice, keyId: null, ccId: cc, detail, cost: c });
+      if (c >= budget) add('cc_over_budget', `本期 ${money(c)}，预算 ${money(budget)}，超出 ${money(c - budget)}`);
+      else if (isCurrentMonth()) {
+        const fc = forecastOf(ccDaily.get(cc) || [], l => l.pretax);
+        if (fc && fc.value >= budget) add('cc_forecast_over', `预计月末 ${money(fc.value)}，预算 ${money(budget)}（本期已用 ${money(c)}）`);
+      }
+    }
+  }
   return out.sort((a, b) => SEVERITY[a.severity].order - SEVERITY[b.severity].order || b.cost - a.cost);
 }
 
@@ -88,7 +108,7 @@ export function render(v) {
   const rules = Object.keys(RULES).map(r => ({ r, n: all.filter(f => f.rule === r).length })).filter(x => x.n);
   if (ui.govRule && !rules.some(x => x.r === ui.govRule)) ui.govRule = '';
   const list = ui.govRule ? all.filter(f => f.rule === ui.govRule) : all;
-  const keysWithIssue = new Set(all.map(f => f.keyId)).size;
+  const keysWithIssue = new Set(all.filter(f => f.keyId != null).map(f => f.keyId)).size;
   const live = [...state.apiKeys.values()].filter(k => k.source === 'api').length;
   v.innerHTML = `
     <div class="stat-strip">
@@ -111,14 +131,18 @@ export function render(v) {
   v.querySelectorAll('[data-rule]').forEach(b => b.onclick = () => { ui.govRule = b.dataset.rule; render(v); });
   const t = table('gov', $('#tbl', v), {
     sort: 'sev', dir: 'asc', pageSize: 100, caption: '治理问题清单', empty: '未发现治理问题',
-    onRowClick: r => (r.keyId !== NONE_KEY ? app.go(`#/key/${encodeURIComponent(r.keyId)}`) : null),
+    // 成本中心预算的条目（ccId）进入成本中心详情
+    onRowClick: r => (r.ccId != null ? app.go(groupHash('cc', r.ccId)) : r.keyId !== NONE_KEY ? app.go(`#/key/${encodeURIComponent(r.keyId)}`) : null),
     columns: [
-      { key: 'key', label: 'API Key', fmt: (x, r) => `<b style="font-weight:600">${esc(keyShort(r.keyId))}</b>${provTag(state.apiKeys.get(r.keyId)?.provider)}<span class="sub mono">${esc(r.keyId)}</span>`, sortVal: r => keyShort(r.keyId), csv: r => `${keyDesc(r.keyId)} (${r.keyId})` },
+      { key: 'key', label: 'API Key / 成本中心', fmt: (x, r) => (r.ccId != null ? `<b style="font-weight:600">${esc(ccName(r.ccId))}</b><span class="sub">成本中心</span>`
+        : `<b style="font-weight:600">${esc(keyShort(r.keyId))}</b>${provTag(state.apiKeys.get(r.keyId)?.provider)}<span class="sub mono">${esc(r.keyId)}</span>`),
+      sortVal: r => (r.ccId != null ? ccName(r.ccId) : keyShort(r.keyId)), csv: r => (r.ccId != null ? `成本中心：${ccName(r.ccId)}` : `${keyDesc(r.keyId)} (${r.keyId})`) },
       { key: 'sev', label: '等级', fmt: (x, r) => `<span class="pill ${SEVERITY[r.severity].cls}">${SEVERITY[r.severity].label}</span>`, sortVal: r => SEVERITY[r.severity].order, csv: r => SEVERITY[r.severity].label },
       { key: 'ruleName', label: '问题' },
       { key: 'detail', label: '说明', cls: 'wrap-cell' },
       { key: 'advice', label: '建议', cls: 'wrap-cell' },
-      { key: 'ws', label: '业务空间', fmt: (x, r) => (w => dimLink('ws', w || NO_WS, wsName(w)))(state.apiKeys.get(r.keyId)?.wsKey || ''), sortVal: r => wsName(state.apiKeys.get(r.keyId)?.wsKey || ''), csv: r => wsName(state.apiKeys.get(r.keyId)?.wsKey || '') },
+      { key: 'ws', label: '业务空间', fmt: (x, r) => (r.ccId != null ? '<span class="muted">—</span>' : (w => dimLink('ws', w || NO_WS, wsName(w)))(state.apiKeys.get(r.keyId)?.wsKey || '')),
+        sortVal: r => (r.ccId != null ? '' : wsName(state.apiKeys.get(r.keyId)?.wsKey || '')), csv: r => (r.ccId != null ? '' : wsName(state.apiKeys.get(r.keyId)?.wsKey || '')) },
       { key: 'cost', label: '本期费用', align: 'r', fmt: x => money(x) },
     ],
   }).setRows(list);

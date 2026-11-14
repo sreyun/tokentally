@@ -75,7 +75,7 @@ const DESC = {
   'tencent.key.bootstrap': d => [['SecretId', d.secretId], ['', '来自环境变量']],
   'tencent.test': d => [['SecretId', d.secretId]],
   'aliyun.calls.secret': d => [['Prometheus 地址', d.url || '（未设置）']],
-  'budgets.update': d => [['月度总预算', d.monthly == null ? '未设置' : money(d.monthly)], d.alertPct != null && ['预警阈值', `${d.alertPct}%`], d.keyBudgets != null && ['API Key 预算', `${d.keyBudgets} 个`]],
+  'budgets.update': d => [['月度总预算', d.monthly == null ? '未设置' : money(d.monthly)], d.alertPct != null && ['预警阈值', `${d.alertPct}%`], d.keyBudgets != null && ['API Key 预算', `${d.keyBudgets} 个`], d.ccBudgets != null && ['成本中心预算', `${d.ccBudgets} 个`]],
   'keytags.update': d => [['Key 数量', `${d.count ?? (d.keys || []).length} 个`], d.keys?.length && ['涉及', list(d.keys.slice(0, 5), keyName) + ((d.count || d.keys.length) > 5 ? ` 等 ${d.count || d.keys.length} 个` : '')]],
   'alert.update': d => [
     ['通知渠道', (d.channels || []).length ? d.channels.map(c => `${c.name}（${CH_TYPE[c.type] || c.type}${c.enabled ? '' : '，已停用'}${c.scope ? `，范围：${c.scope.type === 'key' ? 'API Key' : '业务空间'} ${c.scope.n} 个` : ''}）：${list(c.events, e => EVENT[e] || e) || '未订阅事件'}`).join('；') : '无'],
@@ -121,7 +121,7 @@ export const OP_ACT = {
   'smtp.update': '修改邮件服务器', 'smtp.test': '发送测试邮件', 'backup.create': '创建备份', 'backup.download': '下载备份', 'network.update': '修改客户端 IP 来源',
   'user.create': '创建用户', 'user.update': '修改用户', 'user.delete': '删除用户', 'access.denied': '无权限访问', 'oplog.throttled': '操作上报过于频繁', 'share.view': '打开分享链接', 'share.create': '生成分享链接', 'share.revoke': '撤销分享链接',
 };
-const OP_KEY = { page: '页面', period: '周期', filters: '筛选', metric: '口径', rows: '行数', fields: '修改项', provider: '云厂商', cycles: '账期', force: '强制', send: '立即发送', role: '角色', count: '数量', monthly: '月度预算', keys: 'Key 预算', ipSource: 'IP 来源', hops: '代理层数', scope: '范围', channel: '渠道', days: '有效期（天）', error: '失败原因' };
+const OP_KEY = { page: '页面', period: '周期', filters: '筛选', metric: '口径', rows: '行数', fields: '修改项', provider: '云厂商', cycles: '账期', force: '强制', send: '立即发送', role: '角色', count: '数量', monthly: '月度预算', keys: 'Key 预算', costCenters: '成本中心预算', ipSource: 'IP 来源', hops: '代理层数', scope: '范围', channel: '渠道', days: '有效期（天）', error: '失败原因' };
 const OP_VAL = { metric: { gross: '原价', after: '优惠后' }, provider: { all: '全部', aliyun: '阿里云', tencent: '腾讯云' }, role: { admin: '管理员', viewer: '只读用户', share: '分享访客' } };
 /** 操作详情 → [[标签, 文本], ...] */
 export function opPairs(raw) {

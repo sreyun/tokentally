@@ -7,10 +7,12 @@ import {
   $, esc, state, ui, app, LS, http, money, moneyShort, compact, intFmt, pct, sum, uniq, metricVal, METRICS, NONE_KEY, DIMS,
   keyObj, keyShort, filterLines, aggregate, addAgg, aggAll, sortedAggs, newAgg, totalTokens, topModels, deltaPill, icon, help, segCtl,
   fmtTime, periodTag, copyBtn, PROVIDERS, provTag, multiCloud, hasTags, NO_WS, NO_CC, NO_OWNER, dimVal, keyDimVal, dimName, DIM_LABEL,
-  scopeLines, scopeUsage, groupHash, dimLink, isSet, keyMatch, usageFiltered, usageAgg, callsOn, perCallCovered, perCall, coveredCost, daysBetween, WEEK, weekday, channelLabel, toneOf } from '../core.js';
+  scopeLines, scopeUsage, groupHash, dimLink, isSet, keyMatch, usageFiltered, usageAgg, callsOn, perCallCovered, perCall, coveredCost, daysBetween, WEEK, weekday, channelLabel, toneOf,
+  ccBudgetOf, hasCcBudgets, forecastOf, isCurrentMonth, budgetLevel } from '../core.js';
 import { columnChart, rankList, divergingList, segbar, legendList, legendHtml, bindLegend, bindActivate } from '../charts.js';
 import { table, dataBar } from '../table.js';
 import { billDimsHtml, keyModelMatrix } from './models.js';
+import { budgetTile } from './key.js';
 
 export const GROUP_DIMS = {
   ws: { label: '业务空间', icon: 'ws', when: () => true },
@@ -87,6 +89,16 @@ export function render(v) {
   // 单次平均费用只用有调用数据的日期的费用：按分组收集按日账单
   const dailyBy = new Map();
   for (const l of daily) { const g = of(l); let a = dailyBy.get(g); if (!a) dailyBy.set(g, a = []); a.push(l); }
+  /*
+   * 成本中心预算（按成本中心分组、统计周期为自然月时）：与预算告警一致，按应付金额统计整个成本中心本期的费用，
+   * 不受全局筛选与费用口径影响（筛选只决定列表中显示哪些成本中心）；本月进行中时附预计月末
+   */
+  const ccBud = dim === 'cc' && state.data.period.mode === 'month' && hasCcBudgets();
+  const ccFull = new Map(), ccDaily = new Map();
+  if (ccBud) {
+    for (const l of state.lines) { const g = of(l); ccFull.set(g, (ccFull.get(g) || 0) + l.pretax); }
+    if (isCurrentMonth()) for (const l of state.daily) { const g = of(l); let a = ccDaily.get(g); if (!a) ccDaily.set(g, a = []); a.push(l); }
+  }
   const gk = aggregate(lines, l => of(l) + SEP + DIMS.key.of(l));
   const topKeysOf = new Map();
   for (const a of sortedAggs(gk)) { const [g, k] = a.key.split(SEP); if (a.cost <= 0) continue; if (!topKeysOf.has(g)) topKeysOf.set(g, []); if (topKeysOf.get(g).length < 2) topKeysOf.get(g).push(k); }
@@ -98,7 +110,10 @@ export function render(v) {
     const pc = perCallCovered(us, dailyBy.get(id));
     const w = dim === 'ws' && id !== NO_WS ? state.workspaces.get(id) : null;
     const pset = provs.get(id) || new Set(w ? [w.provider || 'aliyun'] : dim === 'provider' ? [id] : []);
+    const budget = ccBud ? ccBudgetOf(id) : null, bUsed = budget ? ccFull.get(id) || 0 : 0;
+    const bFc = budget && isCurrentMonth() ? forecastOf(ccDaily.get(id) || [], l => l.pretax)?.value ?? null : null;
     return {
+      budget, bUsed, bFc, bPct: budget ? bUsed / budget : null,
       id, name: dimName(dim, id), sub: w ? id : '', deleted: !!w?.deletedAt, providers: [...pset],
       keys: mem.length, active: [...a.keys].filter(k => k !== NONE_KEY).length, cost: a.cost, prev: p?.cost || 0, chg: a.cost - (p?.cost || 0),
       share: total ? a.cost / total : 0, tokens: t, perM: t ? a.cost / t * 1e6 : null, hit: a.tIn ? a.tCache / a.tIn : null,
@@ -111,6 +126,8 @@ export function render(v) {
   const unassigned = NONE_OF[dim] ? rows.find(r => r.id === NONE_OF[dim]) : null;
   const hasUsage = rows.some(r => r.requests != null);
   const dimOpts = Object.fromEntries(dims.map(d => [d, GROUP_DIMS[d].label]));
+  const budRows = rows.filter(r => r.budget), overN = budRows.filter(r => r.bUsed >= r.budget).length;
+  const fcOverN = budRows.filter(r => r.bUsed < r.budget && r.bFc != null && r.bFc >= r.budget).length;
 
   v.innerHTML = `
     ${dims.length > 1 ? `<div class="page-tools"><span class="lbl">分组维度</span>${segCtl('grpBy', dimOpts, false)}<span class="muted">切换后各图表与明细按所选维度汇总；全局筛选同样生效</span></div>` : ''}
@@ -120,6 +137,7 @@ export function render(v) {
       <div><span>关联 API Key</span><b>${sum(rows, r => r.keys)}</b></div>
       <div><span>本期费用 · ${METRICS[ui.f.metric]}</span><b>${money(total)}</b></div>
       <div><span>最高占比</span><b title="${esc(withCost[0]?.name || '')}">${withCost[0] ? `${esc(withCost[0].name)} ${pct(withCost[0].cost, total)}` : '—'}</b></div>
+      ${budRows.length ? `<div title="整个成本中心本期的应付金额（不受全局筛选影响）与月度预算比较"><span>预算超支 / 已设预算</span><b class="${overN ? 'bad-text' : fcOverN ? 'warn-text' : ''}">${overN}<small class="muted"> / ${budRows.length}</small>${fcOverN ? `<small class="warn-text"> · 预计超支 ${fcOverN}</small>` : ''}</b></div>` : ''}
       ${unassigned ? `<div><span>${esc(dimName(dim, NONE_OF[dim]))}</span><b class="${unassigned.cost > 0 ? 'warn-text' : ''}">${money(unassigned.cost)}${total ? `<small class="muted"> ${pct(unassigned.cost, total)}</small>` : ''}</b></div>` : ''}
     </div>
     <div class="bi">
@@ -172,6 +190,15 @@ export function render(v) {
     { key: 'cost', label: `费用（${METRICS[ui.f.metric]}）`, align: 'r', fmt: x => dataBar(x, max), csv: r => r.cost.toFixed(6) },
     { key: 'chg', label: state.compareLabel, align: 'r', fmt: (x, r) => deltaPill(r.cost, r.prev), csv: r => r.chg.toFixed(6) },
     { key: 'share', label: '占比', align: 'r', fmt: x => (x ? (x * 100).toFixed(1) + '%' : '—'), csv: r => (r.share * 100).toFixed(2) + '%' },
+    ...(ccBud ? [{
+      key: 'bPct', label: '预算使用', align: 'r', title: '整个成本中心本期的应付金额（不受全局筛选影响）÷ 月度预算', sortVal: r => r.bPct ?? -1, csv: r => (r.budget ? (r.bPct * 100).toFixed(2) + '%' : ''),
+      fmt: (x, r) => {
+        if (!r.budget) return '<span class="muted">—</span>';
+        const lv = budgetLevel(r.bUsed, r.budget), fl = r.bFc != null ? budgetLevel(r.bFc, r.budget) : '';
+        const cls = l => (l === 'bad' ? 'bad-text' : l === 'warn' ? 'warn-text' : '');
+        return `<b class="${cls(lv)}">${(x * 100).toFixed(1)}%</b><span class="sub">${money(r.bUsed)} / ${money(r.budget)}</span>${r.bFc != null ? `<span class="sub ${cls(fl)}">预计月末 ${(r.bFc / r.budget * 100).toFixed(0)}%</span>` : ''}`;
+      },
+    }] : []),
     { key: 'tokens', label: '总 Token', align: 'r', fmt: x => (x ? compact(x) : '—'), csv: r => Math.round(r.tokens) },
     { key: 'perM', label: '¥/百万Token', align: 'r', fmt: x => (x == null ? '—' : money(x)), sortVal: r => r.perM ?? -1, csv: r => (r.perM == null ? '' : r.perM.toFixed(4)) },
     { key: 'hit', label: '缓存命中率', align: 'r', fmt: x => (x == null ? '—' : (x * 100).toFixed(1) + '%'), sortVal: r => r.hit ?? -1, csv: r => (r.hit == null ? '' : (r.hit * 100).toFixed(2) + '%') },
@@ -191,7 +218,8 @@ export function render(v) {
   const t = table('groups:' + dim, $('#gTbl', v), {
     sort: 'cost', pageSize: 100, caption: `${G.label}明细`, rowClass: r => (r.deleted ? 'deleted' : ''),
     onRowClick: r => app.go(groupHash(dim, r.id)), columns: cols, empty: `当前筛选下没有${G.label}`,
-    csvExtra: [{ label: `${G.label} ID`, val: r => r.id }, { label: '上期费用', val: r => r.prev.toFixed(6) }, { label: '云厂商', val: r => r.providers.map(p => PROVIDERS[p] || p).join('、') }],
+    csvExtra: [{ label: `${G.label} ID`, val: r => r.id }, { label: '上期费用', val: r => r.prev.toFixed(6) }, { label: '云厂商', val: r => r.providers.map(p => PROVIDERS[p] || p).join('、') },
+      ...(ccBud ? [{ label: '月度预算', val: r => (r.budget ? r.budget.toFixed(2) : '') }, { label: '本期应付（预算口径）', val: r => (r.budget ? r.bUsed.toFixed(6) : '') }, { label: '预计月末', val: r => (r.bFc != null ? r.bFc.toFixed(2) : '') }] : [])],
     footer: rs => cols.map(c => ({ name: `合计 ${rs.length} 个`, keys: String(sum(rs, r => r.keys)), cost: money(sum(rs, r => r.cost)), chg: deltaPill(sum(rs, r => r.cost), sum(rs, r => r.prev)), tokens: compact(sum(rs, r => r.tokens)), requests: hasUsage ? intFmt(sum(rs, r => r.requests || 0)) : '' }[c.key] ?? '')),
   }).setRows(rows);
   $('#csv', v).onclick = () => t.csv(`${G.label}费用_${periodTag()}.csv`);
@@ -302,6 +330,9 @@ export function renderDetail(v, arg) {
   const tokens = totalTokens(a), ptokens = totalTokens(pa);
   const perM = tokens ? a.cost / tokens * 1e6 : null, pPerM = ptokens ? pa.cost / ptokens * 1e6 : null;
   const hit = a.tIn ? a.tCache / a.tIn : null, pHit = pa.tIn ? pa.tCache / pa.tIn : null;
+  // 成本中心预算（自然月）：按应付金额比较，本月进行中时附预计月末（与预算告警口径一致）；设置了预算时替换“缓存命中率”指标卡
+  const ccBudget = dim === 'cc' && p.mode === 'month' ? ccBudgetOf(id) : null;
+  const ccFc = ccBudget && isCurrentMonth() ? forecastOf(daily, l => l.pretax)?.value ?? null : null;
   const memKeys = [...memberIds].filter(x => x !== NONE_KEY);
   const st = memKeys.map(k => keyStatus(k)[1]);
   const activeKeys = [...a.keys].filter(k => k !== NONE_KEY).length;
@@ -336,7 +367,8 @@ export function renderDetail(v, arg) {
       ${tile('key', '活跃 Key', `${activeKeys}<small>/ ${memKeys.length}</small>`, '', '', (top => (top ? `最高：${keyShort(top.key)} 占 ${pct(top.cost, a.cost)}` : '—'))(sortedAggs(aggregate(lines, DIMS.key.of)).filter(x => x.cost > 0)[0]))}
       ${tile('token', 'Token 总量', compact(tokens), deltaPill(tokens, ptokens, { neutral: true }), state.compareLabel, us && us.requests ? `请求 ${compact(us.requests)} 次 · 单次 ${intFmt(us.tokens / us.requests)} Token` : `输入 ${compact(a.tIn)} · 输出 ${compact(a.tOut)}`)}
       ${tile('unit', '每百万 Token 成本', perM == null ? '—' : money(perM), perM == null ? '' : deltaPill(perM, pPerM), perM == null ? '' : state.compareLabel, '费用 ÷ 总 Token × 10⁶')}
-      ${tile('cache', '缓存命中率', hit == null ? '—' : (hit * 100).toFixed(1) + '%', hit == null ? '' : deltaPill(hit, pHit, { pp: true, goodWhenUp: true }), hit == null ? '' : state.compareLabel, `${a.models.size} 个模型`)}
+      ${ccBudget ? budgetTile(a.pretax, ccBudget, ccFc)
+        : tile('cache', '缓存命中率', hit == null ? '—' : (hit * 100).toFixed(1) + '%', hit == null ? '' : deltaPill(hit, pHit, { pp: true, goodWhenUp: true }), hit == null ? '' : state.compareLabel, `${a.models.size} 个模型`)}
     </div></div>
     <div class="bi">
       <section class="panel c8"><div class="panel-h"><h3>每日费用</h3><span class="sub">按 API Key 堆叠 · 点击图例进入 Key 详情；点击柱查看当日明细，点击柱段只看该 Key</span></div><div class="legend" id="gdLegend"></div><div class="chart" id="gdDaily"></div></section>

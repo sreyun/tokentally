@@ -148,7 +148,16 @@ export const DEFAULT_BRANDING = { name: '大模型费用分析', subtitle: 'Toke
 
 const n0 = v => (v == null || v === '' ? null : v);
 const shiftDay = (d, n) => { const t = new Date(d + 'T00:00:00Z'); t.setUTCDate(t.getUTCDate() + n); return t.toISOString().slice(0, 10); };
-export const DEFAULT_BUDGETS = { monthly: null, alertPct: 80, keys: {} };
+/** 预算：月度总预算、预警阈值、API Key 预算（keys.__none__ 为无 API Key 的费用）、成本中心预算（costCenters） */
+export const DEFAULT_BUDGETS = { monthly: null, alertPct: 80, keys: {}, costCenters: {} };
+/**
+ * 成本中心预算中“未分配成本中心”的键（与前端 NO_CC 一致）：未设置成本中心的 Key 与无 API Key 的费用都计入它。
+ * 其余键为成本中心名称本身（key_tags.cost_center，最多 40 个字符）
+ */
+export const NO_CC = '__nocc__';
+export const MAX_CC_BUDGETS = 500;
+/** 成本中心名称规范化：与保存标签时一致（去掉首尾空白、最多 40 个字符、不切开表情） */
+export const ccKey = s => String(s ?? '').trim().slice(0, 40).replace(/[\uD800-\uDBFF]$/, '');
 /** 阿里云对未归属业务空间的 Key 可能返回 "-"，统一视为空 */
 const clean = v => (v == null || v === '-' ? '' : String(v));
 const jsonOrNull = v => (v == null ? null : JSON.stringify(v));
@@ -337,7 +346,12 @@ export class Store {
   /** 阿里云调用次数（百炼监控投递 → 云监控 Prometheus） */
   aliyunCallsSettings() { return { ...DEFAULT_CALLS, ...(this.getSetting('aliyunCalls', {}) || {}) }; }
   syncSettings() { return { ...DEFAULT_SYNC, ...(this.getSetting('sync', {}) || {}) }; }
-  budgets() { return { ...DEFAULT_BUDGETS, ...(this.getSetting('budgets', {}) || {}) }; }
+  budgets() {
+    const b = { ...DEFAULT_BUDGETS, ...(this.getSetting('budgets', {}) || {}) };
+    // v1.9.6 及之前保存的预算没有 costCenters；损坏的值按未设置处理
+    if (!b.costCenters || typeof b.costCenters !== 'object' || Array.isArray(b.costCenters)) b.costCenters = {};
+    return b;
+  }
   branding() { return { ...DEFAULT_BRANDING, ...(this.getSetting('branding', {}) || {}) }; }
 
   /* ---------------- users / sessions ---------------- */
@@ -548,6 +562,8 @@ export class Store {
 
   /* ---------------- 成本中心 / 负责人标签 ---------------- */
   listKeyTags() { return this.q('SELECT * FROM key_tags').all(); }
+  /** API Key → 成本中心（只含设置了成本中心的 Key；包括已删除 / 只在账单中出现的 Key 的标签，与前端口径一致） */
+  costCenterTags() { return new Map(this.q("SELECT api_key_id, cost_center FROM key_tags WHERE cost_center IS NOT NULL AND cost_center != ''").all().map(t => [t.api_key_id, t.cost_center])); }
   setKeyTag(id, { costCenter = '', owner = '', note = '' }, by = '') {
     // 截断时不切开表情等代理对（否则保存的是孤立的半个字符，页面、报表与邮件中显示为乱码）
     const cut = (s, n) => String(s || '').trim().slice(0, n).replace(/[\uD800-\uDBFF]$/, '');
@@ -731,6 +747,23 @@ export class Store {
     const month = this.q("SELECT COALESCE(api_key_id, '') AS id, SUM(pretax) AS cost FROM bill_lines WHERE granularity = 'M' AND period = ? GROUP BY COALESCE(api_key_id, '')").all(cycle);
     const daily = this.q("SELECT period AS day, SUM(pretax) AS cost FROM bill_lines WHERE granularity = 'D' AND period >= ? AND period <= ? GROUP BY period").all(cycle + '-01', cycle + '-31');
     return { month, daily };
+  }
+  /**
+   * 成本中心预算用：指定账期的月账单（应付）按 Key 当前的成本中心标签汇总（与业务分析“按成本中心”一致）；
+   * 未设置成本中心的 Key 与无 API Key 的费用计入 NO_CC。month 可传入 budgetUsage(cycle).month 避免重复查询。
+   * 返回 Map(成本中心 → { cost, members })：members 为该成本中心的 Key（未删除的 Key + 本期有费用的 Key，无 API Key 的费用记为 __none__），
+   * 用于判断限定范围的渠道是否接收该成本中心的预算告警
+   */
+  costCenterUsage(cycle, month = null) {
+    const tags = this.costCenterTags(), out = new Map();
+    const g = cc => out.get(cc) || out.set(cc, { cost: 0, members: new Set() }).get(cc);
+    for (const k of this.q('SELECT api_key_id FROM api_keys WHERE deleted_at IS NULL').all()) g(tags.get(k.api_key_id) || NO_CC).members.add(k.api_key_id);
+    for (const r of month || this.budgetUsage(cycle).month) {
+      const id = r.id || '', e = g((id && tags.get(id)) || NO_CC);
+      e.cost += r.cost || 0;
+      if (Math.abs(r.cost || 0) >= 0.005) e.members.add(id || '__none__');
+    }
+    return out;
   }
   /** 日报 / 周报 / 异常检测：日账单按 日 × Key 汇总（含 Token） */
   /** 按日 × Key 的费用；withWs 时再按账单行的业务空间分组（ws），供推送范围按与成本概览相同的规则过滤 */

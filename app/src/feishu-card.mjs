@@ -51,13 +51,16 @@ function headRow(head, share) {
     columns: [col(5, [h(head[0])]), col(3, [{ ...h(head[1]), text_align: 'right' }]), ...(share ? [col(2, [{ ...h(head[2]), text_align: 'right' }])] : [])],
   };
 }
-/** 排行行：名称（带灰色排名）/ 金额（右对齐加粗）/ 占比（右对齐灰色）；每行一个分栏，名称折行也不会错位 */
+/**
+ * 排行行：名称（带灰色排名）/ 金额（右对齐加粗）/ 占比（右对齐灰色）；每行一个分栏，名称折行也不会错位。
+ * r.sub（如成本中心的预算使用情况）以小字显示在名称下方，超支 / 达到预警阈值时着色
+ */
 function rankRows(rows) {
   const share = rows.some(r => r.share);
   return rows.map((r, i) => ({
     tag: 'column_set', flex_mode: 'none', horizontal_spacing: 'small',
     columns: [
-      col(5, [md(`${font('grey', String(i + 1))}　${safe(r.name)}`)]),
+      col(5, [md(`${font('grey', String(i + 1))}　${safe(r.name)}`), ...(r.sub?.text ? [md(font(COLOR[r.sub.level] || 'grey', safe(r.sub.text)), { text_size: 'notation' })] : [])]),
       col(3, [md(`**${safe(r.value)}**`, { text_align: 'right' })]),
       ...(share ? [col(2, [md(font('grey', safe(r.share || '')), { text_align: 'right' })])] : []),
     ],

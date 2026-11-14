@@ -95,7 +95,7 @@ export class ShareService {
 
 /**
  * 按推送范围过滤 /api/data 的数据：账单、上期、历史、调用量、Key 列表、业务空间、标签、活跃度、预算。
- * pred(row) 接收 { api_key_id, workspace_id }；限定范围时不返回月度总预算（总预算对应全部费用，与范围内费用不可比）
+ * pred(row) 接收 { api_key_id, workspace_id }；限定范围时不返回月度总预算与成本中心预算（对应范围外的费用，与范围内费用不可比）
  */
 export function filterData(out, pred) {
   if (!pred) return out;
@@ -120,6 +120,7 @@ export function filterData(out, pred) {
   out.extraTags = (out.extraTags || []).filter(t => keyIds.has(t.apiKeyId));
   out.keyActivity = (out.keyActivity || []).filter(a => keyIds.has(a.apiKeyId));
   const b = out.budgets || {};
-  out.budgets = { ...b, monthly: null, keys: Object.fromEntries(Object.entries(b.keys || {}).filter(([id]) => keyIds.has(id))) };
+  // 成本中心预算同样不返回：成本中心可能包含范围外的 Key，范围内只能看到它的部分费用，与整个成本中心的预算不可比
+  out.budgets = { ...b, monthly: null, keys: Object.fromEntries(Object.entries(b.keys || {}).filter(([id]) => keyIds.has(id))), costCenters: {} };
   return out;
 }

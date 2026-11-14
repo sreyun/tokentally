@@ -9,7 +9,7 @@ import zlib from 'node:zlib';
 import net from 'node:net';
 import crypto from 'node:crypto';
 import { config } from './config.mjs';
-import { Store, PROVIDERS } from './db.mjs';
+import { Store, PROVIDERS, NO_CC, MAX_CC_BUDGETS, ccKey } from './db.mjs';
 import { SyncService, todayIn, addDays, addMonths, isCycleFinal, hourIn, PROVIDER_LIST } from './sync.mjs';
 import { AlertService, ALERT_TYPES, EVENT_TYPES, MAX_CHANNELS, validateWebhook, cleanMobiles, isPrivateIp, cleanScope, cut, rejectedNote } from './alerts.mjs';
 import { selfTest, AliyunClient, explainAliyunError, callLog, MS_REGIONS, BSS_ENDPOINTS } from './aliyun.mjs';
@@ -22,7 +22,7 @@ import { ShareService, filterData, SHARE_DAYS } from './share.mjs';
 import { scopePredicate } from './overview-mail.mjs';
 import { loadMasterKey, hashPassword, verifyPassword, burnPasswordCheck, checkPasswordPolicy, randomPassword, maskId, sha256 } from './crypto.mjs';
 
-const VERSION = '1.9.6';
+const VERSION = '1.10.0';
 
 /* ===================================================================
  * 系统日志：所有运行日志同时输出到控制台并写入数据库（system_log，保留 SYSTEM_LOG_DAYS 天），
@@ -1134,15 +1134,21 @@ route('POST', '/api/admin/aliyun-calls/sync', async (req, res, ctx) => {
   store.audit(ctx.user.username, ctx.ip, 'aliyun.calls.sync', null);
   try { return json(req, res, 200, await sync.syncAliyunCalls()); } catch (e) { throw new HttpError(502, e.message); }
 }, { admin: true });
-/* 预算管理页：已保存的预算 + 上月按 Key 的应付金额（与页面当前选择的统计周期无关） */
+/*
+ * 预算管理页：已保存的预算 + 上月按 Key 的应付金额，以及上月 / 本月按成本中心的应付金额（按 Key 当前的成本中心标签汇总，
+ * 与成本中心预算告警口径一致）；均与页面当前选择的统计周期无关
+ */
 route('GET', '/api/admin/budgets', async (req, res) => {
-  const lastCycle = addMonths(todayIn(config.billTz).slice(0, 7), -1);
+  const cycle = todayIn(config.billTz).slice(0, 7), lastCycle = addMonths(cycle, -1);
   const lastMonth = {};
   for (const r of store.monthByKey(lastCycle)) lastMonth[r.id || '__none__'] = (lastMonth[r.id || '__none__'] || 0) + (r.cost || 0);
-  return json(req, res, 200, { budgets: store.budgets(), lastCycle, lastMonth });
+  // Object.fromEntries 为每个名称定义自有属性：名为 __proto__ 等的成本中心不会改动对象原型
+  const ccCost = c => Object.fromEntries([...store.costCenterUsage(c)].map(([cc, v]) => [cc, v.cost]));
+  return json(req, res, 200, { budgets: store.budgets(), cycle, lastCycle, lastMonth, ccLastMonth: ccCost(lastCycle), ccThisMonth: ccCost(cycle) });
 }, { admin: true });
 route('PUT', '/api/admin/budgets', async (req, res, ctx) => {
-  const b = await readJson(req, 256 * 1024); // 2000 个 Key 预算
+  const b = await readJson(req, 512 * 1024); // 2000 个 Key 预算 + 500 个成本中心预算（名称最多 40 字，中文 3 字节）
+  if (!obj(b) || (b.keys != null && !obj(b.keys)) || (b.costCenters != null && !obj(b.costCenters))) throw new HttpError(400, '预算格式不正确');
   const money = v => (v === '' || v == null ? null : (Number.isFinite(Number(v)) && Number(v) >= 0 && Number(v) < 1e10 ? Math.round(Number(v) * 100) / 100 : NaN));
   const monthly = money(b.monthly);
   if (Number.isNaN(monthly)) throw new HttpError(400, '月度总预算金额无效');
@@ -1155,9 +1161,21 @@ route('PUT', '/api/admin/budgets', async (req, res, ctx) => {
     if (m != null) keys[id] = m;
   }
   if (Object.keys(keys).length > 2000) throw new HttpError(400, '预算条目过多');
-  const next = { monthly, alertPct, keys };
+  // 成本中心预算：键为成本中心名称（与 Key 标签相同的规范化：去掉首尾空白、最多 40 字）或 NO_CC（未分配成本中心）
+  const cc = new Map();
+  for (const [raw, v] of Object.entries(b.costCenters || {})) {
+    const name = raw === NO_CC ? NO_CC : ccKey(raw);
+    if (!name || name.length < String(raw).trim().length) throw new HttpError(400, `成本中心名称无效（最多 40 个字符）：${cut(String(raw).trim(), 40) || '（空）'}`);
+    const m = money(v);
+    if (Number.isNaN(m)) throw new HttpError(400, `成本中心「${name === NO_CC ? '未分配成本中心' : name}」的预算金额无效`);
+    if (m != null) cc.set(name, m);
+  }
+  if (cc.size > MAX_CC_BUDGETS) throw new HttpError(400, `成本中心预算最多 ${MAX_CC_BUDGETS} 个`);
+  // 请求中没有 costCenters 字段（只认识总预算与 Key 预算的旧页面缓存或脚本）时保留已保存的成本中心预算，不能静默清空
+  const costCenters = Object.hasOwn(b, 'costCenters') ? Object.fromEntries(cc) : store.budgets().costCenters;
+  const next = { monthly, alertPct, keys, costCenters };
   store.setSetting('budgets', next);
-  store.audit(ctx.user.username, ctx.ip, 'budgets.update', { monthly, alertPct, keyBudgets: Object.keys(keys).length });
+  store.audit(ctx.user.username, ctx.ip, 'budgets.update', { monthly, alertPct, keyBudgets: Object.keys(keys).length, ccBudgets: Object.keys(costCenters).length });
   // 不立即推送：新的预算条件由定时检查（每 5 分钟 / 账单同步后）发送，与“保存配置只保存”的规则一致
   return json(req, res, 200, next);
 }, { admin: true });
@@ -1666,7 +1684,7 @@ function opDescribe(action, req, ctx, b = req.jsonBody || {}) {
     case 'sync.trigger': return { target: b.kind === 'bills' ? '账单' : 'API Key 与业务空间', detail: { provider: ostr(b.provider, 16) || 'all', cycles: Array.isArray(b.cycles) ? b.cycles.slice(0, 18).map(c => ostr(c, 7)) : undefined, force: !!b.force } };
     case 'alert.report': return { target: ostr(b.kind, 16), detail: { send: !!b.send } };
     case 'settings.update': case 'smtp.update': case 'network.update': case 'budget.update': case 'alert.update':
-      return { target: null, detail: { fields: Object.keys(b).filter(k => !SECRET_KEY.test(k)).slice(0, 20), ...(action === 'network.update' ? { ipSource: ostr(b.ipSource, 10), hops: b.hops } : {}), ...(action === 'budget.update' ? { monthly: b.monthly ?? null, keys: b.keys && typeof b.keys === 'object' ? Object.keys(b.keys).length : 0 } : {}) } };
+      return { target: null, detail: { fields: Object.keys(b).filter(k => !SECRET_KEY.test(k)).slice(0, 20), ...(action === 'network.update' ? { ipSource: ostr(b.ipSource, 10), hops: b.hops } : {}), ...(action === 'budget.update' ? { monthly: b.monthly ?? null, keys: b.keys && typeof b.keys === 'object' ? Object.keys(b.keys).length : 0, costCenters: b.costCenters && typeof b.costCenters === 'object' ? Object.keys(b.costCenters).length : 0 } : {}) } };
     case 'keytags.update': return { target: null, detail: { count: Array.isArray(b.items) ? b.items.length : 0 } };
     case 'backup.download': return { target: ostr(b.name, 120), detail: null };
     case 'share.create': return { target: ostr(b.title, 60) || (b.mode === 'range' ? `${ostr(b.from, 10)} ~ ${ostr(b.to, 10)}` : `账期 ${ostr(b.cycle, 7) || '本月'}`), detail: { days: b.days } };

@@ -3,7 +3,7 @@
  * 邮件渠道：消息内容之后附上完整的成本概览（日报为昨日所在账期、周报为上周、月报为上月、告警为本月）
  *
  * 事件：
- *  - budget   预算告警：达到预警阈值 / 超出预算 / 预计月末超出总预算 / API Key 预算（同一阈值每账期每渠道只通知一次）
+ *  - budget   预算告警：达到预警阈值 / 超出预算 / 预计月末超出总预算 / API Key 预算 / 成本中心预算（同一阈值每账期每渠道只通知一次）
  *  - anomaly  费用异常：昨日原价 ≥ 前 7 日原价日均 × 倍数 且 增量 ≥ 最小金额（整体与单个 Key；按原价判断，不受优惠集中抵扣影响）
  *  - sync     同步故障：某云厂商同一类同步连续失败 3 次；恢复后发送恢复通知
  *  - keyChange API Key 新增 / 删除 / 恢复
@@ -22,6 +22,7 @@ import { sendMail, parseRecipients, normalizeSmtp, SMTP_SECURITY } from './smtp.
 import { renderOverviewHtml, renderEmail, scopePredicate } from './overview-mail.mjs';
 import { feishuCard, feishuFormatError } from './feishu-card.mjs';
 import { feishuAppLink } from './share.mjs';
+import { NO_CC } from './db.mjs';
 
 /** 推送范围：全部 / 指定 API Key / 指定业务空间（最多 200 个） */
 export const SCOPE_TYPES = { all: '全部', key: '指定 API Key', ws: '指定业务空间' };
@@ -158,8 +159,11 @@ export const rejectedNote = res => (Array.isArray(res?.rejected) && res.rejected
   : null);
 /** 涨跌（飞书卡片着色用）：{ label, text: '+2.0%', dir: up / down / null } */
 const delta = (label, a, b) => ({ label, text: chg(a, b), dir: b > 0 && Math.abs(a - b) >= 0.005 ? (a > b ? 'up' : 'down') : null });
-/** 排行：[{ name, value, share }]；与文本消息中的“1. 名称 ¥金额（占比）”一一对应 */
-const topRows = (rows, n, nameOf, total) => rows.filter(r => r.cost > 0.005).sort((x, y) => y.cost - x.cost).slice(0, n).map(r => ({ name: nameOf(r), value: yuan(r.cost), share: pct(total ? r.cost / total * 100 : 0) }));
+/**
+ * 排行：[{ name, value, share, sub? }]；与文本消息中的“1. 名称 ¥金额（占比）”一一对应。
+ * extra(r) 可附加 sub: { text, level }（如成本中心的预算使用情况），飞书卡片显示在名称下方，文本消息接在行尾
+ */
+const topRows = (rows, n, nameOf, total, extra = null) => rows.filter(r => r.cost > 0.005).sort((x, y) => y.cost - x.cost).slice(0, n).map(r => ({ name: nameOf(r), value: yuan(r.cost), share: pct(total ? r.cost / total * 100 : 0), ...(extra ? extra(r) : {}) }));
 /**
  * 排行区块的表头与说明：kind = cost（费用，单位元）/ token（Token 用量）/ delta（增加金额）；basis 为占比的分母（如“昨日总费用”）。
  * 飞书卡片显示表头行与灰色说明，文本消息在小标题后注明，避免把占比误读为涨跌幅
@@ -168,7 +172,7 @@ const head = (kind, name, basis) => ({
   kind, head: kind === 'token' ? [name, 'Token 用量', '占比'] : kind === 'delta' ? [name, '增加金额（元）'] : [name, '费用（元）', '占比'],
   note: kind === 'delta' ? '按增加金额排序' : `按${kind === 'token' ? ' Token 用量' : '费用'}排序 · 占比 = 占${basis}`,
 });
-const rowLines = (rows, kind) => rows.map((r, i) => `${i + 1}. ${r.name} ${r.value}${kind === 'token' ? ' Token' : ''}${r.share ? `（占 ${r.share}）` : ''}`);
+const rowLines = (rows, kind) => rows.map((r, i) => `${i + 1}. ${r.name} ${r.value}${kind === 'token' ? ' Token' : ''}${r.share ? `（占 ${r.share}）` : ''}${r.sub?.text ? `，${r.sub.text}` : ''}`);
 /** 结构化分节 → 文本行（钉钉 / 企业微信 / 邮件 / 通用 Webhook / 通知记录使用） */
 const sectionLines = sections => sections.flatMap(s => (s.rows?.length ? ['', `#### ${s.title}${s.note ? `（${s.note}）` : ''}`, ...rowLines(s.rows, s.kind)] : s.items?.length ? ['', `#### ${s.title}`, ...s.items.map(i => i.text)] : []));
 /**
@@ -284,6 +288,22 @@ function checkResponse(type, { status, text }) {
   if (code != null && Number(code) !== 0) throw Object.assign(new Error(`${j.errmsg || j.msg || j.StatusMessage || '机器人返回错误'}（错误码 ${code}）`), { content: /length|exceed|content|长度|过长|invalid.*(markdown|msg)/i.test(String(j.errmsg || j.msg || '')) });
 }
 
+/**
+ * 限定范围的渠道是否接收某条预算告警：API Key 预算看该 Key 是否在范围内；成本中心预算要求该成本中心的 Key 全部在范围内
+ * （成本中心的费用含范围外的 Key 或无 API Key 的费用时不推送，与总预算只推送给“全部”范围的渠道同理）；总预算不推送给限定范围的渠道
+ */
+export function budgetInScope(item, scope) {
+  if (!scope) return true;
+  const k = /^key:([^:]*):/.exec(item.code);
+  if (k) return scope.keys.has(k[1]);
+  if (item.members) return item.members.length > 0 && item.members.every(id => scope.keys.has(id));
+  return false;
+}
+/** 成本中心预算告警的去重编码片段：名称可能含冒号，编码后放入 cc:<名称>:over|pct:...（孤立的代理字符先替换，避免 encodeURIComponent 抛错） */
+const ccCode = cc => encodeURIComponent(String(cc).toWellFormed());
+/** 成本中心的显示名称 */
+export const ccLabel = cc => (cc === NO_CC ? '未分配成本中心' : clean(cc) || '（空）');
+
 /** 告警卡片标题栏的状态标签 */
 function alertTag(event, level, n) {
   if (event === 'budget') return level === 'bad' ? { text: '已超支', level: 'bad' } : { text: '预算预警', level: 'warn' };
@@ -391,10 +411,10 @@ export class AlertService {
       const hourHit = e => hourPast && (e === 'anomaly' || e === 'daily' || (e === 'weekly' && weekday(today) === 1));
       const armed = Object.keys(EVENT_TYPES).filter(e => ch.events[e] && (!wasOn(e) || (scopeChanged && (e === 'budget' || e === 'anomaly')) || hourHit(e)));
       if (!armed.length) continue;
-      const scope = this.scopeOf(ch), keyOf = code => /^key:([^:]*):/.exec(code)?.[1] ?? null;
+      const scope = this.scopeOf(ch);
       const m = { ch: ch.id, cycle, at: Date.now(), events: armed, sent: [], syncSent: [], reports: {}, lastChangeId: null };
       for (const e of armed) {
-        if (e === 'budget') m.sent.push(...get('budget', () => this.evaluateBudget(today)).filter(i => !scope || scope.keys.has(keyOf(i.code))).map(i => i.code));
+        if (e === 'budget') m.sent.push(...get('budget', () => this.evaluateBudget(today)).filter(i => budgetInScope(i, scope)).map(i => i.code));
         else if (e === 'anomaly' && afterNew) m.sent.push(...get('anomaly:' + (scope?.sig || ''), () => this.evaluateAnomaly(today, scope)).map(i => i.code));
         else if (e === 'sync') m.syncSent.push(...get('sync', () => this.evaluateSync()).map(i => i.code));
         else if (e === 'keyChange') m.lastChangeId = get('maxChange', () => this.store.maxChangeId());
@@ -450,7 +470,8 @@ export class AlertService {
     // 展示时包含尚未合并的基线（检查进行中保存的配置），避免“当前满足条件、尚未通知”误列出不会补发的条目
     const st = this.mergeArm(this.stateFor(cycle), this.store.getSetting('alerts.arm', null));
     const budgetItems = this.evaluateBudget().filter(i => !i.hidden);
-    const subs = s.channels.filter(c => c.enabled && c.events.budget);
+    // “待通知”只列出会推送给某个渠道的条目：限定范围的渠道不接收范围外的 Key / 成本中心预算，也不接收总预算
+    const subs = s.channels.filter(c => c.enabled && c.events.budget).map(c => ({ c, scope: this.scopeOf(c) }));
     return {
       ...s,
       channels: s.channels.map(c => {
@@ -463,7 +484,7 @@ export class AlertService {
       eventTypes: EVENT_TYPES, maxChannels: MAX_CHANNELS,
       smtp: { ...this.smtpSettings(), passwordSet: this.smtpPasswordSet(), securities: SMTP_SECURITY },
       state: { cycle, history: (st.history || []).slice(0, 30) },
-      pending: budgetItems.filter(i => subs.some(c => !st.sent[c.id]?.[i.code])).map(i => strip(i.text)),
+      pending: budgetItems.filter(i => subs.some(({ c, scope }) => budgetInScope(i, scope) && !st.sent[c.id]?.[i.code])).map(i => strip(i.text)),
     };
   }
 
@@ -544,7 +565,9 @@ export class AlertService {
   evaluateBudget(today = todayIn(this.tz)) {
     const b = this.store.budgets(), s = this.settings(), cycle = today.slice(0, 7), r = s.rules;
     const hasKeys = r.keys && Object.keys(b.keys || {}).length;
-    if (!b.monthly && !hasKeys) return [];
+    // 成本中心预算：与 API Key 预算一样受“达到预警阈值 / 超出预算”开关控制（不受“包含 API Key 预算”影响）
+    const ccBudgets = (r.over || r.pct) ? Object.entries(b.costCenters || {}).map(([k, v]) => [k, Number(v)]).filter(([, v]) => v > 0) : [];
+    if (!b.monthly && !hasKeys && !ccBudgets.length) return [];
     const { month, daily } = this.store.budgetUsage(cycle);
     const cost = new Map(month.map(x => [x.id || '', x.cost || 0]));
     const total = month.reduce((x, y) => x + (y.cost || 0), 0);
@@ -557,6 +580,17 @@ export class AlertService {
       if (r.forecast && total < b.monthly) {
         const fc = this.forecast(daily, cycle, today);
         if (fc != null && fc >= b.monthly) items.push({ code: `total:forecast:${b.monthly}`, level: 'warn', tag: '预测超支', text: `**预计月末超出总预算**：按日均推算 ${yuan(fc)}，预算 ${yuan(b.monthly)}（超出 ${yuan(fc - b.monthly)}）` });
+      }
+    }
+    // 成本中心预算排在 API Key 预算之前：Key 预算条目可能很多，消息超长时从末尾删减，不能挤掉部门级的告警。
+    // 费用 = 本月月账单按 Key 当前的成本中心标签汇总；members 用于限定范围渠道的过滤（budgetInScope），不出现在消息中
+    if (ccBudgets.length) {
+      const usage = this.store.costCenterUsage(cycle, month);
+      for (const [cc, budget] of ccBudgets) {
+        const u = usage.get(cc), c = u?.cost || 0, used = c / budget * 100, members = [...(u?.members || [])];
+        const name = cc === NO_CC ? '未分配成本中心的费用' : `成本中心「${ccLabel(cc)}」`, code = ccCode(cc);
+        if (r.over && c >= budget) items.push({ code: `cc:${code}:over:${budget}`, level: 'bad', tag: '超支', members, text: `**${name}已超出预算**：${yuan(c)} / ${yuan(budget)}（${pct(used)}）` });
+        if (r.pct && used >= alertPct) items.push({ code: `cc:${code}:pct:${alertPct}:${budget}`, level: 'warn', tag: '预警', hidden: r.over && c >= budget, members, text: `**${name}预算已用 ${pct(used)}**：${yuan(c)} / ${yuan(budget)}` });
       }
     }
     if (hasKeys) {
@@ -777,10 +811,23 @@ export class AlertService {
     const hasTok = ct > 0 || ot > 0;
     if (hasTok) lines.push(`${cycle} Token ${tok(ct)}，较上月 ${chg(ct, ot)}，日均 ${tok(ct / mdays)}${ct > 0 ? `，单位成本 ${perM(c, ct)}` : ''}`);
     const byModelM = this.store.monthByModel(cycle);
-    const cc = sumBy(rows, r => clean(keys.get(r.id)?.tag?.cost_center) || '未分配成本中心');
+    // 按成本中心：按 Key 当前的成本中心标签汇总（与成本中心预算告警、业务分析一致），设置了预算的成本中心附上预算使用情况
+    const ccTags = this.store.costCenterTags();
+    const cc = sumBy(rows, r => (r.id && ccTags.get(r.id)) || NO_CC);
+    const ccB = b.costCenters || {}, ccBudget = k => (Object.hasOwn(ccB, k) && Number(ccB[k]) > 0 ? Number(ccB[k]) : null);
+    const ccSub = r => {
+      const bud = ccBudget(r.k);
+      if (!bud) return {};
+      const used = r.cost / bud * 100;
+      return { sub: { text: `预算 ${yuan(bud)}，${r.cost > bud ? `超出 ${yuan(r.cost - bud)}` : `已用 ${pct(used)}`}`, level: used >= 100 ? 'bad' : used >= alertPct ? 'warn' : null } };
+    };
+    const ccCost = new Map(cc.map(x => [x.k, x.cost]));
+    const ccSet = Object.keys(ccB).filter(k => ccBudget(k)), ccOver = ccSet.filter(k => (ccCost.get(k) || 0) > ccBudget(k)).sort((x, y) => ((ccCost.get(y) || 0) - ccBudget(y)) - ((ccCost.get(x) || 0) - ccBudget(x)));
+    const ccNote = ccSet.length ? `成本中心预算 ${ccSet.length} 个，${ccOver.length ? `${ccOver.length} 个超出：${ccOver.slice(0, 3).map(k => `${ccLabel(k)} 超出 ${yuan((ccCost.get(k) || 0) - ccBudget(k))}`).join('、')}${ccOver.length > 3 ? ` 等 ${ccOver.length} 个` : ''}` : '均未超出'}` : null;
+    if (ccNote) lines.push(ccNote);
     const sections = [
       { title: 'API Key Top 5', rows: topRows(sumBy(rows, r => r.id).map(x => ({ id: x.k, cost: x.cost })), 5, r => this.keyName(r.id, keys), c), ...head('cost', 'API Key', `${cycle} 总费用`) },
-      { title: '按成本中心', rows: cc.length > 1 || (cc[0] && cc[0].k !== '未分配成本中心') ? topRows(cc, 6, r => r.k, c) : [], ...head('cost', '成本中心', `${cycle} 总费用`) },
+      { title: '按成本中心', rows: cc.length > 1 || (cc[0] && cc[0].k !== NO_CC) ? topRows(cc, 6, r => ccLabel(r.k), c, ccSub) : [], ...head('cost', '成本中心', `${cycle} 总费用`) },
       { title: '模型 Top 3', rows: topRows(byModelM, 3, r => clean(r.model), c), ...head('cost', '模型', `${cycle} 总费用`) },
       { title: 'Token 用量 · API Key Top 5', rows: tokRows(sumBy(rows, r => r.id).map(x => ({ id: x.k, tokens: x.tokens })), 5, r => this.keyName(r.id, keys), ct), ...head('token', 'API Key', `${cycle} 总 Token`) },
       { title: 'Token 用量 · 模型 Top 3', rows: tokRows(byModelM, 3, r => clean(r.model), ct), ...head('token', '模型', `${cycle} 总 Token`) },
@@ -789,10 +836,10 @@ export class AlertService {
     const d = delta('较上月', c, o), last = addDays(addMonths(cycle, 1) + '-01', -1);
     const mdaily = this.store.dailyByKey(cycle + '-01', last);
     const doc = {
-      tags: [dirTag(d), b.monthly && c > b.monthly ? { text: '超出预算', level: 'bad' } : null],
+      tags: [dirTag(d), b.monthly && c > b.monthly ? { text: '超出预算', level: 'bad' } : null, ...(ccOver.length ? [{ text: `${ccOver.length} 个成本中心超支`, level: 'bad' }] : [])],
       kpis: [{ label: `${cycle} 应付（元）`, value: yuan(c), delta: d }, ...(g > 0.005 ? [{ label: '原价（元）', value: yuan(g), sub: g - c >= 0.005 ? `优惠 ${yuan(g - c)}` : '无优惠抵扣' }] : []), ...budgetKpi(c, '预算使用率')],
       usage: hasTok ? [{ label: `${cycle} Token`, value: tok(ct), delta: udelta('较上月', ct, ot) }, { label: '日均 Token', value: tok(ct / mdays) }, { label: '单位成本（元）', value: perMv(c, ct), sub: '每百万 Token' }] : null,
-      notes: ps ? [ps] : [], sections,
+      notes: [ps, ccNote].filter(Boolean), sections,
       chart: dailyChart(`${cycle} 每日费用（元）`, mdaily, cycle + '-01', last, () => '每日应付', { 每日应付: BLUE }),
       tokenChart: hasTok ? tokenChart(`${cycle} 每日 Token`, mdaily, cycle + '-01', last, () => '每日 Token', { '每日 Token': TEAL }) : null,
     };
@@ -848,9 +895,9 @@ export class AlertService {
         st.syncSent[ch.id] ||= {};
         st.reports[ch.id] ||= {};
         const sentMap = code => (/^sync(ok)?:/.test(code) ? st.syncSent[ch.id] : st.sent[ch.id]);
-        // 推送范围：预算告警只保留范围内 Key 的预算（总预算属于全部范围）；费用异常按范围重新计算；Key 变更只推送范围内的 Key
+        // 推送范围：预算告警只保留范围内 Key 的预算与 Key 全部在范围内的成本中心预算（总预算属于全部范围）；
+        // 费用异常按范围重新计算；Key 变更只推送范围内的 Key
         const scope = this.scopeOf(ch);
-        const keyOf = code => { const m = /^key:([^:]*):/.exec(code); return m ? m[1] : null; };
         const tag = scope ? `（${scope.label}）` : '';
         const msgs = [];
         const alertMsg = (event, title, items, path) => {
@@ -863,7 +910,7 @@ export class AlertService {
           msgs.push({ event, title, level, lines: show.map(i => i.text), doc, codes: fresh.map(i => i.code), mention: EVENT_TYPES[event].mention && level !== 'good', path });
         };
         // 消息中的“查看详情”直达对应页面与统计周期（地址中带周期参数，打开即为下钻后的视图）
-        if (ch.events.budget) alertMsg('budget', `预算告警 · ${cycle}${tag}`, scope ? get('budget', () => this.evaluateBudget(today)).filter(i => scope.keys.has(keyOf(i.code))) : get('budget', () => this.evaluateBudget(today)), `#/keys?cycle=${cycle}`);
+        if (ch.events.budget) alertMsg('budget', `预算告警 · ${cycle}${tag}`, get('budget', () => this.evaluateBudget(today)).filter(i => budgetInScope(i, scope)), `#/keys?cycle=${cycle}`);
         if (ch.events.anomaly && afterHour) alertMsg('anomaly', `费用异常提醒 · ${addDays(today, -1)}${tag}`, scope ? get('anomaly:' + scope.sig, () => this.evaluateAnomaly(today, scope)) : get('anomaly', () => this.evaluateAnomaly(today)), `#/keys?from=${addDays(today, -1)}&to=${addDays(today, -1)}`);
         if (ch.events.sync) alertMsg('sync', '数据同步告警', get('sync', () => this.evaluateSync()), '#/admin/sync');
         if (ch.events.keyChange) {

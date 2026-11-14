@@ -120,7 +120,7 @@ export const state = {
   status: null, data: null, loadedAt: 0, loading: false,
   workspaces: new Map(), apiKeys: new Map(),
   lines: [], daily: [], prev: [], prevFull: [], prevDaily: [], history: [],
-  keyActivity: new Map(), budgets: { monthly: null, alertPct: 80, keys: {} }, changes: null,
+  keyActivity: new Map(), budgets: { monthly: null, alertPct: 80, keys: {}, costCenters: {} }, changes: null,
   compareLabel: '', compareRange: '', currency: 'CNY',
   colors: { key: new Map(), model: new Map(), ws: new Map() },
   providers: [], usage: new Map(), usageRows: [],
@@ -300,7 +300,7 @@ export function applyData(d) {
     dd.requests += u.requests; dd.fails += u.fails; dd.tokens += u.tokens; k.days.set(u.day, dd);
     state.usage.set(u.apiKeyId, k);
   }
-  state.budgets = { monthly: null, alertPct: 80, keys: {}, ...(d.budgets || {}) };
+  state.budgets = { monthly: null, alertPct: 80, keys: {}, costCenters: {}, ...(d.budgets || {}) };
   state.changes = null; // 变更记录缓存随数据刷新失效：同步检测到的新变更要在 Key / 业务空间详情中可见
   state.compareLabel = d.period.mode === 'month' ? (usePrevMtd ? '较上月同期' : '较上月') : '较上一周期';
   state.compareRange = usePrevMtd ? d.period.prevMtdLabel : d.period.prevLabel;
@@ -667,6 +667,12 @@ export function forecastOf(dailyLines, valFn = metricVal) {
 }
 /** 预算按应付金额（税前）计；keyId 为空表示整体月度预算 */
 export const budgetOf = keyId => (keyId ? state.budgets.keys?.[keyId] ?? null : state.budgets.monthly ?? null);
+/**
+ * 成本中心月度预算（应付金额）：cc 为成本中心名称或 NO_CC（未分配成本中心，含无 API Key 的费用）；未设置时为 null。
+ * 用 hasOwn 取值：成本中心名称是自由文本，名为 constructor / toString 等时不能取到原型上的属性
+ */
+export const ccBudgetOf = cc => { const m = state.budgets.costCenters; return m && Object.hasOwn(m, cc) && Number(m[cc]) > 0 ? Number(m[cc]) : null; };
+export const hasCcBudgets = () => Object.values(state.budgets.costCenters || {}).some(v => Number(v) > 0);
 export function budgetLevel(value, budget) {
   if (!budget) return '';
   const p = value / budget * 100;

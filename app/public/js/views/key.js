@@ -198,7 +198,8 @@ export function render(v, id) {
   loadChanges(v, id);
 }
 
-function budgetTile(used, budget, fcv) {
+/** 月度预算指标卡（Key 详情、成本中心详情共用）：已用比例、进度条、预计月末或剩余 */
+export function budgetTile(used, budget, fcv) {
   const p = used / budget * 100, lv = budgetLevel(used, budget), fl = fcv != null ? budgetLevel(fcv, budget) : '';
   const color = lv === 'bad' ? 'var(--crit)' : lv === 'warn' ? 'var(--warn)' : 'var(--accent)';
   const cls = x => (x === 'bad' ? 'bad-text' : x === 'warn' ? 'warn-text' : '');

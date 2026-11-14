@@ -441,8 +441,8 @@ async function budgets(el) {
   const [{ alerts: al }, bd] = await Promise.all([http('GET', '/api/admin/settings'), http('GET', '/api/admin/budgets'), app.whenData()]);
   if (!state.data) throw new Error('账单与 API Key 数据尚未加载成功。为避免覆盖已保存的预算，请刷新页面后再编辑。');
   const b = bd.budgets;
-  state.budgets = { monthly: null, alertPct: 80, keys: {}, ...b };
-  const lastCycle = bd.lastCycle;
+  state.budgets = { monthly: null, alertPct: 80, keys: {}, costCenters: {}, ...b };
+  const lastCycle = bd.lastCycle, curCycle = bd.cycle;
   // 上月费用由服务端按账期账单汇总，与页面当前选择的统计周期无关
   const lastMonth = new Map(Object.entries(bd.lastMonth || {}));
   const keys = [...state.apiKeys.values()].filter(k => k.source !== 'deleted' || b.keys?.[k.apiKeyId] != null);
@@ -461,6 +461,19 @@ async function budgets(el) {
   const visible = () => rows.filter(r => match(r));
   const totalLast = sum([...lastMonth.values()], x => x);
   const subs = al.channels.filter(c => c.enabled && c.events.budget);
+  /*
+   * 成本中心预算：成本中心来自 Key 的本地标签（Key 数按 Key 列表中未删除的 Key 统计）；上月 / 本月费用由服务端按 Key 当前的
+   * 成本中心标签汇总（与成本中心预算告警口径一致）。已设置预算、但当前没有 Key 也没有费用的成本中心（如已改名）同样保留为一行，
+   * 避免保存时被静默删除
+   */
+  const ccLast = new Map(Object.entries(bd.ccLastMonth || {})), ccThis = new Map(Object.entries(bd.ccThisMonth || {}));
+  const ccSaved = b.costCenters || {}, ccKeys = new Map();
+  for (const k of state.apiKeys.values()) if (k.source !== 'deleted') ccKeys.set(k.costCenter || NO_CC, (ccKeys.get(k.costCenter || NO_CC) || 0) + 1);
+  const ccRows = [...new Set([...ccKeys.keys(), ...ccLast.keys(), ...ccThis.keys(), ...Object.keys(ccSaved)])]
+    .map(id => ({ id, name: id === NO_CC ? '（未分配成本中心）' : id, keys: ccKeys.get(id) || 0, last: ccLast.get(id) || 0, cur: ccThis.get(id) || 0, budget: Object.hasOwn(ccSaved, id) ? ccSaved[id] : '' }))
+    .filter(r => r.keys || Math.abs(r.last) >= 0.005 || Math.abs(r.cur) >= 0.005 || r.budget !== '');
+  const ccOn = ccRows.some(r => r.id !== NO_CC || r.budget !== '');
+  const ccLv = (cost, bud) => { const p = Number(bud) > 0 ? cost / Number(bud) * 100 : null; return p == null ? null : { p, cls: p >= 100 ? 'bad-text' : p >= (Number(state.budgets.alertPct) || 80) ? 'warn-text' : 'muted' }; };
   el.innerHTML = `<div class="bi">
     <section class="panel c4"><div class="panel-h"><h3>月度总预算</h3>${help('预算按自然月的应付金额（税前，多云合计）计算。设置后在成本概览显示使用率与月末预测，并在超出或预计超出时给出提醒。')}</div>
       <form id="bForm" class="form-grid" style="grid-template-columns:1fr">
@@ -471,7 +484,10 @@ async function budgets(el) {
       </form>
       <div class="notice ${subs.length ? 'info' : 'warn'}" style="margin:14px 0 0">${icon('bell')}<div><b>${subs.length ? `预算告警将推送到 ${subs.length} 个渠道` : '尚未配置预算告警推送'}</b><span class="why">${subs.length ? esc(subs.map(c => c.name).join('、')) : '可推送到钉钉、飞书、企业微信群机器人或通用 Webhook。'}</span><button class="link" data-go="#/admin/alerts">前往告警通知 →</button></div></div>
     </section>
-    <section class="panel c8"><div class="panel-h"><h3>API Key 月度预算</h3><span class="sub">留空表示不设预算</span>
+    <section class="panel c8"><div class="panel-h"><h3>成本中心月度预算</h3>${help('按 Key 当前的成本中心汇总自然月的应付金额（税前，多云合计）；“未分配成本中心”包含未设置成本中心的 Key 与无 API Key 的费用。达到预警阈值或超出预算时推送预算告警（同一阈值每账期每渠道只通知一次）；限定范围的通知渠道只接收 Key 全部在范围内的成本中心。')}<span class="sub">留空表示不设预算</span>
+      ${ccOn ? `<div class="actions"><button class="btn sm" id="ccFill" title="为未设置预算的成本中心按上月费用 × 1.2 填入建议值（取整到元）">按上月 ×1.2 填充空白</button><button class="btn sm primary" id="saveCc">保存</button></div>` : ''}</div>
+      ${ccOn ? '<div id="ccTbl"></div>' : `<div class="nodata" style="padding:18px 0">尚未为 API Key 设置成本中心<span class="why" style="display:block;margin-top:6px">在“Key 分析 → 归属设置”中为 Key 指定成本中心后，可在这里按部门 / 项目设置月度预算。</span><button class="link" data-go="#/keys">前往 Key 分析 →</button></div>`}</section>
+    <section class="panel c12"><div class="panel-h"><h3>API Key 月度预算</h3><span class="sub">留空表示不设预算</span>
       <div class="actions"><button class="btn sm" id="fill" title="为当前列表中未设置预算的 Key 按上月费用 × 1.2 填入建议值（取整到元）">按上月 ×1.2 填充空白</button><button class="btn sm" id="clear" title="清空当前列表中 Key 的预算输入">清空</button><button class="btn sm primary" id="saveB">保存</button></div></div>
       <div class="row bud-tools" id="bTools"></div>
       <div id="bTbl"></div><div class="panel-foot" id="bDirty"></div></section></div>`;
@@ -521,11 +537,35 @@ async function budgets(el) {
     toast(val === '' ? `已清空 ${vis.length} 个 Key 的预算输入，确认后请保存` : `已为 ${vis.length} 个 Key 填入预算 ${money(Number(val))}，确认后请保存`);
   });
   // 输入值实时写回行数据：排序重绘表格时不会丢失尚未保存的输入
-  const markDirty = () => { app.dirty = true; $('#bDirty', el).innerHTML = '<span class="warn-text">有未保存的修改</span> · 按 Enter 或点击“保存”生效'; };
+  // 未保存提示同时显示在成本中心与 API Key 两个面板底部（三处输入共用一次保存）
+  const markDirty = () => { app.dirty = true; el.querySelectorAll('#bDirty, #ccDirty').forEach(d => { d.innerHTML = '<span class="warn-text">有未保存的修改</span> · 按 Enter 或点击“保存”生效'; }); };
   const syncInputs = () => el.querySelectorAll('[data-bk]').forEach(i => { const r = rows.find(x => x.id === i.dataset.bk); if (r) i.value = r.budget; });
   $('#bTbl', el).addEventListener('input', e => { const i = e.target.closest('[data-bk]'); if (!i) return; const r = rows.find(x => x.id === i.dataset.bk); if (r) r.budget = i.value; markDirty(); });
   $('#bForm', el).addEventListener('input', markDirty);
-  el.addEventListener('keydown', e => { if (e.key === 'Enter' && e.target.matches('[data-bk]')) { e.preventDefault(); $('#bForm', el).requestSubmit(); } });
+  el.addEventListener('keydown', e => { if (e.key === 'Enter' && e.target.matches('[data-bk], [data-cb]')) { e.preventDefault(); $('#bForm', el).requestSubmit(); } });
+  // 成本中心预算表（名称为自由文本：输入框用 data-cb 存放名称，取回时由浏览器解码，不拼接进选择器）
+  if (ccOn) {
+    const cbt = table('ccBudgets', $('#ccTbl', el), {
+      sort: 'cur', pageSize: 0, maxHeight: '42vh', caption: '成本中心预算', empty: '没有成本中心',
+      columns: [
+        { key: 'name', label: '成本中心', fmt: (x, r) => `<b style="font-weight:600">${esc(x)}</b>${r.id === NO_CC ? '<span class="sub">未设置成本中心的 Key 与无 API Key 的费用</span>' : r.keys ? '' : '<span class="sub">当前没有 Key 使用该成本中心</span>'}` },
+        { key: 'keys', label: 'API Key', align: 'r', title: 'Key 列表中（未删除）设置为该成本中心的 Key 数' },
+        { key: 'last', label: `上月（${lastCycle}）`, align: 'r', fmt: x => money(x) },
+        { key: 'cur', label: `本月（${curCycle}）`, align: 'r', fmt: (x, r) => { const lv = ccLv(x, r.budget); return money(x) + (lv ? `<span class="sub ${lv.cls}">已用 ${lv.p.toFixed(1)}%</span>` : ''); } },
+        { key: 'budget', label: '月度预算（元）', sortable: false, fmt: (x, r) => `<input class="inp sm" type="number" min="0" step="0.01" data-cb="${esc(r.id)}" value="${esc(x)}" placeholder="不设置" style="width:130px" aria-label="${esc(r.name)} 月度预算">` },
+      ],
+      footer: rs => ['name', 'keys', 'last', 'cur', 'budget'].map(k => ({ name: `合计 ${rs.length} 个`, keys: String(sum(rs, r => r.keys)), last: money(sum(rs, r => r.last)), cur: money(sum(rs, r => r.cur)), budget: (s => (s ? `预算合计 ${money(s)}` : ''))(sum(rs, r => (Number(r.budget) > 0 ? Number(r.budget) : 0))) }[k] ?? '')),
+    }).setRows(ccRows);
+    $('#ccTbl', el).insertAdjacentHTML('afterend', '<div class="panel-foot" id="ccDirty"></div>');
+    $('#ccTbl', el).addEventListener('input', e => { const i = e.target.closest('[data-cb]'); if (!i) return; const r = ccRows.find(x => x.id === i.dataset.cb); if (r) r.budget = i.value; markDirty(); });
+    $('#ccFill', el).onclick = () => {
+      let n = 0;
+      ccRows.forEach(r => { if (r.budget === '' && r.last > 0) { r.budget = Math.ceil(r.last * 1.2); n++; } });
+      if (!n) return toast('没有可填充的空白项（上月无费用或已设置）');
+      cbt.setRows(ccRows); markDirty(); toast(`已为 ${n} 个成本中心填入建议预算，确认后请保存`);
+    };
+    $('#saveCc', el).onclick = () => $('#bForm', el).requestSubmit();
+  }
   $('#fill', el).onclick = () => { let n = 0; visible().forEach(r => { if (r.budget === '' && r.last > 0) { r.budget = Math.ceil(r.last * 1.2); n++; } }); syncInputs(); if (n) { markDirty(); toast(`已为 ${n} 个 Key 填入建议预算，确认后请保存`); } else toast('没有可填充的空白项（上月无费用或已设置）'); };
   $('#clear', el).onclick = () => { const vis = visible(); if (!vis.some(r => r.budget !== '')) return; if (!confirm(`清空${vis.length < rows.length ? `当前列表中 ${vis.length} 个` : '所有'} API Key 的预算输入？保存后生效。`)) return; vis.forEach(r => { r.budget = ''; }); syncInputs(); markDirty(); };
   $('#saveB', el).onclick = () => $('#bForm', el).requestSubmit();
@@ -535,11 +575,15 @@ async function budgets(el) {
     const keysB = {};
     rows.forEach(r => { if (r.budget !== '' && r.budget != null) keysB[r.id] = r.budget; });
     if (Object.keys(keysB).length > 2000) return toast(`最多为 2000 个 Key 设置预算（当前 ${Object.keys(keysB).length} 个），请缩小批量设置的范围`, 'err', 5000);
+    // Object.fromEntries：名为 __proto__ 的成本中心也作为普通键提交
+    const ccB = ccRows.filter(r => r.budget !== '' && r.budget != null).map(r => [r.id, r.budget]);
+    if (ccB.length > 500) return toast(`最多为 500 个成本中心设置预算（当前 ${ccB.length} 个）`, 'err', 5000);
     try {
-      state.budgets = await http('PUT', '/api/admin/budgets', { monthly: fd.get('monthly'), alertPct: fd.get('alertPct'), keys: keysB });
+      state.budgets = await http('PUT', '/api/admin/budgets', { monthly: fd.get('monthly'), alertPct: fd.get('alertPct'), keys: keysB, costCenters: Object.fromEntries(ccB) });
       app.dirty = false;
-      $('#bDirty', el).textContent = '';
-      toast(`预算已保存（总预算${state.budgets.monthly != null ? ' ' + money(state.budgets.monthly) : '未设置'}，${Object.keys(state.budgets.keys).length} 个 Key）`);
+      el.querySelectorAll('#bDirty, #ccDirty').forEach(d => { d.textContent = ''; });
+      const nCc = Object.keys(state.budgets.costCenters || {}).length;
+      toast(`预算已保存（总预算${state.budgets.monthly != null ? ' ' + money(state.budgets.monthly) : '未设置'}，${Object.keys(state.budgets.keys).length} 个 Key${nCc ? `，${nCc} 个成本中心` : ''}）`);
       app.reload();
     } catch (ex) { toast('保存失败：' + ex.message, 'err', 4000); }
   };
@@ -570,7 +614,7 @@ function cardPreview(r) {
     const max = Math.max(1e-9, ...c.values.map(v => v.v)), unit = /Token/.test(c.title) ? ` ${c.unit && c.unit !== '个' ? c.unit + ' ' : ''}Token` : ' 元';
     return `<div class="fc-sec">${esc(c.title)}</div><div class="fc-chart" role="img" aria-label="${esc(c.title)}">${c.values.map(v => `<i style="height:${Math.max(2, v.v / max * 100).toFixed(1)}%;background:${esc(c.colors?.[v.k] || '#3370FF')}" title="${esc(v.d)} · ${esc(v.v.toLocaleString('zh-CN', { maximumFractionDigits: 2 }))}${unit}"></i>`).join('')}</div>`;
   };
-  const secs = (d.sections || []).filter(s => s.rows?.length || s.items?.length).map(s => `<div class="fc-sec">${esc(s.title)}${s.note ? `<span class="fc-sub">${esc(s.note)}</span>` : ''}</div>${s.rows?.length ? `<div class="fc-rows">${s.head ? `<div class="fc-head"><em></em><span>${esc(s.head[0])}</span><b>${esc(s.head[1])}</b><small>${esc(s.head[2] || '')}</small></div>` : ''}${s.rows.map((x, i) => `<div><em>${i + 1}</em><span>${esc(x.name)}</span><b>${esc(x.value)}</b><small>${esc(x.share || '')}</small></div>`).join('')}</div>` : s.items.map(i => `<div class="fc-item"><span class="pill ${TONE[i.level] || 'info'}">${esc(i.tag || '提示')}</span> ${md(i.text)}</div>`).join('')}`).join('');
+  const secs = (d.sections || []).filter(s => s.rows?.length || s.items?.length).map(s => `<div class="fc-sec">${esc(s.title)}${s.note ? `<span class="fc-sub">${esc(s.note)}</span>` : ''}</div>${s.rows?.length ? `<div class="fc-rows">${s.head ? `<div class="fc-head"><em></em><span>${esc(s.head[0])}</span><b>${esc(s.head[1])}</b><small>${esc(s.head[2] || '')}</small></div>` : ''}${s.rows.map((x, i) => `<div><em>${i + 1}</em><span>${esc(x.name)}${x.sub?.text ? `<i class="fc-rsub ${TXT[x.sub.level] || ''}">${esc(x.sub.text)}</i>` : ''}</span><b>${esc(x.value)}</b><small>${esc(x.share || '')}</small></div>`).join('')}</div>` : s.items.map(i => `<div class="fc-item"><span class="pill ${TONE[i.level] || 'info'}">${esc(i.tag || '提示')}</span> ${md(i.text)}</div>`).join('')}`).join('');
   return `<div class="fc"><div class="fc-h"><div><b>${esc(r.title)}</b>${tags}</div>${r.empty ? '<span class="pill neutral">无费用，定时发送时将跳过</span>' : ''}</div>
     <div class="fc-b">${panel(d.kpis)}${panel(d.usage)}${(d.notes || []).map(n => `<div class="fc-note">${esc(n)}</div>`).join('')}${chart(d.chart)}${chart(d.tokenChart)}${secs}</div>
     <div class="fc-f muted">飞书卡片预览 · 钉钉 / 企业微信 / 邮件为文本消息，内容相同</div></div>`;
@@ -602,7 +646,7 @@ async function alerts(el) {
             <span class="sp"></span><button class="btn sm" data-ch-test="${esc(c.id)}">${icon('send')}测试</button><button class="btn sm" data-ch-edit="${esc(c.id)}">${icon('edit')}编辑</button><button class="btn sm danger" data-ch-del="${esc(c.id)}">${icon('trash')}删除</button></div>
         </div>`).join('')}</div>` : `<div class="empty-mini">${icon('bell')}<div><b>尚未配置通知渠道</b><span class="muted">添加钉钉、飞书、企业微信群机器人、通用 Webhook 或邮件，接收预算告警、费用异常、同步故障与日报 / 周报 / 月报；邮件会附上完整的成本概览。</span></div></div>`}
     </section>
-    <section class="panel c4"><div class="panel-h"><h3>告警规则</h3>${help('预算告警：同一阈值（含预算金额）每个账期每个渠道只通知一次。费用异常：每天报表时间之后检查“昨日费用 ≥ 前 7 日日均 × 倍数，且增量 ≥ 最小金额”。同步故障：同一云厂商同类同步连续失败 3 次时告警，恢复后通知。')}</div>
+    <section class="panel c4"><div class="panel-h"><h3>告警规则</h3>${help('预算告警：同一阈值（含预算金额）每个账期每个渠道只通知一次；成本中心预算与 API Key 预算一样按“达到预警阈值 / 超出预算”判断（不受“包含 API Key 预算”影响），限定范围的渠道只接收 Key 全部在范围内的成本中心。费用异常：每天报表时间之后检查“昨日费用 ≥ 前 7 日日均 × 倍数，且增量 ≥ 最小金额”。同步故障：同一云厂商同类同步连续失败 3 次时告警，恢复后通知。')}</div>
       <form id="rForm" class="form-grid wrap-labels" style="grid-template-columns:1fr 1fr">
         <div class="field full"><span>预算告警条件</span><div class="row" style="gap:6px 16px">${Object.entries(RULE_LABEL).map(([k, l]) => `<label class="chk"><input type="checkbox" name="rule_${k}" ${al.rules[k] ? 'checked' : ''}> ${l}</label>`).join('')}</div></div>
         <label class="field" title="按原价（目录价）判断，不受优惠券 / 折扣集中抵扣的影响"><span>异常倍数（×前 7 日原价日均）</span><input class="inp" type="number" name="ratio" min="1.2" max="20" step="0.1" value="${al.anomaly.ratio}"></label>
@@ -633,7 +677,7 @@ async function alerts(el) {
       <div id="rPrev" class="report-prev"><div class="nodata">加载中…</div></div></section>
     <section class="panel c5"><div class="panel-h"><h3>告警状态</h3><span class="sub">账期 ${esc(al.state.cycle)}</span></div>
       <h4 class="sec-h" style="margin-top:0">当前满足条件、尚未通知的预算告警</h4>
-      ${al.pending.length ? `<ul class="alert-list">${al.pending.map(t => `<li class="warn">${esc(t)}</li>`).join('')}</ul>` : `<p class="hint" style="margin:0">${state.budgets.monthly || Object.keys(state.budgets.keys || {}).length ? '暂无（未达到任何阈值，或已通知过）' : '尚未设置预算'}</p>`}
+      ${al.pending.length ? `<ul class="alert-list">${al.pending.map(t => `<li class="warn">${esc(t)}</li>`).join('')}</ul>` : `<p class="hint" style="margin:0">${state.budgets.monthly || Object.keys(state.budgets.keys || {}).length || Object.keys(state.budgets.costCenters || {}).length ? '暂无（未达到任何阈值，或已通知过）' : '尚未设置预算'}</p>`}
       <h4 class="sec-h">最近通知记录</h4>
       ${al.state.history.length ? `<ul class="alert-list">${al.state.history.map(h => `<li class="${h.level === 'bad' ? 'bad' : h.level === 'good' ? 'good' : h.level === 'warn' ? 'warn' : 'info'}"><b>${esc(fmtTime(h.at))}</b> · ${esc(h.chName || '')} · ${esc(h.title || evs[h.event]?.label || '')}<div class="muted">${(h.items || []).slice(0, 3).map(esc).join('；')}</div></li>`).join('')}</ul>` : '<p class="hint" style="margin:0">暂无</p>'}
     </section>
