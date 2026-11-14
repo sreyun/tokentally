@@ -609,15 +609,38 @@ function dataRangeCached(v = store.dataVersion()) {
   if (rangeCache.v !== v) rangeCache = { v, d: store.dataRange() };
   return rangeCache.d;
 }
-function statusOut() {
+/* 初始设置清单中的 Key 计数（全表统计）同样按数据版本缓存：Key 元数据与成本中心标签都计入数据版本 */
+let keyTagCache = { v: '', d: null };
+function keyTagCountsCached(v) {
+  if (keyTagCache.v !== v) keyTagCache = { v, d: store.keyTagCounts() };
+  return keyTagCache.d;
+}
+/**
+ * 初始设置进度（仅管理员）：首页按 README 的部署步骤显示设置清单，完成一步勾选一步。
+ * 只读取已有的状态与少量设置项，Key 计数按数据版本缓存；状态接口每 20 秒被每个标签页轮询一次，不能做全表扫描
+ */
+function setupOut(dv, st, providers) {
+  const b = store.budgets(), kt = keyTagCountsCached(dv);
+  return {
+    providers: PROVIDER_LIST.filter(p => providers[p].configured),
+    billsSynced: PROVIDER_LIST.some(p => !!st.providers[p]?.bills?.lastSuccessAt),
+    keys: kt.keys, taggedKeys: kt.tagged,
+    budget: b.monthly != null || Object.keys(b.keys || {}).length > 0,
+    channels: alerts.settings().channels.filter(c => c.enabled).length,
+    publicUrl: !!config.publicUrl,
+  };
+}
+function statusOut({ admin = false } = {}) {
   const dv = store.dataVersion(); // 每个请求只计算一次
   const providers = Object.fromEntries(PROVIDER_LIST.map(p => [p, { name: PROVIDERS[p], configured: secretState(p) === 'ok', secretState: secretState(p) }]));
+  const st = sync.status();
   return {
     version: VERSION, today: todayIn(config.billTz), tz: config.billTz,
     aliyun: providers.aliyun, providers, anyConfigured: anyConfigured(), branding: store.branding(), demo: !!store.getSetting('demo', false),
     // 调用次数数据源：阿里云需启用云监控 Prometheus（演示模式内置模拟数据）
     calls: ((c, demo) => ({ aliyun: !!c || demo, aliyunFails: !!c?.failMetric || demo }))(sync.callsConfig(), !!store.getSetting('demo', false)),
-    sync: sync.status(), data: dataRangeCached(dv), dataVersion: dataVersionTag(dv),
+    sync: st, data: dataRangeCached(dv), dataVersion: dataVersionTag(dv),
+    ...(admin ? { setup: setupOut(dv, st, providers) } : {}),
   };
 }
 
@@ -1024,7 +1047,7 @@ route('POST', '/api/me/password', async (req, res, ctx) => {
   return json(req, res, 200, { ok: true });
 }, { allowMustChange: true });
 
-route('GET', '/api/status', async (req, res, ctx) => json(req, res, 200, { ...statusOut(), ...(ctx.user.role === 'admin' ? { ipHint: ipHint(req) } : {}) }));
+route('GET', '/api/status', async (req, res, ctx) => json(req, res, 200, { ...statusOut({ admin: ctx.user.role === 'admin' }), ...(ctx.user.role === 'admin' ? { ipHint: ipHint(req) } : {}) }));
 /* 分析数据：按“数据版本 + 日期 + 查询参数”生成 ETag，数据未变化时返回 304，避免轮询刷新时重复下载 */
 /* 同一 ETag 的响应体（JSON + gzip）缓存在内存中：多个用户 / 标签页、轮询刷新时不再重复查询与压缩（LRU，最多 8 份） */
 /* 缓存按总字节数限制（而不只是条数）：长日期范围的响应可能很大，8 份同时留在内存中会超出容器内存 */

@@ -17,6 +17,7 @@ import * as Gov from './views/governance.js';
 import * as Changes from './views/changes.js';
 import * as Admin from './views/admin.js';
 import * as Day from './views/day.js';
+import * as Setup from './setup.js';
 
 const ROUTES = {
   overview: { label: '成本概览', icon: 'overview', sub: '本期费用、预算与预测、趋势、关键发现与排行', view: Overview, filters: true },
@@ -191,7 +192,11 @@ function commitPeriodUrl(replace) {
   else { pushNav = true; location.hash = full; }
 }
 app.reload = () => loadData({ silent: true });
-app.refreshStatus = async (background = false) => { try { state.status = await http('GET', '/api/status', undefined, { background }); } catch { /* ignore */ } renderSyncBtn(); renderSideFoot(); };
+app.refreshStatus = async (background = false) => {
+  try { state.status = await http('GET', '/api/status', undefined, { background }); state.statusAt = Date.now(); } catch { /* ignore */ }
+  renderSyncBtn(); renderSideFoot();
+  if (route.name === 'overview' && !SHARE) Setup.syncSetupCard(); // 首页的初始设置清单随状态更新（完成一步勾选一步）
+};
 
 /* ---------------- 数据 ---------------- */
 let loadSeq = 0, lastGoodPeriod = null, lastGoodToday = null;
@@ -272,10 +277,12 @@ function render(extraNotices = [], { layoutOnly = false } = {}) {
   route = parseHash();
   const r = ROUTES[route.name];
   renderNav(); renderTitle(r); renderPeriod(); renderSyncBtn(); renderUser(); renderSideFoot();
-  $('#periodBox').hidden = !!r.noPeriod || !!SHARE;
+  // 系统中尚无账单、首页只显示初始设置清单时，周期、筛选与口径说明都没有意义，一并隐藏
+  const setupOnly = route.name === 'overview' && !SHARE && !!state.data && Setup.setupVisible() && Setup.noBillData();
+  $('#periodBox').hidden = !!r.noPeriod || !!SHARE || setupOnly;
   $('#btnRefresh').hidden = !!r.noPeriod;
-  $('#note').hidden = !!r.noData;
-  renderFilters(r);
+  $('#note').hidden = !!r.noData || setupOnly;
+  renderFilters(setupOnly ? { ...r, filters: false } : r);
   if (refocus) { const el = $(`[data-f="${refocus}"]`); refocus = null; el?.focus({ preventScroll: true }); }
   renderNotices(r, extraNotices);
   if (layoutOnly && (route.name === 'admin' || app.dirty)) return;
@@ -622,15 +629,17 @@ function renderNotices(r, extra) {
   const list = extra.slice();
   if (SHARE) list.push({ level: 'info', title: `只读分享 · ${SHARE.title}`, why: `统计周期 ${SHARE.periodLabel} · 范围：${SHARE.scopeLabel} · 有效期至 ${fmtTime(SHARE.expiresAt)}。无需登录即可查看，请勿转发给无关人员。` });
   const s = state.status;
+  // 首页显示初始设置清单时，“尚未配置访问密钥 / 暂无账单”由清单中的步骤说明，不再重复提示
+  const setupShown = route.name === 'overview' && !SHARE && Setup.setupVisible();
   const demoHidden = (() => { try { return sessionStorage.getItem('bc.demoHide') === '1'; } catch { return false; } })();
   if (s?.demo && !demoHidden) list.push({ dismiss: 'demo', level: 'info', title: '演示模式 · 当前为随机生成的演示数据', why: isAdmin() ? '在“系统管理 → 阿里云接入 / 腾讯云接入”中配置真实访问密钥后，演示数据会被自动清除并开始同步真实账单。' : '演示数据仅用于体验功能，金额与 Key 均为虚构。', go: isAdmin() ? '#/admin/aliyun' : null });
-  else if (s && !s.anyConfigured && !s.demo) list.push({ level: 'warn', title: '尚未配置云厂商访问密钥', why: isAdmin() ? '请在“系统管理”中配置阿里云 RAM AccessKey（百炼只读 + 费用中心只读）或腾讯云 CAM API 密钥（TokenHub 只读 + 计费只读），保存后系统会自动同步数据。' : '请联系管理员完成配置。', go: isAdmin() ? '#/admin/aliyun' : null });
+  else if (s && !s.anyConfigured && !s.demo && !setupShown) list.push({ level: 'warn', title: '尚未配置云厂商访问密钥', why: isAdmin() ? '请在“系统管理”中配置阿里云 RAM AccessKey（百炼只读 + 费用中心只读）或腾讯云 CAM API 密钥（TokenHub 只读 + 计费只读），保存后系统会自动同步数据。' : '请联系管理员完成配置。', go: isAdmin() ? '#/admin/aliyun' : null });
   // 客户端 IP 识别为代理的内网地址（经反向代理访问但 IP 来源 / 代理层数设置不对）
   const ipHidden = (() => { try { return sessionStorage.getItem('bc.ipHintHide') === '1'; } catch { return false; } })();
   if (isAdmin() && s?.ipHint && !ipHidden) list.push({ dismiss: 'iphint', level: 'warn', title: `登录记录中的客户端 IP 将显示为代理地址（${s.ipHint.resolved}）`, why: s.ipHint.suggest + '。请在“系统管理 → 安全与审计 → 客户端 IP 识别”中设置。', go: '#/admin/security' });
   for (const p of Object.keys(PROVIDERS)) if (s?.providers?.[p]?.secretState === 'undecryptable') list.push({ level: 'warn', title: `已保存的${PROVIDERS[p]}访问密钥无法解密`, why: '主密钥（APP_MASTER_KEY）已变化，请重新填写访问密钥。', go: isAdmin() ? `#/admin/${p}` : null });
   const d = state.data;
-  if (d && !r.noData && route.name !== 'governance' && route.name !== 'key' && !state.lines.length && s?.anyConfigured) {
+  if (d && !r.noData && route.name !== 'governance' && route.name !== 'key' && !state.lines.length && s?.anyConfigured && !(setupShown && Setup.noBillData())) {
     list.push({ level: 'info', title: '所选周期暂无账单数据', why: d.period.mode === 'month' && !d.period.syncedAt ? '该账期尚未同步。管理员可在“系统管理 → 数据同步”中同步指定账期，或调大回溯月数。' : '该周期内没有大模型费用，或账单仍在同步中。' });
   } else if (d && r.filters && state.lines.length && activeFilterCount() && !filterLines().length) {
     list.push({ level: 'info', title: '当前筛选条件下没有数据', why: '可移除部分筛选条件，或切换统计周期。', unf: true });
@@ -711,6 +720,7 @@ $('#btnUser').onclick = e => {
   openPop('user', $('#btnUser'), `<div class="pop-h">${esc(state.me.username)} · ${isAdmin() ? '管理员' : '只读用户'}</div>
     <button class="pop-item" role="menuitem" data-act="pwd">${icon('lock')}修改密码</button>
     ${isAdmin() ? `<button class="pop-item" role="menuitem" data-go="#/admin/users">${icon('user')}用户管理</button>` : ''}
+    ${Setup.setupReopenable() ? `<button class="pop-item" role="menuitem" data-act="setup-show">${icon('bulb')}初始设置清单</button>` : ''}
     <div class="pop-sep"></div>
     <button class="pop-item" role="menuitem" data-act="logout">${icon('logout')}退出登录</button>`);
 };
@@ -746,6 +756,9 @@ document.addEventListener('click', async e => {
   if (act?.dataset.act === 'pwd') { closePop(); openPwd(false); }
   if (act?.dataset.act === 'dismiss-iphint') { try { sessionStorage.setItem('bc.ipHintHide', '1'); } catch { /* ignore */ } render([], { layoutOnly: true }); return; }
   if (act?.dataset.act === 'dismiss-demo') { try { sessionStorage.setItem('bc.demoHide', '1'); } catch { /* ignore */ } render([], { layoutOnly: true }); return; }
+  if (act?.dataset.act === 'setup-hide') { Setup.hideSetup(true); toast('已隐藏初始设置清单，可在右上角用户菜单中重新打开', '', 3600); render(); return; }
+  if (act?.dataset.act === 'setup-show') { closePop(); Setup.hideSetup(false); app.go('#/overview'); return; }
+  if (act?.dataset.act === 'setup-tags') { Keys.editTags([...state.apiKeys.values()].filter(k => k.apiKeyId !== NONE_KEY && k.source !== 'deleted').map(k => k.apiKeyId)); return; }
   if (act?.dataset.act === 'logout') { closePop(); await logout(); return; }
   if (act?.dataset.act === 'retry-load') { loadData(); return; }
   if (act?.dataset.act === 'reset-period') { draft = null; Object.assign(ui.period, { mode: 'month', cycle: state.today.slice(0, 7) }); savePeriod(); renderPeriod(); commitPeriodUrl(true); loadData(); return; }

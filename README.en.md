@@ -73,6 +73,8 @@ docker compose up -d --build && docker compose logs app | grep 初始管理员�
 
 Open `http://localhost:8080` and sign in with the initial password from the log (the line is labelled `初始管理员密码`). For production, leave `DEMO_DATA=false`, then configure a read-only Alibaba Cloud RAM AccessKey and / or Tencent Cloud CAM API key under **系统管理 (Admin)**. Demo data is removed automatically once real credentials are saved.
 
+On a fresh install, admins see a **setup checklist (初始设置)** on the overview page instead of an empty dashboard: cloud credentials → first bill sync → cost centers → budget → notification channel → `PUBLIC_URL` (message links and share links). Each step links to the right admin page and ticks off once done; the checklist hides itself when everything is complete, and can be dismissed per browser (reopen it from the user menu).
+
 ## How it works
 
 ```mermaid
