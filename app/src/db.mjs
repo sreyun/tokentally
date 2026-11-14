@@ -564,6 +564,12 @@ export class Store {
   listKeyTags() { return this.q('SELECT * FROM key_tags').all(); }
   /** API Key → 成本中心（只含设置了成本中心的 Key；包括已删除 / 只在账单中出现的 Key 的标签，与前端口径一致） */
   costCenterTags() { return new Map(this.q("SELECT api_key_id, cost_center FROM key_tags WHERE cost_center IS NOT NULL AND cost_center != ''").all().map(t => [t.api_key_id, t.cost_center])); }
+  /** 初始设置清单：未删除的 Key 数，以及其中已分配成本中心的 Key 数 */
+  keyTagCounts() {
+    const r = this.q(`SELECT COUNT(*) AS keys, COALESCE(SUM(CASE WHEN COALESCE(t.cost_center, '') <> '' THEN 1 ELSE 0 END), 0) AS tagged
+      FROM api_keys k LEFT JOIN key_tags t ON t.api_key_id = k.api_key_id WHERE k.deleted_at IS NULL`).get();
+    return { keys: r.keys || 0, tagged: r.tagged || 0 };
+  }
   setKeyTag(id, { costCenter = '', owner = '', note = '' }, by = '') {
     // 截断时不切开表情等代理对（否则保存的是孤立的半个字符，页面、报表与邮件中显示为乱码）
     const cut = (s, n) => String(s || '').trim().slice(0, n).replace(/[\uD800-\uDBFF]$/, '');

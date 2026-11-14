@@ -9,6 +9,7 @@ import { sparkline, columnChart, lineChart, rankList, divergingList, segbar, leg
 import { computeInsights, cacheSavings } from '../insights.js';
 import { TOKS, tType } from '../stats.js';
 import { computeFindings, SEVERITY } from './governance.js';
+import { setupVisible, setupCard, noBillData, freshenStatus } from '../setup.js';
 
 /** 可选的分组维度：云厂商（多云时）、成本中心（设置了标签时） */
 function dimOpts(base) {
@@ -20,6 +21,10 @@ function dimOpts(base) {
 function fixSeg(key, opts) { if (!opts[ui[key]]) ui[key] = Object.keys(opts)[0]; return opts; }
 
 export function render(v) {
+  // 初始设置清单（管理员、非演示、未完成）：系统中还没有任何账单时代替整页（不显示一整页 ¥0.00），否则显示在概览上方
+  const setup = setupVisible();
+  if (setup) freshenStatus(1500); // 刚在系统管理中完成某一步后回到首页：立即刷新状态，清单随之勾选
+  if (setup && noBillData()) { v.innerHTML = setupCard(true); return; }
   const p = state.data.period;
   const trendOpts = fixSeg('trendBy', dimOpts({ key: 'Key', model: '模型', ws: '业务空间' }));
   const compOpts = fixSeg('compBy', dimOpts({ ws: '业务空间', dir: 'Token 类型', channel: '渠道' }));
@@ -30,7 +35,9 @@ export function render(v) {
   const cur = aggAll(lines), prev = aggAll(prevLines);
   const days = uniq(daily.map(l => l.date)).sort();
   const dayCost = new Map(); daily.forEach(l => dayCost.set(l.date, (dayCost.get(l.date) || 0) + metricVal(l)));
-  const fc = forecastOf(daily);
+  // 本期还没有任何账单（如尚未同步、新账期刚开始）：金额类指标显示“—”与“尚无账单数据”，不显示 ¥0.00 与“按 N 个完整日推算”的预测
+  const noBills = !state.lines.length;
+  const fc = state.daily.length ? forecastOf(daily) : null;
   const calDays = Math.max(1, daysBetween(p.from, p.to));
   const avgDay = fc ? fc.avg : cur.cost / calDays;
   const tokens = totalTokens(cur), pTokens = totalTokens(prev);
@@ -54,32 +61,36 @@ export function render(v) {
   const cum = cumulative(days, dayCost, p.from);
   const monthDays = p.mode === 'month' ? daysBetween(p.from, lastDayOfCycle(p.cycle)) : cum.length;
   const cnt = v => `${v} 个`, pctF = v => (v * 100).toFixed(1) + '%';
+  const ms = n => (noBills ? '—' : moneyShort(n)), NB = '尚无账单数据';
 
-  v.innerHTML = `
+  v.innerHTML = `${setup ? setupCard(false) : ''}
   <div class="kpis">
     <section class="kpi hero" aria-label="本期费用">
       <div class="kpi-h"><span class="kpi-ico">${icon('wallet')}</span><span>${p.mode === 'month' ? `${esc(p.cycle)} 账期费用` : '所选周期费用'} · ${METRICS[ui.f.metric]}</span></div>
-      <div class="value" title="${esc(money(cur.cost, 4))}">${money(cur.cost)}</div>
-      <div class="trend">${deltaPill(cur.cost, prev.cost)}<span class="cmp">${esc(state.compareLabel)} ${money(prev.cost)}</span></div>
+      ${noBills ? `<div class="value">—</div>
+      <div class="trend"><span class="cmp">${NB}${prev.cost ? ` · ${esc(state.compareLabel)} ${money(prev.cost)}` : ''}</span></div>`
+      : `<div class="value" title="${esc(money(cur.cost, 4))}">${money(cur.cost)}</div>
+      <div class="trend">${deltaPill(cur.cost, prev.cost)}<span class="cmp">${esc(state.compareLabel)} ${money(prev.cost)}</span></div>`}
       <div class="stats">
-        <div title="按官网目录价计算"><span>原价</span><b>${moneyShort(cur.gross)}</b></div>
-        <div title="折扣与促销优惠（账单“优惠金额”）"><span>折扣</span><b>${moneyShort(cur.gross - cur.after)}</b></div>
-        <div title="优惠券 / 代金券 / 储值卡抵扣：按云厂商实际抵扣的日期计入，常集中在某几天"><span>优惠券抵扣</span><b>${moneyShort(cur.after - cur.pretax)}</b></div>
-        ${ui.f.metric === 'pretax' ? `<div title="原价 − 折扣，未扣除优惠券"><span>优惠后（未扣券）</span><b>${moneyShort(cur.after)}</b></div>` : `<div title="与费用中心账单一致"><span>应付金额</span><b>${moneyShort(cur.pretax)}</b></div>`}
+        <div title="按官网目录价计算"><span>原价</span><b>${ms(cur.gross)}</b></div>
+        <div title="折扣与促销优惠（账单“优惠金额”）"><span>折扣</span><b>${ms(cur.gross - cur.after)}</b></div>
+        <div title="优惠券 / 代金券 / 储值卡抵扣：按云厂商实际抵扣的日期计入，常集中在某几天"><span>优惠券抵扣</span><b>${ms(cur.after - cur.pretax)}</b></div>
+        ${ui.f.metric === 'pretax' ? `<div title="原价 − 折扣，未扣除优惠券"><span>优惠后（未扣券）</span><b>${ms(cur.after)}</b></div>` : `<div title="与费用中心账单一致"><span>应付金额</span><b>${ms(cur.pretax)}</b></div>`}
         <div title="1 − 应付 ÷ 原价"><span>综合折扣</span><b>${cur.gross ? (disc * 100).toFixed(1) + '%' : '—'}</b></div>
-        <div><span>日均</span><b>${moneyShort(avgDay)}</b></div>
+        <div><span>日均</span><b>${ms(avgDay)}</b></div>
       </div>
       ${budget ? budgetBar(sum(lines, l => l.pretax), budget, fc ? forecastOf(daily, l => l.pretax).value : null) : ''}
       <div class="spark" data-tip="${esc(sparkTip('每日费用', days, days.map(x => dayCost.get(x) || 0), v => money(v)))}">${sparkline(days.map(x => dayCost.get(x) || 0), 'var(--accent)')}</div>
     </section>
     ${fc ? kpi('forecast', '预计本月费用', moneyShort(fc.value), deltaPill(fc.value, prevFullCost), '较上月全月', `按 ${fc.fullDays} 个完整日的日均推算`, '', '', '',
         cum.length ? `<div class="kspark" data-tip="${esc(tipRows('本月累计与预测', [['已累计', money(cum.at(-1))], ['月末预测', money(fc.value)], ['剩余天数', `${Math.max(0, monthDays - cum.length)} 天`]]))}">${sparkline(cum, 'var(--t-violet)', { height: 36, proj: { n: monthDays, end: fc.value } })}</div>` : '')
-      : kpi('calendar', '日均费用', money(avgDay), '', '', `${calDays} 天 · 峰值 ${peakText(days, dayCost)}`, '', '', '', spk('violet', ds.map(d => d.cost), '每日费用', v => money(v)))}
-    ${kpi('key', '活跃 API Key', `${active}<small>/ ${state.apiKeys.size}</small>`, deltaPill(active, pActive, { neutral: true }), state.compareLabel, top1 ? `最高：${keyShort(top1.key)} 占 ${pct(top1.cost, cur.cost)}` : '—', '', '#/keys', '查看 Key 分析', spk('teal', ds.map(d => d.keys), '每日有消费的 API Key', cnt))}
-    ${kpi('token', 'Token 总量', noTok ? '—' : compact(tokens), noTok ? '' : deltaPill(tokens, pTokens, { neutral: true }), noTok ? '' : state.compareLabel, noTok ? '当前数据无用量' : ua && ua.requests ? `请求 ${compact(ua.requests)} 次 · 单次 ${intFmt(ua.tokens / ua.requests)} Token` : `输入 ${compact(cur.tIn)} · 输出 ${compact(cur.tOut)}`, intFmt(tokens), '#/models', '查看模型 Token 结构', noTok ? '' : spk('sky', ds.map(d => d.tok), '每日 Token', compact))}
+      : kpi('calendar', '日均费用', noBills ? '—' : money(avgDay), '', '', noBills ? NB : `${calDays} 天 · 峰值 ${peakText(days, dayCost)}`, '', '', '', spk('violet', ds.map(d => d.cost), '每日费用', v => money(v)))}
+    ${noBills ? kpi('key', '活跃 API Key', `—<small>/ ${state.apiKeys.size}</small>`, '', '', NB, '', '#/keys', '查看 Key 分析')
+      : kpi('key', '活跃 API Key', `${active}<small>/ ${state.apiKeys.size}</small>`, deltaPill(active, pActive, { neutral: true }), state.compareLabel, top1 ? `最高：${keyShort(top1.key)} 占 ${pct(top1.cost, cur.cost)}` : '—', '', '#/keys', '查看 Key 分析', spk('teal', ds.map(d => d.keys), '每日有消费的 API Key', cnt))}
+    ${kpi('token', 'Token 总量', noTok ? '—' : compact(tokens), noTok ? '' : deltaPill(tokens, pTokens, { neutral: true }), noTok ? '' : state.compareLabel, noBills ? NB : noTok ? '当前数据无用量' : ua && ua.requests ? `请求 ${compact(ua.requests)} 次 · 单次 ${intFmt(ua.tokens / ua.requests)} Token` : `输入 ${compact(cur.tIn)} · 输出 ${compact(cur.tOut)}`, intFmt(tokens), '#/models', '查看模型 Token 结构', noTok ? '' : spk('sky', ds.map(d => d.tok), '每日 Token', compact))}
     ${kpi('unit', '每百万 Token 成本', perM == null ? '—' : money(perM), perM == null ? '' : deltaPill(perM, pPerM), perM == null ? '' : state.compareLabel, '费用 ÷ 总 Token × 10⁶', '', '', '', perM == null ? '' : spk('amber', ds.map(d => d.perM), '每日每百万 Token 成本', v => money(v), { zero: false }))}
     ${kpi('cache', '缓存命中率', hit == null ? '—' : (hit * 100).toFixed(1) + '%', hit == null ? '' : deltaPill(hit, pHit, { pp: true, goodWhenUp: true }), hit == null ? '' : state.compareLabel, saved > 0.01 ? `估算节省 ${moneyShort(saved)}` : hit == null ? '—' : `命中 ${compact(cur.tCache)} Token`, '', '', '', hit == null ? '' : spk('indigo', ds.map(d => d.hit), '每日缓存命中率', pctF, { zero: false }))}
-    ${kpi('model', '使用模型', String([...byModel.values()].filter(a => a.cost > 0).length), '', '', byModel.size ? `主力：${sortedAggs(byModel)[0].key}` : '—', '', '#/models', '查看模型分析', spk('fuchsia', ds.map(d => d.models), '每日使用的模型', cnt))}
+    ${kpi('model', '使用模型', noBills ? '—' : String([...byModel.values()].filter(a => a.cost > 0).length), '', '', noBills ? NB : byModel.size ? `主力：${sortedAggs(byModel)[0].key}` : '—', '', '#/models', '查看模型分析', spk('fuchsia', ds.map(d => d.models), '每日使用的模型', cnt))}
   </div>
 
   <div class="bi">

@@ -354,6 +354,46 @@ select.inp.sm { padding-right: 24px; background-position: right 6px center; back
   .kpi .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
+/* 初始设置清单（首页，仅管理员） */
+.setup { margin-bottom: 14px; gap: 12px; }
+.setup.solo { border-color: color-mix(in srgb, var(--accent) 18%, var(--border)); }
+.setup-h { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 4px 10px; }
+.setup-ttl { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
+.setup-ttl h3 { margin: 0; font-size: 15px; font-weight: 650; display: flex; align-items: center; gap: 7px; }
+.setup-ttl h3 .ico { color: var(--accent-text); }
+.setup-x { align-self: start; }
+.setup-sub { grid-column: 1 / -1; margin: 0; }
+.setup .progress { height: 6px; border-radius: 3px; }
+.setup .progress > i { background: var(--good); border-radius: 3px; }
+.setup-steps { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
+.setup-steps > li { display: grid; grid-template-columns: 28px minmax(0, 1fr) auto; align-items: center; gap: 6px 12px; padding: 10px; border-radius: var(--r); }
+.setup-steps > li + li { border-top: 1px solid var(--border); border-top-left-radius: 0; border-top-right-radius: 0; }
+.setup-steps > li.next { background: var(--accent-wash); border-top-color: transparent; border-radius: var(--r); }
+.setup-steps > li.next + li { border-top-color: transparent; }
+.step-n { width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center; font-size: 12.5px; font-weight: 650; font-variant-numeric: tabular-nums; color: var(--muted); border: 1.5px solid var(--border-strong); background: var(--surface); align-self: start; }
+.step-n .ico { width: 15px; height: 15px; stroke-width: 2.6; }
+li.done .step-n { background: var(--good); border-color: var(--good); color: #fff; }
+li.next .step-n { border-color: var(--accent); color: var(--accent-text); box-shadow: 0 0 0 3px var(--accent-ring); }
+li.blocked .step-n { border-style: dashed; color: var(--faint); }
+.step-b { min-width: 0; line-height: 1.5; padding-top: 3px; }
+.step-t { font-weight: 600; font-size: 13.5px; color: var(--ink); overflow-wrap: anywhere; }
+li.done .step-t { color: var(--ink-2); font-weight: 500; }
+li.blocked .step-t { color: var(--muted); font-weight: 500; }
+.step-pill { margin-left: 8px; vertical-align: 1px; }
+.step-d { display: block; font-size: 12.5px; color: var(--muted); overflow-wrap: anywhere; }
+.step-d code { font: 12px var(--mono); background: var(--surface-3); color: var(--ink-2); padding: 1px 5px; border-radius: 4px; overflow-wrap: anywhere; }
+.step-w { display: flex; align-items: flex-start; gap: 6px; margin-top: 4px; font-size: 12.5px; color: var(--warn-ink); overflow-wrap: anywhere; }
+.step-w .ico { margin-top: 2px; width: 14px; height: 14px; }
+.step-a { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+.step-a:empty { display: none; }
+.setup:not(.solo) .setup-steps > li.done { padding-block: 6px; } /* 显示在概览上方时，已完成的步骤收紧，少占首屏高度 */
+.setup-foot { margin: 0; padding-top: 2px; }
+@media (max-width: 640px) {
+  .setup-steps > li { grid-template-columns: 28px minmax(0, 1fr); align-items: start; padding: 10px 6px; gap: 8px 10px; }
+  .step-a { grid-column: 2; justify-content: flex-start; }
+  li.done .step-a { margin-left: -9px; } /* 已完成步骤的按钮无边框：文字与说明左对齐 */
+}
+
 /* 预算 */
 .budget { margin-top: 10px; display: grid; gap: 5px; font-size: 12px; }
 .budget-top { display: flex; justify-content: space-between; gap: 8px; color: var(--muted); }

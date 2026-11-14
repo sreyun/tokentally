@@ -51,7 +51,8 @@ export function computeInsights() {
   // 预算比较固定用应付金额（预算按应付金额设置）；其余情况与旁边的“预计本月费用”一致，按当前费用口径
   const budget = budgetOf();
   const useBudget = budget && !hasDimFilter();
-  const fc = forecastOf(daily, useBudget ? l => l.pretax : metricVal);
+  // 本期还没有按日账单（如尚未同步）时不推算，避免“按已完成 N 天日均 ¥0.00 推算”的误导
+  const fc = state.daily.length ? forecastOf(daily, useBudget ? l => l.pretax : metricVal) : null;
   if (fc) {
     const prevFull = sum(filterLines(state.prevFull), useBudget ? l => l.pretax : metricVal);
     if (useBudget) {
