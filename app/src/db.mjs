@@ -157,7 +157,7 @@ export const DEFAULT_BUDGETS = { monthly: null, alertPct: 80, keys: {}, costCent
 export const NO_CC = '__nocc__';
 export const MAX_CC_BUDGETS = 500;
 /** 成本中心名称规范化：与保存标签时一致（去掉首尾空白、最多 40 个字符、不切开表情） */
-export const ccKey = s => String(s ?? '').trim().slice(0, 40).replace(/[\uD800-\uDBFF]$/, '');
+export const ccKey = s => String(s ?? '').trim().slice(0, 40).replace(/[\uD800-\uDBFF]$/, '').trimEnd();
 /** 阿里云对未归属业务空间的 Key 可能返回 "-"，统一视为空 */
 const clean = v => (v == null || v === '-' ? '' : String(v));
 const jsonOrNull = v => (v == null ? null : JSON.stringify(v));
@@ -572,7 +572,8 @@ export class Store {
   }
   setKeyTag(id, { costCenter = '', owner = '', note = '' }, by = '') {
     // 截断时不切开表情等代理对（否则保存的是孤立的半个字符，页面、报表与邮件中显示为乱码）
-    const cut = (s, n) => String(s || '').trim().slice(0, n).replace(/[\uD800-\uDBFF]$/, '');
+    // 截断后再去掉末尾空白：在第 n 个字符处截断可能正好留下空格（成本中心名称与预算按名称匹配，不能带不可见的尾随空白）
+    const cut = (s, n) => String(s || '').trim().slice(0, n).replace(/[\uD800-\uDBFF]$/, '').trimEnd();
     const cc = cut(costCenter, 40), ow = cut(owner, 40), nt = cut(note, 200);
     if (!cc && !ow && !nt) { this.q('DELETE FROM key_tags WHERE api_key_id = ?').run(id); return null; }
     this.q(`INSERT INTO key_tags(api_key_id, cost_center, owner, note, updated_at, updated_by) VALUES(?,?,?,?,?,?)

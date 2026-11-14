@@ -1184,11 +1184,14 @@ route('PUT', '/api/admin/budgets', async (req, res, ctx) => {
     if (m != null) keys[id] = m;
   }
   if (Object.keys(keys).length > 2000) throw new HttpError(400, '预算条目过多');
-  // 成本中心预算：键为成本中心名称（与 Key 标签相同的规范化：去掉首尾空白、最多 40 字）或 NO_CC（未分配成本中心）
+  // 成本中心预算：键为成本中心名称（与 Key 标签相同的规范化：去掉首尾空白、最多 40 字）或 NO_CC（未分配成本中心）。
+  // 与已有成本中心标签完全相同的名称原样接受：旧版本保存的标签可能以空白或半个表情结尾（在第 40 个字符处截断），
+  // 规范化后与标签对不上，预算永远匹配不到费用，或整页预算因该行无法保存
+  const tagNames = new Set(store.costCenterTags().values());
   const cc = new Map();
   for (const [raw, v] of Object.entries(b.costCenters || {})) {
-    const name = raw === NO_CC ? NO_CC : ccKey(raw);
-    if (!name || name.length < String(raw).trim().length) throw new HttpError(400, `成本中心名称无效（最多 40 个字符）：${cut(String(raw).trim(), 40) || '（空）'}`);
+    const exact = raw === NO_CC || tagNames.has(raw), name = exact ? raw : ccKey(raw);
+    if (!exact && (!name || name.length < String(raw).trim().length)) throw new HttpError(400, `成本中心名称无效（最多 40 个字符）：${cut(String(raw).trim(), 40) || '（空）'}`);
     const m = money(v);
     if (Number.isNaN(m)) throw new HttpError(400, `成本中心「${name === NO_CC ? '未分配成本中心' : name}」的预算金额无效`);
     if (m != null) cc.set(name, m);
