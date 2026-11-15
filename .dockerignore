@@ -12,3 +12,5 @@ node_modules
 *.md
 Caddyfile
 docker-compose*.yml
+.github
+docs

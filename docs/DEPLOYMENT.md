@@ -1,6 +1,6 @@
 # 部署与运维手册
 
-本文面向交付与运维人员，覆盖首次部署、HTTPS、云厂商接入、备份与恢复、升级、监控与常见问题。
+本文面向交付与运维人员，覆盖首次部署、HTTPS、云厂商接入、备份与恢复、升级、监控、常见问题与镜像构建发布（华为云 SWR）。
 
 ## 1. 环境要求
 
@@ -29,6 +29,16 @@ openssl rand -base64 32
 
 ```bash
 docker compose up -d --build
+```
+
+也可以不在服务器上构建，直接使用发布到华为云容器镜像服务（SWR）的镜像（amd64 / arm64，见[第 9 节](#9-镜像构建与发布华为云-swr)）：在 `.env` 中设置 `APP_IMAGE`（生产环境建议固定版本号）后拉取并启动：
+
+```bash
+echo 'APP_IMAGE=swr.cn-east-3.myhuaweicloud.com/sreyun/tokentally:1.10.1' >> .env
+```
+
+```bash
+docker compose pull app && docker compose up -d
 ```
 
 ```bash
@@ -154,6 +164,12 @@ docker compose start app
 git pull && docker compose up -d --build
 ```
 
+使用 SWR 镜像（设置了 `APP_IMAGE`）时，把 `.env` 中的版本号改为新版本后执行（不要加 `--build`，否则会在本机重新构建并覆盖该镜像标签）：
+
+```bash
+docker compose pull app && docker compose up -d
+```
+
 数据库在启动时自动迁移，升级前建议先在管理页手动备份一次。v1.1 → v1.2：
 
 - 账单、Key、业务空间、同步记录增加云厂商字段，历史数据归属阿里云
@@ -198,3 +214,74 @@ scrape_configs:
 | 调用次数提示“标签值未匹配” | 所选 API Key 标签的值不是 API Key ID（或 Key 尚未同步）；在“发现指标”结果中改选正确的标签，或先同步 API Key |
 | 页面放着不动一段时间后要求重新登录 | 正常：后台轮询不会延长会话，空闲超过 `SESSION_IDLE_MINUTES`（默认 120 分钟）后需重新登录 |
 | 忘记管理员密码 | 由另一位管理员在“用户管理”中重置；只有一个管理员时，停止服务后清空 users 表并重启，系统按 `.env` 重新创建初始管理员（账单与配置不受影响） |
+
+## 9. 镜像构建与发布（华为云 SWR）
+
+创建 tag 后，[.github/workflows/docker.yml](../.github/workflows/docker.yml) 自动构建多架构镜像并推送到华为云容器镜像服务（SWR）；登录凭证由 AK/SK 现场推导，无需在控制台生成长期登录密文（与 sreyun/netsa 的配置一致）。
+
+| 触发 | 行为 |
+|---|---|
+| 创建 tag `v1.10.1` | 校验版本 + 构建 + 启动自检 + 推送：`1.10.1`、`1.10`、`1`、`latest`、`sha-xxxxxxx` |
+| 创建预发布 tag `v1.10.1-rc1` | 只推 `1.10.1-rc1`、`sha-xxxxxxx`，不动 `latest` / `1.10` / `1` |
+| 推送 `main` / Pull Request | 不构建镜像（质量门禁由 `ci` 工作流负责） |
+| 手动触发（workflow_dispatch） | 填写要发布的 tag 与是否更新 `latest`；按该 tag 检出源码，版本与内容严格对应 |
+
+发布流程（先把 `app/package.json`、`app/src/server.mjs` 与 `docker-compose.yml` 中的版本号改为新版本并提交）：
+
+```bash
+git tag -a v1.10.1 -m v1.10.1
+```
+
+```bash
+git push origin v1.10.1
+```
+
+需要在仓库 **Settings → Secrets and variables → Actions** 配置两个 Secret：
+
+| Secret | 说明 |
+|---|---|
+| `HW_ACCESS_KEY` | 华为云访问密钥 AK（对应 IAM 用户需具备 SWR 推送权限） |
+| `HW_SECRET_KEY` | 华为云秘密密钥 SK |
+
+SWR 登录凭证的推导方式（工作流内自动完成）：用户名为 `{region}@{AK}`，密码为 `HMAC-SHA256(key=SK, data=AK)` 的十六进制，即
+
+```bash
+printf '%s' "$AK" | openssl dgst -binary -sha256 -hmac "$SK" | od -An -vtx1 | tr -d ' \n'
+```
+
+可选 Variables（不配置则用默认值）：
+
+| Variable | 默认值 | 说明 |
+|---|---|---|
+| `SWR_REGISTRY` | `swr.cn-east-3.myhuaweicloud.com` | 仓库域名，区域需与组织一致 |
+| `SWR_NAMESPACE` | `sreyun` | SWR 组织名（需先在控制台创建） |
+| `IMAGE_NAME` | `tokentally` | 镜像名 |
+
+```bash
+docker pull swr.cn-east-3.myhuaweicloud.com/sreyun/tokentally:1.10.1
+```
+
+- **版本必须与 tag 一致**：版本号写在源码中，tag（去掉前缀 `v` 与预发布后缀）与 `package.json`、`server.mjs` 不一致时不发布，避免镜像显示的版本与标签不符。
+- **推送前自检**：先用 amd64 构建并按 `docker-compose.yml` 的加固参数（只读根文件系统、去掉全部 capability、非 root）以演示数据启动，检查 `/healthz`、`/readyz`、管理员登录、状态接口版本与分析数据接口，通过后才推送多架构镜像。
+- **SWR 介质类型**：使用 `outputs: type=registry,oci-mediatypes=false` 并关闭 provenance / SBOM 附件，避免仓库里出现 `unknown/unknown` 架构条目导致拉取时选错架构。
+- **可追溯信息**：推送后执行漏洞扫描（Trivy，HIGH / CRITICAL）、生成 SBOM（SPDX，保存在本次运行的 Artifacts）并用 cosign 无密钥签名；这三步不影响镜像发布，结果显示在运行摘要中。
+- 镜像以非 root（uid 1000）运行，数据目录为 `/data`（建议挂载数据卷）；基础镜像仓库可用 `--build-arg BASE_REGISTRY=docker.m.daocloud.io` 等镜像站替换。
+
+质量门禁由 [.github/workflows/ci.yml](../.github/workflows/ci.yml) 负责：前后端全部 JS 语法检查、三处版本号一致、签名算法与 IP 归属地库自检，以及以演示数据启动服务的冒烟测试（与镜像自检共用 [.github/scripts/smoke.sh](../.github/scripts/smoke.sh)）。
+
+### 内网 / 离线部署
+
+服务器不能访问 SWR 时，在能联网的机器上按服务器架构拉取并导出镜像，拷贝到服务器后导入：
+
+```bash
+docker pull --platform linux/amd64 swr.cn-east-3.myhuaweicloud.com/sreyun/tokentally:1.10.1
+docker save -o tokentally-image.tar swr.cn-east-3.myhuaweicloud.com/sreyun/tokentally:1.10.1
+```
+
+```bash
+docker load -i tokentally-image.tar
+echo 'APP_IMAGE=swr.cn-east-3.myhuaweicloud.com/sreyun/tokentally:1.10.1' >> .env
+docker compose up -d
+```
+
+arm64 服务器拉取时改用 `--platform linux/arm64`；导入后不要执行 `docker compose pull`。也可以把镜像推送到内网私有仓库，再把 `APP_IMAGE` 改为私有仓库地址。

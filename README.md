@@ -89,7 +89,9 @@ docker compose up -d --build && docker compose logs app | grep 初始管理员�
    5. 添加通知渠道：**告警通知** 中添加群机器人或邮件
    6. 设置 `PUBLIC_URL`（消息链接与分享）
 
-需要 HTTPS、IP 白名单、备份恢复、Prometheus 监控？见 [部署与运维手册](docs/DEPLOYMENT.md)。
+不想在服务器上构建？每个版本 tag 都会由 CI 构建 amd64 / arm64 镜像并发布到华为云 SWR，在 `.env` 中设置 `APP_IMAGE=swr.cn-east-3.myhuaweicloud.com/sreyun/tokentally:<版本>` 后执行 `docker compose pull app && docker compose up -d` 即可。
+
+需要 HTTPS、IP 白名单、备份恢复、Prometheus 监控、内网离线部署？见 [部署与运维手册](docs/DEPLOYMENT.md)。
 
 ## 🧭 工作原理
 
@@ -267,6 +269,7 @@ flowchart LR
 | `BACKUP_KEEP` / `BACKUP_HOUR` | 7 / 3 | 自动备份份数（0 关闭）与时间 |
 | `METRICS_TOKEN` | — | ≥16 位，开启 `/metrics` |
 | `DEMO_DATA` | false | 演示模式 |
+| `APP_IMAGE` | 本机构建 | 使用 CI 发布到华为云 SWR 的镜像，如 `swr.cn-east-3.myhuaweicloud.com/sreyun/tokentally:1.10.1`（`docker compose pull app && docker compose up -d`） |
 | `TENCENT_ENDPOINT_OVERRIDE` | — | 仅测试 / 私有网关 |
 </details>
 
@@ -333,6 +336,7 @@ app/src      server（HTTP / 鉴权 / 路由）· sync（多云同步）· aliyu
 app/public   index.html · login.html · boot.js · app.css · js/（main · core · charts · table · stats · insights · labels · views/）
 app/geo      ip2region_v4.xdb（IP 归属地离线库，Apache-2.0 / MIT，见 app/geo/NOTICE）
 docs/        DEPLOYMENT.md · images/
+.github/     workflows/ci.yml（语法 · 版本 · 自检 · 冒烟）· workflows/docker.yml（tag → 华为云 SWR 多架构镜像）
 ```
 
 不用 Docker 也能运行（Node.js ≥ 22.16，需要 node:sqlite 的在线备份接口）：

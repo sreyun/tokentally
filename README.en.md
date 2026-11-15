@@ -85,6 +85,8 @@ Open `http://localhost:8080` and sign in with the initial password from the log 
 
 On a fresh install, admins see a **setup checklist (初始设置)** on the overview page instead of an empty dashboard: cloud credentials → first bill sync → cost centers → budget → notification channel → `PUBLIC_URL` (message links and share links). Each step links to the right admin page and ticks off once done; the checklist hides itself when everything is complete, and can be dismissed per browser (reopen it from the user menu).
 
+Prefer not to build on the server? Every version tag is built by CI as an amd64 / arm64 image and pushed to Huawei Cloud SWR: set `APP_IMAGE=swr.cn-east-3.myhuaweicloud.com/sreyun/tokentally:<version>` in `.env`, then run `docker compose pull app && docker compose up -d`. See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) section 9 for the release workflow and offline installs.
+
 ## How it works
 
 ```mermaid

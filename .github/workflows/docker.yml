@@ -1,0 +1,270 @@
+name: Release · 镜像构建与推送（华为云 SWR）
+
+# 创建 v* tag 时自动构建多架构镜像并推送到华为云容器镜像服务（SWR）。
+# 登录凭证由 AK/SK 现场推导（与 sreyun/netsa、sreyun/openaiops 的做法一致），无需在控制台生成长期登录密文。
+#
+# 需要在 仓库 Settings → Secrets and variables → Actions 配置：
+#   HW_ACCESS_KEY  =  华为云访问密钥 AK（对应 IAM 用户需具备 SWR 推送权限）
+#   HW_SECRET_KEY  =  华为云秘密密钥 SK
+# 可选 Variables（不配置则用下面的默认值）：
+#   SWR_REGISTRY   仓库域名，默认 swr.cn-east-3.myhuaweicloud.com
+#   SWR_NAMESPACE  组织名，默认 sreyun
+#   IMAGE_NAME     镜像名，默认 tokentally
+#
+# 标签规则：v1.10.1 → 1.10.1 / 1.10 / 1 / latest / sha-xxxxxxx；
+#           预发布 v1.10.1-rc1 → 只打 1.10.1-rc1 / sha-xxxxxxx，不动 latest 与 1.10。
+# 版本号写在源码中（app/package.json 与 app/src/server.mjs），tag 必须与之一致（预发布后缀除外），否则不发布。
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要发布的 tag（如 v1.10.1，必须已存在）'
+        required: true
+      push_latest:
+        description: '同时更新 :latest 标签'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  id-token: write # 镜像签名（cosign 无密钥签名）
+
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: false # 发布过程不打断，避免推到一半被取消
+
+env:
+  SWR_REGISTRY: ${{ vars.SWR_REGISTRY || 'swr.cn-east-3.myhuaweicloud.com' }}
+  SWR_NAMESPACE: ${{ vars.SWR_NAMESPACE || 'sreyun' }}
+  IMAGE_NAME: ${{ vars.IMAGE_NAME || 'tokentally' }}
+  PLATFORMS: linux/amd64,linux/arm64
+  SMOKE_PASSWORD: ci-Smoke-only-73x # 仅用于推送前自检的临时容器
+
+jobs:
+  image:
+    name: image · buildx / 华为云 SWR
+    runs-on: ubuntu-latest
+    env:
+      HW_ACCESS_KEY: ${{ secrets.HW_ACCESS_KEY }}
+      HW_SECRET_KEY: ${{ secrets.HW_SECRET_KEY }}
+    steps:
+      # 手动触发时按输入的 tag 检出，保证镜像内容与标签严格对应（而不是分支 HEAD）
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0
+
+      - name: 解析版本与镜像标签
+        id: meta
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          INPUT_LATEST: ${{ inputs.push_latest }}
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="$INPUT_TAG"
+            PUSH_LATEST="$INPUT_LATEST"
+          else
+            VERSION="${GITHUB_REF_NAME}"
+            PUSH_LATEST="true"
+          fi
+          if [ -z "$VERSION" ]; then
+            echo "::error::未解析到版本号（tag 为空）"
+            exit 1
+          fi
+          BIN_VERSION="${VERSION#v}"      # 镜像版本：去掉前缀 v
+          CORE="${BIN_VERSION%%-*}"       # 1.10.1
+          MAJOR="${CORE%%.*}"             # 1
+          MINOR="${CORE#*.}"; MINOR="${MINOR%%.*}"
+          SHA="$(git rev-parse --short=7 HEAD)"
+          IMG="${SWR_REGISTRY}/${SWR_NAMESPACE}/${IMAGE_NAME}"
+
+          {
+            echo "version=${BIN_VERSION}"
+            echo "core=${CORE}"
+            echo "tags<<EOF"
+            echo "${IMG}:${BIN_VERSION}"
+            case "$VERSION" in
+              *-*) echo "预发布版本 ${VERSION}：仅打完整版本与 sha 标签" >&2 ;;
+              *)
+                echo "${IMG}:${MAJOR}.${MINOR}"
+                # 主版本为 0 时不打「0」标签（与 docker 官方镜像惯例一致）
+                if [ "$MAJOR" != "0" ]; then echo "${IMG}:${MAJOR}"; fi
+                if [ "$PUSH_LATEST" = "true" ]; then echo "${IMG}:latest"; fi
+                ;;
+            esac
+            echo "${IMG}:sha-${SHA}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      # 防止「检出的提交不是目标 tag」导致镜像内容与版本号不符
+      - name: 校验 tag 与检出内容一致
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          ACTUAL=$(git describe --exact-match --tags HEAD 2>/dev/null || true)
+          if [ -z "$ACTUAL" ]; then
+            echo "::error::当前提交不是任何 tag，请在 Actions 页面选择 tag 后重试"
+            exit 1
+          fi
+          if [ "v${VERSION}" != "$ACTUAL" ] && [ "${VERSION}" != "$ACTUAL" ]; then
+            echo "::error::检出的 tag 为 $ACTUAL，与期望的 v${VERSION} 不一致"
+            exit 1
+          fi
+
+      # 版本号写在源码中：tag 与源码版本不一致（如打 tag 前忘了改版本号）时不发布
+      - name: 校验源码版本与 tag 一致
+        env:
+          CORE: ${{ steps.meta.outputs.core }}
+        run: |
+          pkg=$(node -p "require('./app/package.json').version")
+          src=$(grep -oP "^const VERSION = '\K[^']+" app/src/server.mjs)
+          if [ "$pkg" != "$CORE" ] || [ "$src" != "$CORE" ]; then
+            echo "::error::源码版本（package.json=$pkg，server.mjs=$src）与 tag 期望的 $CORE 不一致"
+            exit 1
+          fi
+
+      - name: 校验 AK/SK
+        run: |
+          miss=""
+          [ -n "$HW_ACCESS_KEY" ] || miss="$miss HW_ACCESS_KEY"
+          [ -n "$HW_SECRET_KEY" ] || miss="$miss HW_SECRET_KEY"
+          if [ -n "$miss" ]; then
+            echo "::error::缺少 Secret:$miss"
+            echo "见 docs/DEPLOYMENT.md「镜像构建与发布（华为云 SWR）」"
+            exit 1
+          fi
+
+      # SWR 登录凭证：用户名 {region}@AK，密码 = HMAC-SHA256(SK, AK) 的十六进制
+      - name: 生成 SWR 登录凭证
+        id: swr
+        run: |
+          REGION="${SWR_REGISTRY#swr.}"; REGION="${REGION%%.*}"
+          PASSWORD=$(printf '%s' "$HW_ACCESS_KEY" | openssl dgst -binary -sha256 -hmac "$HW_SECRET_KEY" | od -An -vtx1 | tr -d ' \n')
+          echo "username=${REGION}@${HW_ACCESS_KEY}" >> "$GITHUB_OUTPUT"
+          echo "password=${PASSWORD}" >> "$GITHUB_OUTPUT"
+
+      - name: 设置 QEMU（arm64 模拟）
+        uses: docker/setup-qemu-action@v3
+
+      - name: 设置 Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: 登录华为云 SWR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.SWR_REGISTRY }}
+          username: ${{ steps.swr.outputs.username }}
+          password: ${{ steps.swr.outputs.password }}
+
+      # 先单架构构建并载入本地做启动自检：镜像能跑起来才允许推送
+      - name: 构建（amd64，用于自检）
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: tokentally:smoke
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # 按 docker-compose.yml 的加固参数（只读根文件系统、去掉全部 capability、非 root）以演示数据启动，
+      # 检查健康状态、管理员登录、版本号与分析数据接口
+      - name: 启动自检
+        env:
+          CORE: ${{ steps.meta.outputs.core }}
+        run: |
+          uid=$(docker run --rm --entrypoint id tokentally:smoke -u)
+          if [ "$uid" = "0" ]; then
+            echo "::error::镜像以 root 运行"
+            exit 1
+          fi
+          docker run -d --name smoke -p 127.0.0.1:18080:8080 \
+            --read-only --tmpfs /tmp:size=64m,mode=1777 --cap-drop ALL --security-opt no-new-privileges:true --user 1000:1000 \
+            -e DEMO_DATA=true -e ADMIN_USERNAME=admin -e ADMIN_PASSWORD="$SMOKE_PASSWORD" \
+            tokentally:smoke
+          set +e
+          bash .github/scripts/smoke.sh http://127.0.0.1:18080 "$CORE" "$SMOKE_PASSWORD"
+          status=$?
+          if [ $status -ne 0 ]; then echo "---- 容器日志 ----"; docker logs smoke; fi
+          docker rm -f smoke >/dev/null
+          exit $status
+
+      - name: 构建并推送（多架构）
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ env.PLATFORMS }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # SWR 对 OCI 介质类型支持不完整：强制 Docker 介质 + 关闭证明/SBOM 附件，
+          # 否则镜像仓库里会出现 unknown/unknown 架构条目，拉取时选架构容易误判。
+          outputs: type=registry,oci-mediatypes=false
+          provenance: false
+          sbom: false
+
+      # 以下三步给交付物加上可追溯信息。它们不决定镜像能否发布（镜像已经推送），失败只在摘要里提示，
+      # 查看对应步骤的日志即可。SWR 对 OCI 附件支持不完整，SBOM 作为构建产物保存，不推送到镜像仓库。
+      - name: 漏洞扫描
+        id: trivy
+        continue-on-error: true
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: tokentally:smoke
+          format: table
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          output: trivy.txt
+          exit-code: "1"
+
+      - name: 生成 SBOM
+        id: sbom
+        continue-on-error: true
+        uses: anchore/sbom-action@v0.24.3
+        with:
+          image: tokentally:smoke
+          format: spdx-json
+          artifact-name: tokentally-${{ steps.meta.outputs.version }}.spdx.json
+          upload-release-assets: false
+
+      - name: 安装 cosign
+        continue-on-error: true
+        uses: sigstore/cosign-installer@v4.1.2
+
+      - name: 镜像签名
+        id: sign
+        continue-on-error: true
+        env:
+          IMAGE: ${{ env.SWR_REGISTRY }}/${{ env.SWR_NAMESPACE }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
+        run: cosign sign --yes "$IMAGE"
+
+      - name: 保存扫描报告
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: tokentally-${{ steps.meta.outputs.version }}-trivy
+          path: trivy.txt
+          if-no-files-found: ignore
+
+      - name: Summary
+        run: |
+          {
+            echo "### 镜像已推送到华为云 SWR"
+            echo
+            echo '```'
+            echo "${{ steps.meta.outputs.tags }}"
+            echo '```'
+            echo
+            echo "架构：\`${PLATFORMS}\`　版本：\`${{ steps.meta.outputs.version }}\`"
+            echo
+            echo "漏洞扫描：${{ steps.trivy.outcome }}　SBOM：${{ steps.sbom.outcome }}（见本次运行的 Artifacts）　签名：${{ steps.sign.outcome }}"
+            echo
+            echo "拉取：\`docker pull ${SWR_REGISTRY}/${SWR_NAMESPACE}/${IMAGE_NAME}:${{ steps.meta.outputs.version }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"

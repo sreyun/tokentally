@@ -1,5 +1,19 @@
 # 更新日志
 
+## v1.10.1（2026-11-15）
+
+### 新增：CI 与华为云 SWR 镜像发布（与 sreyun/netsa 的配置一致）
+- **镜像发布**（`.github/workflows/docker.yml`）：创建 `v*` tag 时自动构建 amd64 / arm64 镜像并推送到华为云容器镜像服务（默认 `swr.cn-east-3.myhuaweicloud.com/sreyun/tokentally`）。登录凭证由 Secret `HW_ACCESS_KEY` / `HW_SECRET_KEY` 现场推导；标签规则为 `1.10.1` / `1.10` / `1` / `latest` / `sha-xxxxxxx`，预发布 tag 只打完整版本与 sha 标签；也可手动选择已有 tag 重新发布。推送前校验 tag 与源码版本一致，并按 compose 的加固参数（只读根文件系统、去掉全部 capability、非 root）以演示数据启动镜像做冒烟测试；推送后做漏洞扫描、生成 SBOM 并用 cosign 签名
+- **质量门禁**（`.github/workflows/ci.yml`）：每次推送与 Pull Request 执行前后端全部 JS 语法检查、三处版本号一致性检查、签名算法与 IP 归属地库自检，以及以演示数据启动服务的冒烟测试（健康检查、管理员登录、版本号、分析数据接口）
+- **使用 SWR 镜像部署**：`docker-compose.yml` 支持 `APP_IMAGE`，在 `.env` 中设置后执行 `docker compose pull app && docker compose up -d`，服务器上无需构建；未设置时仍在本机构建，原有命令不变。部署手册增加镜像发布流程与内网 / 离线部署（`docker save` / `docker load`）说明
+- Dockerfile 支持 `--build-arg BASE_REGISTRY=…` 替换基础镜像仓库（国内镜像站加速），默认仍为 Docker Hub
+
+### 升级
+```bash
+git pull && docker compose up -d --build
+```
+无数据库变更。发布镜像需要先在仓库 Settings → Secrets and variables → Actions 中配置 `HW_ACCESS_KEY` 与 `HW_SECRET_KEY`。
+
 ## v1.10.0（2026-11-14）
 
 ### 新增：成本中心（部门）月度预算
