@@ -609,10 +609,18 @@ function cardPreview(r) {
   const delta = x => (x ? `<span class="muted">${esc(x.label)}</span> <span class="${x.neutral ? (x.dir ? 'acc-text' : 'muted') : TXT[x.dir] || 'muted'}">${x.dir === 'up' ? '↑ ' : x.dir === 'down' ? '↓ ' : ''}${esc(x.dir ? String(x.text).replace(/^[+−-]/, '') : x.text)}</span>` : '');
   const tags = (d.tags || []).filter(Boolean).map(t => `<span class="pill ${TONE[t.level] || 'info'}">${esc(t.text)}</span>`).join('');
   const panel = list => (list?.length ? `<div class="fc-kpis">${list.map(k => `<div><span>${esc(k.label)}</span><b class="${TXT[k.tone] || ''}">${esc(k.value)}</b><small>${k.delta ? delta(k.delta) : esc(k.sub || '')}</small></div>`).join('')}</div>` : '');
+  // 同一天的多个系列（应付 + 灰色的“优惠与抵扣”）与飞书卡片一样叠加为一根柱子，柱高为合计（即原价）
   const chart = c => {
     if (!c?.values?.length) return '';
-    const max = Math.max(1e-9, ...c.values.map(v => v.v)), unit = /Token/.test(c.title) ? ` ${c.unit && c.unit !== '个' ? c.unit + ' ' : ''}Token` : ' 元';
-    return `<div class="fc-sec">${esc(c.title)}</div><div class="fc-chart" role="img" aria-label="${esc(c.title)}">${c.values.map(v => `<i style="height:${Math.max(2, v.v / max * 100).toFixed(1)}%;background:${esc(c.colors?.[v.k] || '#3370FF')}" title="${esc(v.d)} · ${esc(v.v.toLocaleString('zh-CN', { maximumFractionDigits: 2 }))}${unit}"></i>`).join('')}</div>`;
+    const unit = /Token/.test(c.title) ? ` ${c.unit && c.unit !== '个' ? c.unit + ' ' : ''}Token` : ' 元';
+    const days = [], byD = new Map();
+    for (const v of c.values) { let g = byD.get(v.d); if (!g) { byD.set(v.d, g = []); days.push(v.d); } g.push(v); }
+    const tot = d => byD.get(d).reduce((s, v) => s + Math.max(0, v.v), 0), max = Math.max(1e-9, ...days.map(tot));
+    const num = n => n.toLocaleString('zh-CN', { maximumFractionDigits: 2 }), color = v => esc(c.colors?.[v.k] || '#3370FF');
+    return `<div class="fc-sec">${esc(c.title)}</div><div class="fc-chart" role="img" aria-label="${esc(c.title)}">${days.map(d => {
+      const segs = byD.get(d);
+      return `<i style="height:${Math.max(2, tot(d) / max * 100).toFixed(1)}%;background:${color(segs[0])}" title="${esc(d)} · ${segs.map(v => `${segs.length > 1 ? esc(v.k) + ' ' : ''}${esc(num(v.v))}`).join(' · ')}${unit}">${segs.length > 1 ? segs.slice().reverse().map(v => `<span style="flex:${Math.max(0, v.v)};background:${color(v)}"></span>`).join('') : ''}</i>`;
+    }).join('')}</div>`;
   };
   const secs = (d.sections || []).filter(s => s.rows?.length || s.items?.length).map(s => `<div class="fc-sec">${esc(s.title)}${s.note ? `<span class="fc-sub">${esc(s.note)}</span>` : ''}</div>${s.rows?.length ? `<div class="fc-rows">${s.head ? `<div class="fc-head"><em></em><span>${esc(s.head[0])}</span><b>${esc(s.head[1])}</b><small>${esc(s.head[2] || '')}</small></div>` : ''}${s.rows.map((x, i) => `<div><em>${i + 1}</em><span>${esc(x.name)}${x.sub?.text ? `<i class="fc-rsub ${TXT[x.sub.level] || ''}">${esc(x.sub.text)}</i>` : ''}</span><b>${esc(x.value)}</b><small>${esc(x.share || '')}</small></div>`).join('')}</div>` : s.items.map(i => `<div class="fc-item"><span class="pill ${TONE[i.level] || 'info'}">${esc(i.tag || '提示')}</span> ${md(i.text)}</div>`).join('')}`).join('');
   return `<div class="fc"><div class="fc-h"><div><b>${esc(r.title)}</b>${tags}</div>${r.empty ? '<span class="pill neutral">无费用，定时发送时将跳过</span>' : ''}</div>

@@ -74,7 +74,7 @@ export function render(v) {
       <div class="stats">
         <div title="按官网目录价计算"><span>原价</span><b>${ms(cur.gross)}</b></div>
         <div title="折扣与促销优惠（账单“优惠金额”）"><span>折扣</span><b>${ms(cur.gross - cur.after)}</b></div>
-        <div title="优惠券 / 代金券 / 储值卡抵扣：按云厂商实际抵扣的日期计入，常集中在某几天"><span>优惠券抵扣</span><b>${ms(cur.after - cur.pretax)}</b></div>
+        <div title="优惠券 / 代金券、订阅抵扣（节省计划 / 资源包）、储值卡等抵扣：按云厂商实际抵扣的日期计入，常集中在某几天，抵扣集中的日子应付可能为 0（不代表没有用量）"><span>优惠券等抵扣</span><b>${ms(cur.after - cur.pretax)}</b></div>
         ${ui.f.metric === 'pretax' ? `<div title="原价 − 折扣，未扣除优惠券"><span>优惠后（未扣券）</span><b>${ms(cur.after)}</b></div>` : `<div title="与费用中心账单一致"><span>应付金额</span><b>${ms(cur.pretax)}</b></div>`}
         <div title="1 − 应付 ÷ 原价"><span>综合折扣</span><b>${cur.gross ? (disc * 100).toFixed(1) + '%' : '—'}</b></div>
         <div><span>日均</span><b>${ms(avgDay)}</b></div>

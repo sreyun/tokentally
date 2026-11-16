@@ -145,6 +145,10 @@ export function renderOverviewHtml(spec, { store, today, link = '', scope = null
   const perM = cur.tokens ? cur.cost / cur.tokens * 1e6 : null, pPerM = pv.tokens ? pv.cost / pv.tokens * 1e6 : null;
   const hit = cur.tIn ? cur.tHit / cur.tIn : null, pHit = pv.tIn ? pv.tHit / pv.tIn : null;
   const discount = cur.gross - cur.after, coupons = cur.after - cur.cost;
+  // 有原价但应付为 0 的日期（优惠券 / 节省计划等集中抵扣的日子），在关键发现与报表消息中说明，避免误读为没有用量
+  const dayG = new Map(), dayP = new Map();
+  for (const l of daily) if (l.period >= from && l.period <= to) { dayG.set(l.period, (dayG.get(l.period) || 0) + (l.gross || 0)); dayP.set(l.period, (dayP.get(l.period) || 0) + (l.pretax || 0)); }
+  const zeroDays = [...dayG.keys()].filter(d => dayG.get(d) >= 0.005 && Math.abs(dayP.get(d) || 0) < 0.005).sort();
 
   /* 1. 本期费用 */
   const stat = (k, v) => `<td style="padding:6px 10px 0 0;vertical-align:top"><div style="font-size:12px;color:#64748b">${esc(k)}</div><div style="font-size:14px;font-weight:600;color:#0f172a;white-space:nowrap">${esc(v)}</div></td>`;
@@ -250,7 +254,7 @@ export function renderOverviewHtml(spec, { store, today, link = '', scope = null
     ins.push(`<b>费用较${esc(prevLabel)}${cur.cost > pv.cost ? '上升' : '下降'} ${pct(Math.abs(cur.cost - pv.cost), pv.cost)}</b>：本期 ${yuan(cur.cost)}，上期 ${yuan(pv.cost)}${drv ? `，主要来自 ${drv}` : ''}。`);
   }
   if (keyItems.length >= 3 && cur.cost > 0 && keyItems[0].cost / cur.cost >= 0.5) ins.push(`<b>费用高度集中</b>：${esc(keyName(keyItems[0].key))} 占 ${pct(keyItems[0].cost, cur.cost)}，建议设置 Key 预算。`);
-  if (coupons > 0.005 || discount > 0.005) ins.push(`<b>本期优惠 ${yuan(discount + coupons)}</b>：折扣 ${yuan(discount)}、优惠券抵扣 ${yuan(coupons)}（按云厂商实际抵扣的日期计入，常集中在某几天）。`);
+  if (coupons > 0.005 || discount > 0.005) ins.push(`<b>本期优惠与抵扣 ${yuan(discount + coupons)}</b>：折扣 ${yuan(discount)}、优惠券等抵扣 ${yuan(coupons)}（按云厂商实际抵扣的日期计入，常集中在某几天）${zeroDays.length ? `；${esc(zeroDays.slice(0, 5).map(d => d.slice(5)).join('、'))}${zeroDays.length > 5 ? ` 等 ${zeroDays.length} 天` : ''}应付为 ¥0.00，当天原价已全部抵扣，不代表没有用量` : ''}。`);
   if (hit != null) ins.push(`<b>缓存命中率 ${(hit * 100).toFixed(1)}%</b>${pHit != null ? `，较上期 ${hit >= pHit ? '+' : '−'}${Math.abs((hit - pHit) * 100).toFixed(1)}pp` : ''}。`);
   if (gov.length) ins.push(`<b>存在需治理的 API Key</b>：${gov.map(g => `${esc(g[2])} ${g[3].length} 个`).join('，')}。`);
   const insHtml = ins.length ? ins.map(t => `<div style="padding:8px 10px;margin-bottom:6px;background:#f7f9fc;border:1px solid #eef2f7;border-radius:8px;font-size:13px;line-height:1.6;color:#334155">${t}</div>`).join('') : '<div style="color:#64748b;font-size:13px">暂无需要关注的发现</div>';
@@ -271,7 +275,7 @@ export function renderOverviewHtml(spec, { store, today, link = '', scope = null
     '', '模型费用排行：', ...modelItems.slice(0, 10).map((a, i) => `${i + 1}. ${a.key} ${yuan(a.cost)}（${pct(a.cost, cur.cost)}）`)].join('\n');
   const fullLabel = inScope ? `${label} · ${scope.label || '指定范围'}` : label;
   return { html, text: (inScope ? `范围：${scope.label || ''}\n` : '') + text, label: fullLabel, total: cur.cost,
-    stats: { cost: cur.cost, prevCost: pv.cost, prevLabel, forecast, budget, label, topKeys: keyItems.slice(0, 5).map(a => ({ name: keyName(a.key), cost: a.cost })), topModels: modelItems.slice(0, 3).map(a => ({ name: a.key, cost: a.cost })),
+    stats: { cost: cur.cost, prevCost: pv.cost, gross: cur.gross, prevGross: pv.gross, zeroDays, prevLabel, forecast, budget, label, topKeys: keyItems.slice(0, 5).map(a => ({ name: keyName(a.key), cost: a.cost })), topModels: modelItems.slice(0, 3).map(a => ({ name: a.key, cost: a.cost })),
       // Token 用量（报表消息中的用量指标与 Token 排行）
       tokens: cur.tokens, prevTokens: pv.tokens,
       tokenKeys: [...byKey.values()].filter(a => a.tokens > 0).sort((a, b) => b.tokens - a.tokens).slice(0, 5).map(a => ({ name: keyName(a.key), tokens: a.tokens })),
@@ -310,7 +314,7 @@ export function renderEmail({ brand, title, level = 'info', lines, overview, foo
   <div style="background:#ffffff;border:1px solid #e2e8f0;border-left:4px solid ${color};border-radius:12px;padding:14px 18px;margin:0 0 14px">
     <div style="font-size:17px;font-weight:700;color:#0f172a;margin-bottom:6px">${esc(title)}</div>${linesToHtml(lines)}${shareHtml}</div>
   ${overview?.html ? `<div style="font-size:14px;font-weight:700;color:#334155;margin:18px 2px 10px">成本概览 · ${esc(overview.label)}</div>${overview.html}` : ''}
-  <div style="font-size:11px;color:#94a3b8;line-height:1.7;padding:10px 2px 0">${esc(footer || '')}<br>金额口径：应付金额 = 原价 − 折扣 − 优惠券 / 代金券抵扣（税前），与费用中心账单一致。此邮件由系统自动发送，请勿直接回复。</div>
+  <div style="font-size:11px;color:#94a3b8;line-height:1.7;padding:10px 2px 0">${esc(footer || '')}<br>金额口径：应付金额 = 原价 − 折扣 − 优惠券 / 代金券、订阅抵扣（节省计划 / 资源包）、储值卡等抵扣（税前），与费用中心账单一致；抵扣按云厂商实际抵扣的日期计入，集中抵扣的日子应付可能为 0。此邮件由系统自动发送，请勿直接回复。</div>
 </td></tr></table></td></tr></table></body></html>`;
   const text = [title, '', ...(lines || []).map(l => l.replace(/\*\*/g, '').replace(/^#+\s*/, '')), '', overview?.text ? `—— 成本概览 · ${overview.label} ——\n${overview.text}` : '', share?.url ? `交互报表（${share.days} 天内有效，无需登录）：${share.url}` : '', '', footer || ''].join('\n');
   return { html, text };
