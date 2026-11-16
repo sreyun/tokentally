@@ -606,9 +606,11 @@ function cardPreview(r) {
   const d = r.doc, TONE = { bad: 'bad', warn: 'warn', good: 'good', up: 'bad', down: 'good' }, TXT = { bad: 'bad-text', warn: 'warn-text', good: 'ok-text', up: 'bad-text', down: 'ok-text' };
   const md = s => esc(s).replace(/\*\*(.+?)\*\*/g, '<b>$1</b>');
   // 用量（neutral）的涨跌不代表好坏：用主题色显示
-  const delta = x => (x ? `<span class="muted">${esc(x.label)}</span> <span class="${x.neutral ? (x.dir ? 'acc-text' : 'muted') : TXT[x.dir] || 'muted'}">${x.dir === 'up' ? '↑ ' : x.dir === 'down' ? '↓ ' : ''}${esc(x.dir ? String(x.text).replace(/^[+−-]/, '') : x.text)}</span>` : '');
+  // goodUp（缓存命中率）：上升是好事，颜色与费用相反
+  const delta = x => (x ? `<span class="muted">${esc(x.label)}</span> <span class="${x.neutral ? (x.dir ? 'acc-text' : 'muted') : (x.goodUp ? TXT[x.dir === 'up' ? 'down' : x.dir === 'down' ? 'up' : ''] : TXT[x.dir]) || 'muted'}">${x.dir === 'up' ? '↑ ' : x.dir === 'down' ? '↓ ' : ''}${esc(x.dir ? String(x.text).replace(/^[+−-]/, '') : x.text)}</span>` : '');
   const tags = (d.tags || []).filter(Boolean).map(t => `<span class="pill ${TONE[t.level] || 'info'}">${esc(t.text)}</span>`).join('');
-  const panel = list => (list?.length ? `<div class="fc-kpis">${list.map(k => `<div><span>${esc(k.label)}</span><b class="${TXT[k.tone] || ''}">${esc(k.value)}</b><small>${k.delta ? delta(k.delta) : esc(k.sub || '')}</small></div>`).join('')}</div>` : '');
+  // 说明行：涨跌与补充说明都有时（如缓存命中率的涨跌与估算节省）分两行，与飞书卡片一致
+  const panel = list => (list?.length ? `<div class="fc-kpis">${list.map(k => `<div><span>${esc(k.label)}</span><b class="${TXT[k.tone] || ''}">${esc(k.value)}</b>${k.delta ? `<small>${delta(k.delta)}</small>` : ''}${k.sub || !k.delta ? `<small>${esc(k.sub || '')}</small>` : ''}</div>`).join('')}</div>` : '');
   // 同一天的多个系列（应付 + 灰色的“优惠与抵扣”）与飞书卡片一样叠加为一根柱子，柱高为合计（即原价）
   const chart = c => {
     if (!c?.values?.length) return '';

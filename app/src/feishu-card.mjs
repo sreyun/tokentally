@@ -21,16 +21,20 @@ const font = (color, s) => (color ? `<font color='${color}'>${s}</font>` : s);
 const tagMd = (text, level) => `<text_tag color='${COLOR[level] || 'blue'}'>${safe(text)}</text_tag>`;
 const col = (weight, elements, extra = {}) => ({ tag: 'column', width: 'weighted', weight, vertical_align: 'center', elements, ...extra });
 
-/** 涨跌：费用上涨为红色 ↑，下降为绿色 ↓（费用越低越好） */
+/** 涨跌：费用上涨为红色 ↑，下降为绿色 ↓（费用越低越好）；goodUp（如缓存命中率）相反，上升为绿色 */
 function deltaMd(d) {
   if (!d) return '';
   const arrow = d.dir === 'up' ? '↑ ' : d.dir === 'down' ? '↓ ' : '';
   const text = d.dir ? String(d.text).replace(/^[+−-]/, '') : d.text;
   // 用量（neutral）的涨跌不代表好坏：统一用蓝色
-  return `${font('grey', safe(d.label))} ${font(d.neutral ? (d.dir ? 'blue' : 'grey') : COLOR[d.dir] || 'grey', arrow + safe(text))}`;
+  const color = d.neutral ? (d.dir ? 'blue' : 'grey') : d.goodUp ? COLOR[d.dir === 'up' ? 'down' : d.dir === 'down' ? 'up' : ''] || 'grey' : COLOR[d.dir] || 'grey';
+  return `${font('grey', safe(d.label))} ${font(color, arrow + safe(text))}`;
 }
 
-/** 指标面板：灰底分栏，每栏为“标签 / 数值 / 说明”；数值较长时用小一号字体，窄屏下不折行 */
+/**
+ * 指标面板：灰底分栏，每栏为“标签 / 数值 / 说明”；数值较长时用小一号字体，窄屏下不折行。
+ * 说明行为涨跌或补充说明；两者都有时（如缓存命中率的涨跌与估算节省）分两行显示
+ */
 function kpiPanel(kpis) {
   const long = kpis.some(k => String(k.value).length > 9) || kpis.length > 3;
   return {
@@ -38,7 +42,8 @@ function kpiPanel(kpis) {
     columns: kpis.map(k => col(1, [
       md(font('grey', safe(k.label)), { text_size: 'notation' }),
       md(font(COLOR[k.tone], `**${safe(k.value)}**`), { text_size: long ? 'heading-4' : 'heading-3' }),
-      ...(k.delta || k.sub ? [md(k.delta ? deltaMd(k.delta) : font('grey', safe(k.sub)), { text_size: 'notation' })] : []),
+      ...(k.delta ? [md(deltaMd(k.delta), { text_size: 'notation' })] : []),
+      ...(k.sub ? [md(font('grey', safe(k.sub)), { text_size: 'notation' })] : []),
     ], { vertical_align: 'top' })),
   };
 }

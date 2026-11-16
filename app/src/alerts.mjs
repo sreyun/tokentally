@@ -215,6 +215,56 @@ const pause = ms => (ms > 0 ? new Promise(r => setTimeout(r, ms)) : Promise.reso
 const BLUE = '#3370FF', BLUE_L = '#B7CBF9', TEAL = '#14A38B', TEAL_L = '#A7DED4', GREY_L = '#C9CDD4';
 
 /*
+ * 缓存命中率与估算节省：与成本概览“缓存命中率”指标卡相同的口径（前端 ioInfo / cacheSavings）——
+ * 命中率 = 缓存命中 Token ÷ 输入 Token（含命中与缓存创建）；估算节省 = 命中 Token × （同模型、同时段、同上下文档位的普通输入目录价 − 缓存命中目录价），
+ * 只统计按“千 tokens”计价的计费项
+ */
+function ioParts(io) {
+  let s = String(io || ''), ctx = '', thinking = false, time = '', cache = '';
+  const m = s.match(/^context_([^_]+)_(.+)$/); if (m) { ctx = m[1]; s = m[2]; }
+  if (/^thinking_/.test(s)) { thinking = true; s = s.slice(9); }
+  if (/_offpeak$/.test(s)) { time = 'offpeak'; s = s.slice(0, -8); } else if (/_peak$/.test(s)) { time = 'peak'; s = s.slice(0, -5); }
+  if (/cache_creation(?:_\w+)?$/.test(s)) cache = 'create'; else if (/cache/.test(s)) cache = 'hit';
+  const dir = /^output/.test(s) ? 'out' : /^input/.test(s) ? 'in' : /^embedding/.test(s) ? 'emb' : 'other';
+  return { dir, cache, thinking, time, ctx };
+}
+/** tokenIoRows 的结果 → { tIn, tHit, hit（无输入 Token 时为 null）, saved } */
+export function cacheStats(rows) {
+  let tIn = 0, tHit = 0, saved = 0;
+  const normal = new Map(), parsed = rows.map(r => ({ r, i: ioParts(r.io) }));
+  for (const { r, i } of parsed) {
+    if (i.dir === 'in') { tIn += r.tokens || 0; if (i.cache === 'hit') tHit += r.tokens || 0; }
+    if (i.dir !== 'in' || i.cache || i.thinking || !/千tokens/.test(r.list_price_unit || '')) continue;
+    const p = parseFloat(r.list_price);
+    if (Number.isFinite(p)) normal.set(`${r.model}|${i.time}|${i.ctx}`, p);
+  }
+  for (const { r, i } of parsed) {
+    if (i.cache !== 'hit' || !r.tokens || !/千tokens/.test(r.list_price_unit || '')) continue;
+    const np = normal.get(`${r.model}|${i.time}|${i.ctx}`), hp = parseFloat(r.list_price);
+    if (np != null && Number.isFinite(hp) && np > hp) saved += r.tokens / 1000 * (np - hp);
+  }
+  return { tIn, tHit, hit: tIn > 0 ? tHit / tIn : null, saved };
+}
+/**
+ * 输入输出比：输入 Token : 输出 Token（输入含缓存命中与缓存创建），化为“x : 1”，输出多于输入时为“1 : x”；
+ * 比值 10 以上取整、以下保留 1 位小数（如 174 : 1、4.2 : 1）。大模型调用通常输入远多于输出，按比例比百分比更直观
+ */
+export function ioTokens(rows) {
+  let i = 0, o = 0;
+  for (const r of rows) { const d = ioParts(r.io).dir; if (d === 'in') i += r.tokens || 0; else if (d === 'out') o += r.tokens || 0; }
+  return { i, o };
+}
+const ratioNum = v => (v >= 10 ? Math.round(v).toLocaleString('en-US') : v.toFixed(1));
+/** 输入或输出 Token 为 0 时返回 null（不显示） */
+export const ratioText = ({ i, o }) => (i > 0 && o > 0 ? `输入 : 输出 = ${i >= o ? `${ratioNum(i / o)} : 1` : `1 : ${ratioNum(o / i)}`}` : null);
+/** 命中率涨跌（百分点）：命中率上升是好事，卡片中上升显示为绿色（goodUp） */
+const ppDelta = (label, a, b) => { const d = (a - b) * 100; return { label, text: `${d >= 0 ? '+' : '−'}${Math.abs(d).toFixed(1)}pp`, dir: Math.abs(d) >= 0.05 ? (d > 0 ? 'up' : 'down') : null, goodUp: true }; };
+/** 缓存命中率指标卡（放在 Token 一行）：命中率、较上一周期涨跌、估算节省；没有输入 Token 时不显示 */
+const cacheKpi = (c, p, label) => (c.hit == null ? [] : [{ label: '缓存命中率', value: `${(c.hit * 100).toFixed(1)}%`, delta: p.hit == null ? null : ppDelta(label, c.hit, p.hit), sub: c.saved >= 0.005 ? `估算节省 ${yuan(c.saved)}` : `命中 ${tok(c.tHit)} Token` }]);
+/** 文本消息中 Token 行的后缀：“；缓存命中率 95.1%（较前一日 −0.1pp），估算节省 ¥x” */
+const cacheText = (c, p, label) => (c.hit == null ? '' : `；缓存命中率 ${(c.hit * 100).toFixed(1)}%${p.hit == null ? '' : `（${label} ${ppDelta(label, c.hit, p.hit).text}）`}${c.saved >= 0.005 ? `，估算节省 ${yuan(c.saved)}` : ''}`);
+
+/*
  * 优惠与抵扣 = 原价 − 应付。应付金额已扣除折扣、优惠券 / 代金券、订阅抵扣（节省计划 / 资源包，阿里云账单中的“订阅抵扣目录总价”）、储值卡等，抵扣按云厂商实际抵扣的日期计入，
  * 抵扣集中的日子应付可能为 0。报表中显示原价与优惠抵扣金额，并说明应付为 0 的日期，避免误读为当天没有用量
  */
@@ -544,7 +594,7 @@ export class AlertService {
   /**
    * 按推送范围过滤按日账单（dailyByKey(from, to, true) 的结果）：与成本概览、邮件、分享链接使用同一规则——
    * 业务空间范围同时匹配账单行的业务空间与 Key 当前所属的业务空间。此前只按“范围内的 Key”过滤，
-   * 业务空间下不属于任何 Key 的费用被漏掉，同一条报表中的“昨日费用”与“本月合计”口径不一致
+   * 业务空间下不属于任何 Key 的费用被漏掉，同一条报表中的“昨日应付”与“本月合计”口径不一致
    */
   scopeRows(rows, scope, keys = this.keyMap()) {
     const pred = scope && scopePredicate(scope, keys);
@@ -567,12 +617,15 @@ export class AlertService {
       const sections = [{ title: '昨日 API Key Top 5', rows: topRows([...byKey.values()], 5, r => this.keyName(r.id, keys), yc), ...head('cost', 'API Key', '范围内昨日总费用') }, { title: '昨日 Token 用量 · API Key Top 5', rows: tokRows([...byKey.values()], 5, r => this.keyName(r.id, keys), yt), ...head('token', 'API Key', '范围内昨日总 Token') }];
       const hasTok = (st.tokens || 0) > 0 || rows14.some(r => (r.tokens || 0) > 0);
       const yo = offStats(y), zn = zeroNote(yo, true);
-      const lines = [`**昨日（${day.slice(5)}）费用 ${yuan(yc)}**，较前一日 ${chg(yc, pc)}${offText(yo)}`, ...(zn ? [zn] : []), `${st.label} 合计 ${yuan(st.cost)}${st.forecast != null ? `，预计月末 ${yuan(st.forecast)}` : ''}${st.budget ? `，范围内 Key 预算 ${yuan(st.budget)}（已用 ${pct(st.cost / st.budget * 100)}）` : ''}`, ...(hasTok ? [`昨日 Token ${tok(yt)}，较前一日 ${chg(yt, pt)}${yt > 0 ? `，单位成本 ${perM(yc, yt)}` : ''}`] : []), scopeNote, ...sectionLines(sections)];
+      // 缓存命中率与估算节省（范围内，较前一日），放在 Token 一行
+      const io2 = hasTok ? this.scopeRows(this.store.tokenIoRows(addDays(day, -1), day), scope, keys) : [];
+      const cy = cacheStats(io2.filter(r => r.day === day)), cpd = cacheStats(io2.filter(r => r.day === addDays(day, -1)));
+      const lines = [`**昨日（${day.slice(5)}）应付 ${yuan(yc)}**，较前一日 ${chg(yc, pc)}${offText(yo)}`, ...(zn ? [zn] : []), `${st.label} 合计 ${yuan(st.cost)}${st.forecast != null ? `，预计月末 ${yuan(st.forecast)}` : ''}${st.budget ? `，范围内 Key 预算 ${yuan(st.budget)}（已用 ${pct(st.cost / st.budget * 100)}）` : ''}`, ...(hasTok ? [`昨日 Token ${tok(yt)}，较前一日 ${chg(yt, pt)}${yt > 0 ? `，单位成本 ${perM(yc, yt)}` : ''}${cacheText(cy, cpd, '较前一日')}`] : []), scopeNote, ...sectionLines(sections)];
       const d = delta('较前一日', yc, pc);
       const doc = {
         tags: [{ text: '指定范围', level: 'info' }],
-        kpis: [{ label: '昨日费用（元）', value: yuan(yc), delta: d }, ...offKpi('昨日原价（元）', yo), { label: `${st.label} 合计（元）`, value: yuan(st.cost), sub: st.forecast != null ? `预计月末 ${yuan(st.forecast)}` : '' }, ...budgetKpi],
-        usage: hasTok ? [{ label: '昨日 Token', value: tok(yt), delta: udelta('较前一日', yt, pt) }, { label: `${st.label} Token`, value: tok(st.tokens) }, { label: '昨日单位成本（元）', value: perMv(yc, yt), sub: '每百万 Token' }] : null,
+        kpis: [{ label: '昨日应付（元）', value: yuan(yc), delta: d }, ...offKpi('昨日原价（元）', yo), { label: `${st.label} 合计（元）`, value: yuan(st.cost), sub: st.forecast != null ? `预计月末 ${yuan(st.forecast)}` : '' }, ...budgetKpi],
+        usage: hasTok ? [{ label: '昨日 Token', value: tok(yt), delta: udelta('较前一日', yt, pt) }, { label: `${st.label} Token`, value: tok(st.tokens), ...((sr => (sr ? { sub: sr } : {}))(ratioText({ i: st.tokIn || 0, o: st.tokOut || 0 }))) }, { label: '昨日单位成本（元）', value: perMv(yc, yt), sub: '每百万 Token' }, ...cacheKpi(cy, cpd, '较前一日')] : null,
         notes: [zn, scopeNote].filter(Boolean), sections,
         chart: costChart('近 14 日每日费用（元）', rows14, addDays(day, -13), day, x => (x === day ? '昨日' : '此前'), { 此前: BLUE_L, 昨日: BLUE }),
         tokenChart: hasTok ? tokenChart('近 14 日每日 Token', rows14, addDays(day, -13), day, x => (x === day ? '昨日' : '此前'), { 此前: TEAL_L, 昨日: TEAL }) : null,
@@ -585,10 +638,14 @@ export class AlertService {
     const sections = [{ title: 'API Key Top 5', rows: rowsOf(st.topKeys), ...head('cost', 'API Key', pb + '费用') }, { title: '模型 Top 3', rows: rowsOf(st.topModels), ...head('cost', '模型', pb + '费用') }, { title: 'Token 用量 · API Key Top 5', rows: tRows(st.tokenKeys), ...head('token', 'API Key', pb + ' Token') }, { title: 'Token 用量 · 模型 Top 3', rows: tRows(st.tokenModels), ...head('token', '模型', pb + ' Token') }];
     const hasTok = (st.tokens || 0) > 0 || (st.prevTokens || 0) > 0;
     const so = { gross: st.gross || 0, cost: st.cost, off: (st.gross || 0) - st.cost, zero: st.zeroDays || [] }, zn = zeroNote(so);
-    const lines = [`**${kind === 'weekly' ? '上周' : period + ' 账期'}费用 ${yuan(st.cost)}**，较${st.prevLabel} ${chg(st.cost, st.prevCost)}${offText(so)}`, ...(zn ? [zn] : []), ...(hasTok ? [`Token ${tok(st.tokens)}，较${st.prevLabel} ${chg(st.tokens || 0, st.prevTokens || 0)}${st.tokens > 0 ? `，单位成本 ${perM(st.cost, st.tokens)}` : ''}`] : []), scopeNote, ...sectionLines(sections)];
+    // 周报：范围内的缓存命中率与估算节省（较前一周），放在 Token 一行；月报不加
+    const lw = isoWeek(addDays(isoWeek(today).from, -1)), pw = isoWeek(addDays(lw.from, -1));
+    const io2 = kind === 'weekly' && hasTok ? this.scopeRows(this.store.tokenIoRows(pw.from, lw.to), scope, keys) : [];
+    const cw = kind === 'weekly' ? cacheStats(io2.filter(r => r.day >= lw.from)) : { hit: null }, cpw = cacheStats(io2.filter(r => r.day < lw.from));
+    const lines = [`**${kind === 'weekly' ? '上周' : period + ' 账期'}应付 ${yuan(st.cost)}**，较${st.prevLabel} ${chg(st.cost, st.prevCost)}${offText(so)}`, ...(zn ? [zn] : []), ...(hasTok ? [`Token ${tok(st.tokens)}，较${st.prevLabel} ${chg(st.tokens || 0, st.prevTokens || 0)}${st.tokens > 0 ? `，单位成本 ${perM(st.cost, st.tokens)}` : ''}${cacheText(cw, cpw, '较前一周')}`] : []), scopeNote, ...sectionLines(sections)];
     const d = delta('较' + st.prevLabel, st.cost, st.prevCost);
-    const doc = { tags: [{ text: '指定范围', level: 'info' }], kpis: [{ label: kind === 'weekly' ? '上周费用（元）' : `${period} 应付（元）`, value: yuan(st.cost), delta: d }, ...offKpi(kind === 'weekly' ? '上周原价（元）' : '原价（元）', so), { label: `${st.prevLabel}（元）`, value: yuan(st.prevCost) }, ...(kind === 'monthly' ? budgetKpi : [])],
-      usage: hasTok ? [{ label: kind === 'weekly' ? '上周 Token' : `${period} Token`, value: tok(st.tokens), delta: udelta('较' + st.prevLabel, st.tokens || 0, st.prevTokens || 0) }, { label: '单位成本（元）', value: perMv(st.cost, st.tokens), sub: '每百万 Token' }] : null, notes: [zn, scopeNote].filter(Boolean), sections };
+    const doc = { tags: [{ text: '指定范围', level: 'info' }], kpis: [{ label: kind === 'weekly' ? '上周应付（元）' : `${period} 应付（元）`, value: yuan(st.cost), delta: d }, ...offKpi(kind === 'weekly' ? '上周原价（元）' : '原价（元）', so), { label: `${st.prevLabel}（元）`, value: yuan(st.prevCost) }, ...(kind === 'monthly' ? budgetKpi : [])],
+      usage: hasTok ? [{ label: kind === 'weekly' ? '上周 Token' : `${period} Token`, value: tok(st.tokens), delta: udelta('较' + st.prevLabel, st.tokens || 0, st.prevTokens || 0) }, { label: '单位成本（元）', value: perMv(st.cost, st.tokens), sub: '每百万 Token' }, ...cacheKpi(cw, cpw, '较前一周')] : null, notes: [zn, scopeNote].filter(Boolean), sections };
     return { title: `${kind === 'weekly' ? '费用周报' : '费用月报'} · ${period}${tag}`, level: 'info', lines, doc, empty: st.cost < 0.005 && st.prevCost < 0.005 && so.gross < 0.005 && (st.prevGross || 0) < 0.005, period, ready: kind === 'monthly' ? globalReady : true, path: '#/overview' };
   }
 
@@ -784,7 +841,7 @@ export class AlertService {
       const fc = isCur ? this.forecast(daily, cycle, today) : null;
       // 原价与优惠抵扣：优惠券 / 节省计划等集中抵扣的日子应付可能为 0，标题行附原价，并说明应付为 0 的原因
       const yo = offStats(y), zn = zeroNote(yo, true);
-      const lines = [`**昨日（${day.slice(5)}）费用 ${yuan(yc)}**，较前一日 ${chg(yc, pc)}${offText(yo)}`];
+      const lines = [`**昨日（${day.slice(5)}）应付 ${yuan(yc)}**，较前一日 ${chg(yc, pc)}${offText(yo)}`];
       if (zn) lines.push(zn);
       lines.push(`${isCur ? '本月累计' : `${cycle} 合计`} ${yuan(mtd)}${fc != null ? `，预计月末 ${yuan(fc)}` : ''}${b.monthly ? `，月度预算 ${yuan(b.monthly)}（已用 ${pct(mtd / b.monthly * 100)}）` : ''}`);
       const ps = provSplit(y); if (ps) lines.push(ps);
@@ -792,7 +849,12 @@ export class AlertService {
       const mt = mrows.reduce((s, r) => s + (r.tokens || 0), 0), mg = mrows.reduce((s, r) => s + (r.gross || 0), 0);
       // 没有任何 Token 数据（账单不含用量，如只有按次 / 按张计费的模型）时不显示用量：否则只是一组“0 / 持平 / —”和全为 0 的趋势图
       const hasTok = mt > 0 || rows14.some(r => (r.tokens || 0) > 0);
-      if (hasTok) lines.push(`昨日 Token ${tok(yt)}，较前一日 ${chg(yt, pt)}${yt > 0 ? `，单位成本 ${perM(yc, yt)}` : ''}；${isCur ? '本月' : cycle} 累计 ${tok(mt)}`);
+      // 缓存命中率与估算节省（与成本概览指标卡同一口径），放在 Token 一行
+      const io2 = hasTok ? this.store.tokenIoRows(addDays(day, -1), day) : [];
+      // 本月累计 Token 的输入输出比（月账单，与月累计 Token 同一数据源）
+      const mr = hasTok ? ratioText(ioTokens(this.store.monthTokenIo(cycle))) : null;
+      const cy = cacheStats(io2.filter(r => r.day === day)), cpd = cacheStats(io2.filter(r => r.day === addDays(day, -1)));
+      if (hasTok) lines.push(`昨日 Token ${tok(yt)}，较前一日 ${chg(yt, pt)}${yt > 0 ? `，单位成本 ${perM(yc, yt)}` : ''}；${isCur ? '本月' : cycle} 累计 ${tok(mt)}${mr ? `（${mr}）` : ''}${cacheText(cy, cpd, '较前一日')}`);
       const an = this.evaluateAnomaly(today);
       const byKeyY = sumBy(y, r => r.id).map(x => ({ id: x.k, cost: x.cost, tokens: x.tokens })), byModelY = this.store.dailyByModel(day, day);
       const sections = [
@@ -807,8 +869,8 @@ export class AlertService {
       const doc = {
         // 昨日应付因全部抵扣为 0 时不显示“较前一日 ↓ 100%”：费用并没有下降
         tags: [zn ? null : dirTag(d), an.length ? { text: `${an.length} 项异常`, level: 'warn' } : null],
-        kpis: [{ label: '昨日费用（元）', value: yuan(yc), delta: d }, ...offKpi('昨日原价（元）', yo), { label: isCur ? '本月累计（元）' : `${cycle} 合计（元）`, value: yuan(mtd), sub: fc != null ? `预计月末 ${yuan(fc)}` : '' }, ...budgetKpi(mtd)],
-        usage: hasTok ? [{ label: '昨日 Token', value: tok(yt), delta: udelta('较前一日', yt, pt) }, { label: isCur ? '本月累计 Token' : `${cycle} Token`, value: tok(mt) }, { label: '昨日单位成本（元）', value: perMv(yc, yt), sub: '每百万 Token' }] : null,
+        kpis: [{ label: '昨日应付（元）', value: yuan(yc), delta: d }, ...offKpi('昨日原价（元）', yo), { label: isCur ? '本月累计（元）' : `${cycle} 合计（元）`, value: yuan(mtd), sub: fc != null ? `预计月末 ${yuan(fc)}` : '' }, ...budgetKpi(mtd)],
+        usage: hasTok ? [{ label: '昨日 Token', value: tok(yt), delta: udelta('较前一日', yt, pt) }, { label: isCur ? '本月累计 Token' : `${cycle} Token`, value: tok(mt), ...(mr ? { sub: mr } : {}) }, { label: '昨日单位成本（元）', value: perMv(yc, yt), sub: '每百万 Token' }, ...cacheKpi(cy, cpd, '较前一日')] : null,
         notes: [zn, ps].filter(Boolean), sections,
         chart: costChart('近 14 日每日费用（元）', rows14, addDays(day, -13), day, x => (x === day ? '昨日' : '此前'), { 此前: BLUE_L, 昨日: BLUE }),
         tokenChart: hasTok ? tokenChart('近 14 日每日 Token', rows14, addDays(day, -13), day, x => (x === day ? '昨日' : '此前'), { 此前: TEAL_L, 昨日: TEAL }) : null,
@@ -823,11 +885,13 @@ export class AlertService {
       const c = cur.reduce((s, r) => s + r.cost, 0), o = old.reduce((s, r) => s + r.cost, 0);
       const ct = cur.reduce((s, r) => s + (r.tokens || 0), 0), ot = old.reduce((s, r) => s + (r.tokens || 0), 0);
       const wo = offStats(cur), og = old.reduce((s, r) => s + (r.gross || 0), 0), zn = zeroNote(wo);
-      const lines = [`**上周（${last.from.slice(5)} ~ ${last.to.slice(5)}）费用 ${yuan(c)}**，较前一周 ${chg(c, o)}，日均 ${yuan(c / 7)}${offText(wo)}`];
+      const lines = [`**上周（${last.from.slice(5)} ~ ${last.to.slice(5)}）应付 ${yuan(c)}**，较前一周 ${chg(c, o)}，日均应付 ${yuan(c / 7)}${offText(wo)}`];
       if (zn) lines.push(zn);
       const ps = provSplit(cur); if (ps) lines.push(ps);
       const hasTok = ct > 0 || ot > 0;
-      if (hasTok) lines.push(`上周 Token ${tok(ct)}，较前一周 ${chg(ct, ot)}，日均 ${tok(ct / 7)}${ct > 0 ? `，单位成本 ${perM(c, ct)}` : ''}`);
+      const io2 = hasTok ? this.store.tokenIoRows(prev.from, last.to) : [];
+      const cw = cacheStats(io2.filter(r => r.day >= last.from)), cpw = cacheStats(io2.filter(r => r.day < last.from));
+      if (hasTok) lines.push(`上周 Token ${tok(ct)}，较前一周 ${chg(ct, ot)}，日均 ${tok(ct / 7)}${ct > 0 ? `，单位成本 ${perM(c, ct)}` : ''}${cacheText(cw, cpw, '较前一周')}`);
       const byModelW = this.store.dailyByModel(last.from, last.to);
       const kc = sumBy(cur, r => r.id), ko = new Map(sumBy(old, r => r.id).map(x => [x.k, x.cost]));
       const up = kc.map(x => ({ id: x.k, d: x.cost - (ko.get(x.k) || 0) })).filter(x => x.d >= 1).sort((x, y) => y.d - x.d).slice(0, 3);
@@ -842,8 +906,8 @@ export class AlertService {
       const d = delta('较前一周', c, o);
       const doc = {
         tags: [dirTag(d)],
-        kpis: [{ label: '上周费用（元）', value: yuan(c), delta: d }, ...offKpi('上周原价（元）', wo), { label: '日均费用（元）', value: yuan(c / 7), sub: `前一周日均 ${yuan(o / 7)}` }, { label: '有消费的 API Key', value: `${kc.filter(x => x.cost > 0.005).length} 个`, sub: `前一周 ${[...ko.values()].filter(v => v > 0.005).length} 个` }],
-        usage: hasTok ? [{ label: '上周 Token', value: tok(ct), delta: udelta('较前一周', ct, ot) }, { label: '日均 Token', value: tok(ct / 7), sub: `前一周日均 ${tok(ot / 7)}` }, { label: '单位成本（元）', value: perMv(c, ct), sub: '每百万 Token' }] : null,
+        kpis: [{ label: '上周应付（元）', value: yuan(c), delta: d }, ...offKpi('上周原价（元）', wo), { label: '日均应付（元）', value: yuan(c / 7), sub: `前一周日均 ${yuan(o / 7)}` }, { label: '有消费的 API Key', value: `${kc.filter(x => x.cost > 0.005).length} 个`, sub: `前一周 ${[...ko.values()].filter(v => v > 0.005).length} 个` }],
+        usage: hasTok ? [{ label: '上周 Token', value: tok(ct), delta: udelta('较前一周', ct, ot) }, { label: '日均 Token', value: tok(ct / 7), sub: `前一周日均 ${tok(ot / 7)}` }, { label: '单位成本（元）', value: perMv(c, ct), sub: '每百万 Token' }, ...cacheKpi(cw, cpw, '较前一周')] : null,
         notes: [`统计周期：${last.from} ~ ${last.to}（较前一周 ${prev.from.slice(5)} ~ ${prev.to.slice(5)}）`, zn, ps].filter(Boolean), sections,
         chart: costChart('近两周每日费用（元）', rows, prev.from, last.to, x => (x >= last.from ? '上周' : '前一周'), { 前一周: BLUE_L, 上周: BLUE }),
         tokenChart: hasTok ? tokenChart('近两周每日 Token', rows, prev.from, last.to, x => (x >= last.from ? '上周' : '前一周'), { 前一周: TEAL_L, 上周: TEAL }) : null,

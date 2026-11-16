@@ -277,7 +277,7 @@ export function renderOverviewHtml(spec, { store, today, link = '', scope = null
   return { html, text: (inScope ? `范围：${scope.label || ''}\n` : '') + text, label: fullLabel, total: cur.cost,
     stats: { cost: cur.cost, prevCost: pv.cost, gross: cur.gross, prevGross: pv.gross, zeroDays, prevLabel, forecast, budget, label, topKeys: keyItems.slice(0, 5).map(a => ({ name: keyName(a.key), cost: a.cost })), topModels: modelItems.slice(0, 3).map(a => ({ name: a.key, cost: a.cost })),
       // Token 用量（报表消息中的用量指标与 Token 排行）
-      tokens: cur.tokens, prevTokens: pv.tokens,
+      tokens: cur.tokens, prevTokens: pv.tokens, tokIn: cur.tIn, tokOut: cur.tOut,
       tokenKeys: [...byKey.values()].filter(a => a.tokens > 0).sort((a, b) => b.tokens - a.tokens).slice(0, 5).map(a => ({ name: keyName(a.key), tokens: a.tokens })),
       tokenModels: [...byModel.values()].filter(a => a.tokens > 0).sort((a, b) => b.tokens - a.tokens).slice(0, 3).map(a => ({ name: a.key, tokens: a.tokens })) } };
 }

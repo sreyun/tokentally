@@ -783,6 +783,19 @@ export class Store {
     return this.q(`SELECT model, SUM(pretax) AS cost, SUM(COALESCE(tokens, 0)) AS tokens FROM bill_lines WHERE granularity = 'D' AND period >= ? AND period <= ? GROUP BY model`).all(from, to);
   }
   countLines(gran, from, to) { return this.q('SELECT COUNT(*) AS n FROM bill_lines WHERE granularity = ? AND period >= ? AND period <= ?').get(gran, from, to).n; }
+  /**
+   * 缓存命中率与估算节省（日报 / 周报）：日账单按 日 × Key × 业务空间 × 模型 × Token 类型 × 目录单价 汇总 Token，
+   * 与成本概览“缓存命中率”指标卡使用同一口径（命中 Token ÷ 输入 Token；节省 = 命中 Token × 输入与缓存的目录价差）
+   */
+  tokenIoRows(from, to) {
+    return this.q(`SELECT period AS day, COALESCE(api_key_id, '') AS id, COALESCE(workspace_id, '') AS ws, model, io, list_price, list_price_unit, SUM(tokens) AS tokens
+      FROM bill_lines WHERE granularity = 'D' AND period >= ? AND period <= ? AND tokens > 0
+      GROUP BY period, COALESCE(api_key_id, ''), COALESCE(workspace_id, ''), model, io, list_price, list_price_unit`).all(from, to);
+  }
+  /** 指定账期的月账单按 Token 类型汇总（日报“本月累计 Token”的输出 / 输入比，与月累计 Token 同一数据源） */
+  monthTokenIo(cycle) {
+    return this.q("SELECT io, SUM(tokens) AS tokens FROM bill_lines WHERE granularity = 'M' AND period = ? AND tokens > 0 GROUP BY io").all(cycle);
+  }
   /** 按日应付金额合计（日账单） */
   dailyCost(from, to) {
     return this.q("SELECT period AS day, SUM(pretax) AS cost FROM bill_lines WHERE granularity = 'D' AND period >= ? AND period <= ? GROUP BY period").all(from, to).map(r => ({ day: r.day, cost: r.cost || 0 }));
