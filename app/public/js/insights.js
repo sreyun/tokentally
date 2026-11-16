@@ -139,8 +139,9 @@ export function computeInsights() {
   // 9. 新增模型
   // 是否“新增”与上一个完整周期比较（本月进行中时 prev 只是上月同期，月初会把常用模型误判为新增）
   const prevModels = new Set(filterLines(state.prevFull).map(l => l.model));
-  const newModels = sortedAggs(aggregate(lines, l => l.model)).filter(a => a.cost > 0 && !prevModels.has(a.key));
-  if (newModels.length && prevLines.length) out.push({ level: 'info', icon: 'model', rank: 8, title: `本期新增使用 ${newModels.length} 个模型`, html: newModels.slice(0, 4).map(a => `${b(a.key)} ${esc(money(a.cost))}`).join('、') + (newModels.length > 4 ? ' 等' : '') + '。', ...(newModels.length === 1 ? { model: newModels[0].key, modelLabel: '查看该模型' } : { go: '#/models', goLabel: '模型分析' }) });
+  // 按用量判断（被全额抵扣、应付为 0 的新模型同样算新增使用）
+  const newModels = sortedAggs(aggregate(lines, l => l.model), a => a.cost + a.gross * 1e-9).filter(a => (a.cost > 0 || a.gross >= 0.005) && !prevModels.has(a.key));
+  if (newModels.length && prevLines.length) out.push({ level: 'info', icon: 'model', rank: 8, title: `本期新增使用 ${newModels.length} 个模型`, html: newModels.slice(0, 4).map(a => `${b(a.key)} ${esc(money(a.cost))}${a.cost > 0 ? '' : '（已全部抵扣）'}`).join('、') + (newModels.length > 4 ? ' 等' : '') + '。', ...(newModels.length === 1 ? { model: newModels[0].key, modelLabel: '查看该模型' } : { go: '#/models', goLabel: '模型分析' }) });
 
   // 10. 腾讯云费用口径：目录价估算 / 未匹配到用量
   const est = sum(lines.filter(l => l.alloc === 2), metricVal);

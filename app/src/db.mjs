@@ -780,7 +780,7 @@ export class Store {
       FROM bill_lines WHERE granularity = 'D' AND period >= ? AND period <= ? GROUP BY period, COALESCE(api_key_id, ''), provider${ws}`).all(from, to);
   }
   dailyByModel(from, to) {
-    return this.q(`SELECT model, SUM(pretax) AS cost, SUM(COALESCE(tokens, 0)) AS tokens FROM bill_lines WHERE granularity = 'D' AND period >= ? AND period <= ? GROUP BY model`).all(from, to);
+    return this.q(`SELECT model, SUM(pretax) AS cost, SUM(gross) AS gross, SUM(COALESCE(tokens, 0)) AS tokens FROM bill_lines WHERE granularity = 'D' AND period >= ? AND period <= ? GROUP BY model`).all(from, to);
   }
   countLines(gran, from, to) { return this.q('SELECT COUNT(*) AS n FROM bill_lines WHERE granularity = ? AND period >= ? AND period <= ?').get(gran, from, to).n; }
   /**
@@ -805,7 +805,7 @@ export class Store {
     return this.q(`SELECT COALESCE(api_key_id, '') AS id, provider, SUM(pretax) AS cost, SUM(gross) AS gross, SUM(COALESCE(tokens, 0)) AS tokens FROM bill_lines WHERE granularity = 'M' AND period = ? GROUP BY COALESCE(api_key_id, ''), provider`).all(cycle);
   }
   monthByModel(cycle) {
-    return this.q(`SELECT model, SUM(pretax) AS cost, SUM(COALESCE(tokens, 0)) AS tokens FROM bill_lines WHERE granularity = 'M' AND period = ? GROUP BY model`).all(cycle);
+    return this.q(`SELECT model, SUM(pretax) AS cost, SUM(gross) AS gross, SUM(COALESCE(tokens, 0)) AS tokens FROM bill_lines WHERE granularity = 'M' AND period = ? GROUP BY model`).all(cycle);
   }
   /**
    * 数据版本指纹：账单、用量、Key/空间元数据、标签、预算任一变化都会改变，用于 /api/data 的 ETag 与前端轮询判断是否需要重新加载。

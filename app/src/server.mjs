@@ -22,7 +22,7 @@ import { ShareService, filterData, SHARE_DAYS } from './share.mjs';
 import { scopePredicate } from './overview-mail.mjs';
 import { loadMasterKey, hashPassword, verifyPassword, burnPasswordCheck, checkPasswordPolicy, randomPassword, maskId, sha256 } from './crypto.mjs';
 
-const VERSION = '1.10.4';
+const VERSION = '1.10.5';
 
 /* ===================================================================
  * 系统日志：所有运行日志同时输出到控制台并写入数据库（system_log，保留 SYSTEM_LOG_DAYS 天），
@@ -625,7 +625,8 @@ function setupOut(dv, st, providers) {
     providers: PROVIDER_LIST.filter(p => providers[p].configured),
     billsSynced: PROVIDER_LIST.some(p => !!st.providers[p]?.bills?.lastSuccessAt),
     keys: kt.keys, taggedKeys: kt.tagged,
-    budget: b.monthly != null || Object.keys(b.keys || {}).length > 0 || Object.keys(b.costCenters || {}).length > 0,
+    // 只统计大于 0 的预算（告警与页面都把 0 当作未设置）
+    budget: Number(b.monthly) > 0 || Object.values(b.keys || {}).some(v => Number(v) > 0) || Object.values(b.costCenters || {}).some(v => Number(v) > 0),
     channels: alerts.settings().channels.filter(c => c.enabled).length,
     publicUrl: !!config.publicUrl,
   };

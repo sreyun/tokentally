@@ -63,8 +63,9 @@ jobs:
         env:
           INPUT_TAG: ${{ inputs.tag }}
           INPUT_LATEST: ${{ inputs.push_latest }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
             VERSION="$INPUT_TAG"
             PUSH_LATEST="$INPUT_LATEST"
           else
@@ -73,6 +74,11 @@ jobs:
           fi
           if [ -z "$VERSION" ]; then
             echo "::error::未解析到版本号（tag 为空）"
+            exit 1
+          fi
+          # tag 名只允许 v主版本.次版本.修订号[-预发布]：git tag 名可以包含 $( ) 与反引号，后续步骤会用到版本号与镜像标签，先在这里挡住
+          if ! printf '%s' "$VERSION" | grep -Eq '^v?[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'; then
+            echo "::error::tag 格式应为 v主版本.次版本.修订号[-预发布]（如 v1.10.5、v1.10.5-rc1）"
             exit 1
           fi
           BIN_VERSION="${VERSION#v}"      # 镜像版本：去掉前缀 v
@@ -253,18 +259,25 @@ jobs:
           path: trivy.txt
           if-no-files-found: ignore
 
+      # 步骤输出通过环境变量传入（不直接拼进脚本），避免内容被当作 shell 代码执行
       - name: Summary
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          TRIVY: ${{ steps.trivy.outcome }}
+          SBOM: ${{ steps.sbom.outcome }}
+          SIGN: ${{ steps.sign.outcome }}
         run: |
           {
             echo "### 镜像已推送到华为云 SWR"
             echo
             echo '```'
-            echo "${{ steps.meta.outputs.tags }}"
+            echo "$TAGS"
             echo '```'
             echo
-            echo "架构：\`${PLATFORMS}\`　版本：\`${{ steps.meta.outputs.version }}\`"
+            echo "架构：\`${PLATFORMS}\`　版本：\`${VERSION}\`"
             echo
-            echo "漏洞扫描：${{ steps.trivy.outcome }}　SBOM：${{ steps.sbom.outcome }}（见本次运行的 Artifacts）　签名：${{ steps.sign.outcome }}"
+            echo "漏洞扫描：${TRIVY}　SBOM：${SBOM}（见本次运行的 Artifacts）　签名：${SIGN}"
             echo
-            echo "拉取：\`docker pull ${SWR_REGISTRY}/${SWR_NAMESPACE}/${IMAGE_NAME}:${{ steps.meta.outputs.version }}\`"
+            echo "拉取：\`docker pull ${SWR_REGISTRY}/${SWR_NAMESPACE}/${IMAGE_NAME}:${VERSION}\`"
           } >> "$GITHUB_STEP_SUMMARY"

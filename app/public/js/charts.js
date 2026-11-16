@@ -162,7 +162,10 @@ export function lineChart(el, { xs, lines, height = 260, xLabel = x => x, tipTit
 
 /** 两行式排行：名称/数值 + 条形/占比/环比 */
 export function rankList(el, items, { fmt = v => money(v), limit = 10, onClick, total, showDelta = false, goodWhenUp = false, empty = '暂无数据', color } = {}) {
-  items = items.filter(i => i.value > 0);
+  // 金额为 0 但有原价的项（被优惠券或订阅抵扣——节省计划 / 资源包——全额覆盖）同样保留：排在有金额的项之后、按原价排序，并标注“已全部抵扣”。
+  // 此前只保留金额大于 0 的项，默认“应付”口径下多个 Key / 模型在用，排行只剩一两个，与 Token 总量、原价对不上（gross 由调用方传入）
+  const off = i => !(i.value > 0) && (i.gross || 0) >= 0.005;
+  items = [...items.filter(i => i.value > 0), ...items.filter(off).sort((a, b) => b.gross - a.gross)];
   if (!items.length) { el.innerHTML = `<div class="nodata">${esc(empty)}</div>`; return; }
   const max = Math.max(...items.map(i => i.value)) || 1;
   const tot = total ?? sum(items, i => i.value);
@@ -170,8 +173,8 @@ export function rankList(el, items, { fmt = v => money(v), limit = 10, onClick, 
   el.innerHTML = `<ol class="rank">${shown.map((it, i) => `<li class="${onClick ? 'clickable' : ''}" data-idx="${i}" ${onClick ? 'tabindex="0" role="button"' : ''} ${it.tip ? `data-tip="${esc(it.tip)}"` : ''}>
       <span class="rank-no">${i + 1}</span>
       <div><div class="rank-top"><span class="rank-label" title="${esc(it.label + (it.sub ? " · " + it.sub : ""))}">${esc(it.label)}${it.sub ? `<small>${esc(it.sub)}</small>` : ''}</span><span class="rank-val">${esc(fmt(it.value))}</span></div>
-      <div class="rank-bot"><span class="rank-bar"><i style="width:${Math.max(1, it.value / max * 100).toFixed(1)}%;background:${it.color || color || 'var(--s1)'}"></i></span>
-      <span class="rank-meta">${tot ? pct(it.value, tot) : ''}${showDelta ? ' ' + deltaPill(it.value, it.prev ?? 0, { goodWhenUp }) : ''}${it.extra ? ' ' + it.extra : ''}</span></div></div></li>`).join('')}</ol>
+      <div class="rank-bot"><span class="rank-bar"><i style="width:${Math.max(1, it.value / max * 100).toFixed(1)}%;background:${off(it) ? 'var(--other)' : it.color || color || 'var(--s1)'}"></i></span>
+      <span class="rank-meta">${off(it) ? `<span class="pill neutral" title="应付为 0：已由优惠券或订阅抵扣（节省计划 / 资源包）等全部抵扣，不代表没有用量">已全部抵扣 · 原价 ${esc(money(it.gross))}</span>` : `${tot ? pct(it.value, tot) : ''}${showDelta ? ' ' + deltaPill(it.value, it.prev ?? 0, { goodWhenUp }) : ''}`}${it.extra ? ' ' + it.extra : ''}</span></div></div></li>`).join('')}</ol>
     ${items.length > limit ? `<div class="more">另有 ${items.length - limit} 项未显示</div>` : ''}`;
   bindActivate(el, 'li[data-idx]', li => onClick && onClick(shown[+li.dataset.idx]));
 }

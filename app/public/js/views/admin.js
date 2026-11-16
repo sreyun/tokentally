@@ -687,7 +687,7 @@ async function alerts(el) {
       <div id="rPrev" class="report-prev"><div class="nodata">加载中…</div></div></section>
     <section class="panel c5"><div class="panel-h"><h3>告警状态</h3><span class="sub">账期 ${esc(al.state.cycle)}</span></div>
       <h4 class="sec-h" style="margin-top:0">当前满足条件、尚未通知的预算告警</h4>
-      ${al.pending.length ? `<ul class="alert-list">${al.pending.map(t => `<li class="warn">${esc(t)}</li>`).join('')}</ul>` : `<p class="hint" style="margin:0">${state.budgets.monthly || Object.keys(state.budgets.keys || {}).length || Object.keys(state.budgets.costCenters || {}).length ? '暂无（未达到任何阈值，或已通知过）' : '尚未设置预算'}</p>`}
+      ${al.pending.length ? `<ul class="alert-list">${al.pending.map(t => `<li class="warn">${esc(t)}</li>`).join('')}</ul>` : `<p class="hint" style="margin:0">${Number(state.budgets.monthly) > 0 || [...Object.values(state.budgets.keys || {}), ...Object.values(state.budgets.costCenters || {})].some(v => Number(v) > 0) ? '暂无（未达到任何阈值，或已通知过）' : '尚未设置预算'}</p>`}
       <h4 class="sec-h">最近通知记录</h4>
       ${al.state.history.length ? `<ul class="alert-list">${al.state.history.map(h => `<li class="${h.level === 'bad' ? 'bad' : h.level === 'good' ? 'good' : h.level === 'warn' ? 'warn' : 'info'}"><b>${esc(fmtTime(h.at))}</b> · ${esc(h.chName || '')} · ${esc(h.title || evs[h.event]?.label || '')}<div class="muted">${(h.items || []).slice(0, 3).map(esc).join('；')}</div></li>`).join('')}</ul>` : '<p class="hint" style="margin:0">暂无</p>'}
     </section>

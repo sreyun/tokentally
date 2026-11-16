@@ -70,7 +70,8 @@ export function keyRows() {
     if ((f.cc || f.owner) && id === NONE_KEY && !byKey.has(id)) return false;
     if (q && !byKey.has(id) && !`${id} ${keyDesc(id)} ${k ? wsName(k.wsKey) : ''} ${k?.costCenter || ''} ${k?.owner || ''}`.toLowerCase().includes(q)) return false;
     if (narrowing && !byKey.has(id)) return false;
-    if (ui.onlySpent && !(byKey.get(id)?.cost > 0)) return false;
+    // “有消费”按用量判断（金额或原价大于 0）：被优惠券或订阅抵扣全额覆盖、应付为 0 的 Key 同样算有消费
+    if (ui.onlySpent && !((u => u && (u.cost > 0 || u.gross >= 0.005))(byKey.get(id)))) return false;
     return true;
   });
   const month = state.data.period.mode === 'month';
@@ -115,7 +116,7 @@ export function render(v) {
   const { rows, total } = keyRows();
   const month = state.data.period.mode === 'month';
   const all = [...state.apiKeys.values()];
-  const spent = rows.filter(r => r.cost > 0 && r.id !== NONE_KEY);
+  const spent = rows.filter(r => (r.cost > 0 || r.gross >= 0.005) && r.id !== NONE_KEY);
   const top = rows.slice().sort((a, b) => b.cost - a.cost)[0];
   const withBudget = rows.filter(r => r.budget);
   const over = withBudget.filter(r => r.budgetUsed >= r.budget || (r.fc != null && r.fc >= r.budget));

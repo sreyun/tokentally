@@ -192,7 +192,7 @@ export function render(v, id) {
   }));
   $('#csvI', v).onclick = () => ti.csv(`Key_${id}_计费项_${periodTag()}.csv`);
 
-  rankList($('#kCh', v), sortedAggs(aggregate(lines, l => l.channel)).map(x => ({ id: x.key, label: channelLabel(x.key), sub: x.key || '', value: x.cost })), { total: a.cost, onClick: it => app.setFilter({ key: id, channel: it.id }, '#/detail', true) });
+  rankList($('#kCh', v), sortedAggs(aggregate(lines, l => l.channel)).map(x => ({ id: x.key, label: channelLabel(x.key), sub: x.key || '', value: x.cost, gross: x.gross })), { total: a.cost, onClick: it => app.setFilter({ key: id, channel: it.id }, '#/detail', true) });
   v.querySelector('[data-key-detail]').onclick = () => app.setFilter({ key: id }, '#/detail', true);
   v.querySelector('[data-edit-tags]')?.addEventListener('click', () => editTags([id]));
   loadChanges(v, id);

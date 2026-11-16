@@ -455,17 +455,17 @@ export function renderDetail(v, arg) {
 
   // 模型排行
   const pm = aggregate(prevLines, l => l.model);
-  rankList($('#gdModels', v), sortedAggs(aggregate(lines, l => l.model)).map(x => ({ id: x.key, label: x.key, sub: `${x.keys.size} 个 Key · ${compact(totalTokens(x))} Token`, value: x.cost, prev: pm.get(x.key)?.cost ?? 0, color: DIMS.model.color(x.key) })),
+  rankList($('#gdModels', v), sortedAggs(aggregate(lines, l => l.model)).map(x => ({ id: x.key, label: x.key, sub: `${x.keys.size} 个 Key · ${compact(totalTokens(x))} Token`, value: x.cost, gross: x.gross, prev: pm.get(x.key)?.cost ?? 0, color: DIMS.model.color(x.key) })),
     { total: a.cost, showDelta: true, limit: 12, onClick: it => app.openModel(it.id, scope) });
 
   // 关联维度
   const rel = ui.grpRel;
   if (rel === 'channel') {
-    rankList($('#gdRel', v), sortedAggs(aggregate(lines, l => l.channel)).map(x => ({ id: x.key, label: channelLabel(x.key), sub: x.key || '', value: x.cost })),
+    rankList($('#gdRel', v), sortedAggs(aggregate(lines, l => l.channel)).map(x => ({ id: x.key, label: channelLabel(x.key), sub: x.key || '', value: x.cost, gross: x.gross })),
       { total: a.cost, limit: 10, onClick: it => app.setFilter({ ...scope, channel: it.id }, '#/detail', true) });
   } else {
     const rp = aggregate(prevLines, dimVal[rel]);
-    rankList($('#gdRel', v), sortedAggs(aggregate(lines, dimVal[rel])).map(x => ({ id: x.key, label: dimName(rel, x.key), sub: `${[...x.keys].filter(k => k !== NONE_KEY).length} 个 Key`, value: x.cost, prev: rp.get(x.key)?.cost ?? 0, color: DIMS[rel].color(x.key) })),
+    rankList($('#gdRel', v), sortedAggs(aggregate(lines, dimVal[rel])).map(x => ({ id: x.key, label: dimName(rel, x.key), sub: `${[...x.keys].filter(k => k !== NONE_KEY).length} 个 Key`, value: x.cost, gross: x.gross, prev: rp.get(x.key)?.cost ?? 0, color: DIMS[rel].color(x.key) })),
       { total: a.cost, showDelta: true, limit: 10, onClick: it => app.go(groupHash(rel, it.id)) });
   }
 

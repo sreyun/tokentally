@@ -72,7 +72,7 @@ export function render(v) {
   const reqN = sum(rows, r => r.requests || 0), reqTok = sum(rows, r => (r.requests ? r.uTokens : 0));
   v.innerHTML = `
     <div class="stat-strip">
-      <div><span>使用模型</span><b>${rows.filter(r => r.cost > 0).length}</b></div>
+      <div><span>使用模型</span><b>${rows.filter(r => r.cost > 0 || r.gross >= 0.005 || (r.tIn || 0) + (r.tOut || 0) > 0).length}</b></div>
       <div><span>本期费用 · ${METRICS[ui.f.metric]}</span><b>${money(all.cost)}</b></div>
       <div><span>Token 总量</span><b title="${intFmt(tok)}">${compact(tok)}</b></div>
       <div><span>平均 ¥/百万Token</span><b>${tok ? money(all.cost / tok * 1e6) : '—'}</b></div>
@@ -276,12 +276,12 @@ export function openModel(model, scope = null) {
     });
     rankList($('#dmKeys'), sortedAggs(aggregate(lines, DIMS.key.of)).map(x => {
       const k = state.apiKeys.get(x.key);
-      return { id: x.key, label: keyShort(x.key), sub: [k ? dimName('ws', k.wsKey || NO_WS) : '', `${compact(totalTokens(x))} Token`, (u => (u && u.requests ? `${intFmt(u.requests)} 次 · 单次 ${intFmt(u.tokens / u.requests)} Token` : ''))(usByKey.get(x.key === NONE_KEY ? '' : x.key))].filter(Boolean).join(' · '), value: x.cost, prev: pk.get(x.key)?.cost ?? 0, color: DIMS.key.color(x.key) };
+      return { id: x.key, label: keyShort(x.key), sub: [k ? dimName('ws', k.wsKey || NO_WS) : '', `${compact(totalTokens(x))} Token`, (u => (u && u.requests ? `${intFmt(u.requests)} 次 · 单次 ${intFmt(u.tokens / u.requests)} Token` : ''))(usByKey.get(x.key === NONE_KEY ? '' : x.key))].filter(Boolean).join(' · '), value: x.cost, gross: x.gross, prev: pk.get(x.key)?.cost ?? 0, color: DIMS.key.color(x.key) };
     }), { total: a.cost, showDelta: true, limit: 20, onClick: it => { if (it.id !== NONE_KEY) { d.close(); app.go(`#/key/${encodeURIComponent(it.id)}`); } } });
   }
   if ($('#dmWs')) {
     const pw = aggregate(prevLines, dimVal.ws);
-    rankList($('#dmWs'), sortedAggs(aggregate(lines, dimVal.ws)).map(x => ({ id: x.key, label: dimName('ws', x.key), sub: `${x.keys.size} 个 Key · ${compact(totalTokens(x))} Token`, value: x.cost, prev: pw.get(x.key)?.cost ?? 0, color: DIMS.ws.color(x.key) })),
+    rankList($('#dmWs'), sortedAggs(aggregate(lines, dimVal.ws)).map(x => ({ id: x.key, label: dimName('ws', x.key), sub: `${x.keys.size} 个 Key · ${compact(totalTokens(x))} Token`, value: x.cost, gross: x.gross, prev: pw.get(x.key)?.cost ?? 0, color: DIMS.ws.color(x.key) })),
       { total: a.cost, showDelta: true, limit: 12, onClick: it => { d.close(); app.go(groupHash('ws', it.id)); } });
   }
   const byItem = aggregate(lines, l => `${l.io}\u0001${l.listPrice}\u0001${l.listPriceUnit}`);

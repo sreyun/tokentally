@@ -45,8 +45,10 @@ export function render(v) {
   const hit = cur.tIn ? cur.tCache / cur.tIn : null, pHit = prev.tIn ? prev.tCache / prev.tIn : null;
   const byKey = aggregate(lines, DIMS.key.of), pByKey = aggregate(prevLines, DIMS.key.of);
   const byModel = aggregate(lines, DIMS.model.of), pByModel = aggregate(prevLines, DIMS.model.of);
-  const active = [...byKey.values()].filter(a => a.cost > 0 && a.key !== NONE_KEY).length;
-  const pActive = [...pByKey.values()].filter(a => a.cost > 0 && a.key !== NONE_KEY).length;
+  // 活跃 Key / 使用模型按用量统计（金额、原价或 Token 任一大于 0）：被优惠券或订阅抵扣全额覆盖、应付为 0 的 Key / 模型同样算在用
+  const used = a => a.cost > 0 || a.gross >= 0.005 || totalTokens(a) > 0;
+  const active = [...byKey.values()].filter(a => used(a) && a.key !== NONE_KEY).length;
+  const pActive = [...pByKey.values()].filter(a => used(a) && a.key !== NONE_KEY).length;
   const top1 = sortedAggs(byKey)[0];
   const disc = cur.gross ? 1 - cur.pretax / cur.gross : 0;
   const noTok = !lines.some(l => l.tokens != null);
@@ -90,7 +92,7 @@ export function render(v) {
     ${kpi('token', 'Token 总量', noTok ? '—' : compact(tokens), noTok ? '' : deltaPill(tokens, pTokens, { neutral: true }), noTok ? '' : state.compareLabel, noBills ? NB : noTok ? '当前数据无用量' : ua && ua.requests ? `请求 ${compact(ua.requests)} 次 · 单次 ${intFmt(ua.tokens / ua.requests)} Token` : `输入 ${compact(cur.tIn)} · 输出 ${compact(cur.tOut)}`, intFmt(tokens), '#/models', '查看模型 Token 结构', noTok ? '' : spk('sky', ds.map(d => d.tok), '每日 Token', compact))}
     ${kpi('unit', '每百万 Token 成本', perM == null ? '—' : money(perM), perM == null ? '' : deltaPill(perM, pPerM), perM == null ? '' : state.compareLabel, '费用 ÷ 总 Token × 10⁶', '', '', '', perM == null ? '' : spk('amber', ds.map(d => d.perM), '每日每百万 Token 成本', v => money(v), { zero: false }))}
     ${kpi('cache', '缓存命中率', hit == null ? '—' : (hit * 100).toFixed(1) + '%', hit == null ? '' : deltaPill(hit, pHit, { pp: true, goodWhenUp: true }), hit == null ? '' : state.compareLabel, saved > 0.01 ? `估算节省 ${moneyShort(saved)}` : hit == null ? '—' : `命中 ${compact(cur.tCache)} Token`, '', '', '', hit == null ? '' : spk('indigo', ds.map(d => d.hit), '每日缓存命中率', pctF, { zero: false }))}
-    ${kpi('model', '使用模型', noBills ? '—' : String([...byModel.values()].filter(a => a.cost > 0).length), '', '', noBills ? NB : byModel.size ? `主力：${sortedAggs(byModel)[0].key}` : '—', '', '#/models', '查看模型分析', spk('fuchsia', ds.map(d => d.models), '每日使用的模型', cnt))}
+    ${kpi('model', '使用模型', noBills ? '—' : String([...byModel.values()].filter(used).length), '', '', noBills ? NB : byModel.size ? `主力：${sortedAggs(byModel, a => a.cost + a.gross * 1e-9)[0].key}` : '—', '', '#/models', '查看模型分析', spk('fuchsia', ds.map(d => d.models), '每日使用的模型', cnt))}
   </div>
 
   <div class="bi">
@@ -143,11 +145,11 @@ export function render(v) {
   // 排行只显示前 10 项：只为前面的项生成提示内容（上千个 Key 时逐个生成会明显拖慢页面）
   rankList($('#rkKeys'), sortedAggs(byKey).map((a, i) => ({
     id: a.key, label: keyShort(a.key), sub: a.key === NONE_KEY ? '' : [multiCloud() ? PROVIDERS[state.apiKeys.get(a.key)?.provider || 'aliyun'] : '', state.apiKeys.get(a.key)?.costCenter || wsName(state.apiKeys.get(a.key)?.wsKey || [...a.wss][0] || '')].filter(Boolean).join(' · '),
-    value: a.cost, prev: pByKey.get(a.key)?.cost ?? 0, color: DIMS.key.color(a.key),
+    value: a.cost, gross: a.gross, prev: pByKey.get(a.key)?.cost ?? 0, color: DIMS.key.color(a.key),
     tip: i >= 12 ? '' : tipRows(DIMS.key.short(a.key), [['费用', money(a.cost)], ['占比', pct(a.cost, cur.cost)], ['上期', money(pByKey.get(a.key)?.cost || 0)], ['Token', compact(totalTokens(a))], ['主要模型', topModels(a, 2).join('、')]]),
   })), { total: cur.cost, showDelta: true, onClick: it => (it.id === NONE_KEY ? app.setFilter({ key: NONE_KEY }, '#/detail') : app.go(`#/key/${encodeURIComponent(it.id)}`)) });
   rankList($('#rkModels'), sortedAggs(byModel).map((a, i) => ({
-    id: a.key, label: a.key, sub: `${a.keys.size} 个 Key`, value: a.cost, prev: pByModel.get(a.key)?.cost ?? 0, color: DIMS.model.color(a.key),
+    id: a.key, label: a.key, sub: `${a.keys.size} 个 Key`, value: a.cost, gross: a.gross, prev: pByModel.get(a.key)?.cost ?? 0, color: DIMS.model.color(a.key),
     tip: i >= 12 ? '' : tipRows(a.key, [['费用', money(a.cost)], ['占比', pct(a.cost, cur.cost)], ['上期', money(pByModel.get(a.key)?.cost || 0)], ['Token', compact(totalTokens(a))], ['每百万 Token', totalTokens(a) ? money(a.cost / totalTokens(a) * 1e6) : '—']]),
   })), { total: cur.cost, showDelta: true, onClick: it => app.openModel(it.id) });
 

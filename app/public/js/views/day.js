@@ -53,19 +53,19 @@ export function openDay(date, scope = null) {
   if (!lines.length) { $('#dyItems').innerHTML = '<div class="nodata">当天没有费用</div>'; ['#dyKeys', '#dyWs', '#dyModels'].forEach(x => { const el = $(x); if (el) el.innerHTML = ''; }); return; }
   if (showKeys) {
     const pk = aggregate(prevLines, DIMS.key.of);
-    rankList($('#dyKeys'), sortedAggs(aggregate(lines, DIMS.key.of)).map(x => ({ id: x.key, label: keyShort(x.key), sub: x.key !== NONE_KEY ? [dimName('ws', state.apiKeys.get(x.key)?.wsKey || '__nows'), x.key].join(' · ') : '', value: x.cost, prev: pk.get(x.key)?.cost ?? 0, color: DIMS.key.color(x.key) })),
+    rankList($('#dyKeys'), sortedAggs(aggregate(lines, DIMS.key.of)).map(x => ({ id: x.key, label: keyShort(x.key), sub: x.key !== NONE_KEY ? [dimName('ws', state.apiKeys.get(x.key)?.wsKey || '__nows'), x.key].join(' · ') : '', value: x.cost, gross: x.gross, prev: pk.get(x.key)?.cost ?? 0, color: DIMS.key.color(x.key) })),
       { total: a.cost, showDelta: true, limit: 20, onClick: it => { if (it.id !== NONE_KEY) { d.close(); app.go(`#/key/${encodeURIComponent(it.id)}`); } } });
   }
   if (showWs) {
     const pw = aggregate(prevLines, dimVal.ws);
-    rankList($('#dyWs'), sortedAggs(aggregate(lines, dimVal.ws)).map(x => ({ id: x.key, label: dimName('ws', x.key), sub: `${x.keys.size} 个 Key`, value: x.cost, prev: pw.get(x.key)?.cost ?? 0, color: DIMS.ws.color(x.key) })),
+    rankList($('#dyWs'), sortedAggs(aggregate(lines, dimVal.ws)).map(x => ({ id: x.key, label: dimName('ws', x.key), sub: `${x.keys.size} 个 Key`, value: x.cost, gross: x.gross, prev: pw.get(x.key)?.cost ?? 0, color: DIMS.ws.color(x.key) })),
       { total: a.cost, showDelta: true, limit: 12, onClick: it => { d.close(); app.go(groupHash('ws', it.id)); } });
   }
   if (showModels) {
     const pm = aggregate(prevLines, l => l.model);
     // 模型详情沿用当前范围（不限定日期）
     const mScope = s ? { ...s } : null;
-    rankList($('#dyModels'), sortedAggs(aggregate(lines, l => l.model)).map(x => ({ id: x.key, label: x.key, sub: `${compact(totalTokens(x))} Token`, value: x.cost, prev: pm.get(x.key)?.cost ?? 0, color: DIMS.model.color(x.key) })),
+    rankList($('#dyModels'), sortedAggs(aggregate(lines, l => l.model)).map(x => ({ id: x.key, label: x.key, sub: `${compact(totalTokens(x))} Token`, value: x.cost, gross: x.gross, prev: pm.get(x.key)?.cost ?? 0, color: DIMS.model.color(x.key) })),
       { total: a.cost, showDelta: true, limit: 20, onClick: it => app.openModel(it.id, mScope) });
   }
   const byItem = aggregate(lines, l => `${l.model}\u0001${l.io}`);
