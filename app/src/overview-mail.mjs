@@ -205,7 +205,7 @@ export function renderOverviewHtml(spec, { store, today, link = '', scope = null
   const keyItems = [...byKey.values()].filter(a => a.cost > 0.005 || a.gross >= 0.005).sort(rankSort);
   const kRank = rankTable(keyItems.slice(0, 10).map(a => ({ name: keyName(a.key), sub: a.key ? `${a.key}${keys.get(a.key)?.workspace_name ? ' · ' + keys.get(a.key).workspace_name : ''}` : '', cost: a.cost, gross: a.gross, prev: pByKey.get(a.key)?.cost || 0 })), { total: cur.cost, nameHead: 'API Key', extra: keyItems.length > 10 ? `另有 ${keyItems.length - 10} 个 Key 未显示` : '' });
   const modelItems = [...byModel.values()].filter(a => a.cost > 0.005 || a.gross >= 0.005).sort(rankSort);
-  const mRank = rankTable(modelItems.slice(0, 10).map(a => ({ name: a.key, sub: `${compact(a.tokens)} Token`, cost: a.cost, gross: a.gross, prev: pByModel.get(a.key)?.cost || 0 })), { total: cur.cost, nameHead: '模型', extra: modelItems.length > 10 ? `另有 ${modelItems.length - 10} 个模型未显示` : '' });
+  const mRank = rankTable(modelItems.slice(0, 10).map(a => ({ name: a.key, sub: `${compact(a.tokens)} tokens`, cost: a.cost, gross: a.gross, prev: pByModel.get(a.key)?.cost || 0 })), { total: cur.cost, nameHead: '模型', extra: modelItems.length > 10 ? `另有 ${modelItems.length - 10} 个模型未显示` : '' });
 
   // Token 用量排行（API Key / 模型）：按 Token 排序，每行按自身大小换算单位（K / M / B）
   const tokRank = (items, nameHead) => {
@@ -297,9 +297,9 @@ export function renderOverviewHtml(spec, { store, today, link = '', scope = null
     ${section('Key 治理', '风险与合规检查', govHtml)}
     ${section('关键发现', '', insHtml)}
     ${link ? `<div style="text-align:center;margin:6px 0 4px"><a href="${esc(link)}" style="display:inline-block;padding:9px 18px;background:#2563eb;color:#ffffff;border-radius:8px;text-decoration:none;font-size:13px;font-weight:600">在系统中查看完整成本概览</a></div>` : ''}`;
-  const text = [...(hasTok ? [`${label} Token ${tok(cur.tokens)}，输入 ${tok(cur.tIn)}，输出 ${tok(cur.tOut)}${hit != null ? `，缓存命中率 ${(hit * 100).toFixed(1)}%` : ''}`] : []), `${label} 应付金额 ${yuan(cur.cost)}（原价 ${yuan(cur.gross)}，折扣 ${yuan(discount)}，优惠券抵扣 ${yuan(coupons)}）`, `较${prevLabel} ${yuan(pv.cost)}`,
+  const text = [...(hasTok ? [`${label} Token ${tok(cur.tokens)}，输入 ${tok(cur.tIn)} tokens，输出 ${tok(cur.tOut)} tokens${hit != null ? `，缓存命中率 ${(hit * 100).toFixed(1)}%` : ''}`] : []), `${label} 应付金额 ${yuan(cur.cost)}（原价 ${yuan(cur.gross)}，折扣 ${yuan(discount)}，优惠券抵扣 ${yuan(coupons)}）`, `较${prevLabel} ${yuan(pv.cost)}`,
     forecast != null ? `预计本月 ${yuan(forecast)}` : `日均 ${yuan(avgDay)}`, `活跃 API Key ${activeKeys} 个 · 使用模型 ${models} 个${hasTok ? '' : ` · Token ${compact(cur.tokens)}`}`,
-    ...(hasTok ? ['', 'API Key Token 用量排行：', ...byTok(byKey).slice(0, 10).map((a, i) => `${i + 1}. ${keyName(a.key)} ${compact(a.tokens)} Token（${pct(a.tokens, cur.tokens)}）`)] : []),
+    ...(hasTok ? ['', 'API Key Token 用量排行：', ...byTok(byKey).slice(0, 10).map((a, i) => `${i + 1}. ${keyName(a.key)} ${compact(a.tokens)} tokens（${pct(a.tokens, cur.tokens)}）`)] : []),
     '', 'API Key 费用排行：', ...keyItems.slice(0, 10).map((a, i) => `${i + 1}. ${keyName(a.key)} ${yuan(a.cost)}（${a.cost > 0.005 ? pct(a.cost, cur.cost) : `已全部抵扣，原价 ${yuan(a.gross)}`}）`),
     '', '模型费用排行：', ...modelItems.slice(0, 10).map((a, i) => `${i + 1}. ${a.key} ${yuan(a.cost)}（${a.cost > 0.005 ? pct(a.cost, cur.cost) : `已全部抵扣，原价 ${yuan(a.gross)}`}）`)].join('\n');
   const fullLabel = inScope ? `${label} · ${scope.label || '指定范围'}` : label;

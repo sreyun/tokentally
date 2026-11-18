@@ -126,7 +126,7 @@ export function render(v) {
     { limit: 12, onClick: r => openModel(r.model), meta: r => (r.hit != null ? `命中 ${(r.hit * 100).toFixed(0)}%` : '') });
   // 用量过小的模型单位成本无参考意义：只比较 Token ≥ 10 万的模型
   const unitRows = rows.filter(r => r.perM != null && r.tokens >= 1e5);
-  rankList($('#mdUnit', v), (unitRows.length ? unitRows : rows.filter(r => r.perM != null)).sort((a, b) => b.perM - a.perM).map(r => ({ id: r.model, label: r.model, sub: `${tokFmt(r.tokens)} Token`, value: r.perM, color: DIMS.model.color(r.model) })),
+  rankList($('#mdUnit', v), (unitRows.length ? unitRows : rows.filter(r => r.perM != null)).sort((a, b) => b.perM - a.perM).map(r => ({ id: r.model, label: r.model, sub: `${tokFmt(r.tokens)} tokens`, value: r.perM, color: DIMS.model.color(r.model) })),
     { limit: 12, total: 0, onClick: it => openModel(it.id) });
   const excluded = rows.filter(r => r.perM != null && r.tokens < 1e5).length;
   if (unitRows.length && excluded) $('#mdUnit', v).insertAdjacentHTML('beforeend', `<div class="panel-foot">仅比较 Token ≥ 10 万的模型，另有 ${excluded} 个低用量模型未列入（见上方明细表）。</div>`);
@@ -276,12 +276,12 @@ export function openModel(model, scope = null) {
     });
     rankList($('#dmKeys'), sortedAggs(aggregate(lines, DIMS.key.of)).map(x => {
       const k = state.apiKeys.get(x.key);
-      return { id: x.key, label: keyShort(x.key), sub: [k ? dimName('ws', k.wsKey || NO_WS) : '', `${tokFmt(totalTokens(x))} Token`, (u => (u && u.requests ? `${intFmt(u.requests)} 次 · 单次 ${intFmt(u.tokens / u.requests)} Token` : ''))(usByKey.get(x.key === NONE_KEY ? '' : x.key))].filter(Boolean).join(' · '), value: x.cost, gross: x.gross, prev: pk.get(x.key)?.cost ?? 0, color: DIMS.key.color(x.key) };
+      return { id: x.key, label: keyShort(x.key), sub: [k ? dimName('ws', k.wsKey || NO_WS) : '', `${tokFmt(totalTokens(x))} tokens`, (u => (u && u.requests ? `${intFmt(u.requests)} 次 · 单次 ${intFmt(u.tokens / u.requests)} Token` : ''))(usByKey.get(x.key === NONE_KEY ? '' : x.key))].filter(Boolean).join(' · '), value: x.cost, gross: x.gross, prev: pk.get(x.key)?.cost ?? 0, color: DIMS.key.color(x.key) };
     }), { total: a.cost, showDelta: true, limit: 20, onClick: it => { if (it.id !== NONE_KEY) { d.close(); app.go(`#/key/${encodeURIComponent(it.id)}`); } } });
   }
   if ($('#dmWs')) {
     const pw = aggregate(prevLines, dimVal.ws);
-    rankList($('#dmWs'), sortedAggs(aggregate(lines, dimVal.ws)).map(x => ({ id: x.key, label: dimName('ws', x.key), sub: `${x.keys.size} 个 Key · ${tokFmt(totalTokens(x))} Token`, value: x.cost, gross: x.gross, prev: pw.get(x.key)?.cost ?? 0, color: DIMS.ws.color(x.key) })),
+    rankList($('#dmWs'), sortedAggs(aggregate(lines, dimVal.ws)).map(x => ({ id: x.key, label: dimName('ws', x.key), sub: `${x.keys.size} 个 Key · ${tokFmt(totalTokens(x))} tokens`, value: x.cost, gross: x.gross, prev: pw.get(x.key)?.cost ?? 0, color: DIMS.ws.color(x.key) })),
       { total: a.cost, showDelta: true, limit: 12, onClick: it => { d.close(); app.go(groupHash('ws', it.id)); } });
   }
   const byItem = aggregate(lines, l => `${l.io}\u0001${l.listPrice}\u0001${l.listPriceUnit}`);

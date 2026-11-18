@@ -72,7 +72,7 @@ export function render(v, id) {
         : tile('layers', '费用排名', rank ? `第 ${rank}<small>/ ${allByKey.length}</small>` : '—', '', '', `占全部费用 ${pct(a.cost, totalAll)}`)}
       ${tile('token', 'Token 总量', tokFmt(tokens), deltaPill(tokens, ptokens, { neutral: true }), state.compareLabel, `输入 ${tokFmt(a.tIn)} · 输出 ${tokFmt(a.tOut)}`)}
       ${tile('unit', '每百万 Token 成本', perM == null ? '—' : money(perM), perM == null ? '' : deltaPill(perM, pPerM), perM == null ? '' : state.compareLabel, '费用 ÷ 总 Token × 10⁶')}
-      ${tile('cache', '缓存命中率', hit == null ? '—' : (hit * 100).toFixed(1) + '%', hit == null ? '' : deltaPill(hit, pHit, { pp: true, goodWhenUp: true }), hit == null ? '' : state.compareLabel, hit == null ? '—' : `命中 ${tokFmt(a.tCache)} Token`)}
+      ${tile('cache', '缓存命中率', hit == null ? '—' : (hit * 100).toFixed(1) + '%', hit == null ? '' : deltaPill(hit, pHit, { pp: true, goodWhenUp: true }), hit == null ? '' : state.compareLabel, hit == null ? '—' : `命中 ${tokFmt(a.tCache)} tokens`)}
       ${budget ? budgetTile(a.pretax, budget, fc?.value ?? null)
         : tile('calendar', fc ? '预计本月' : '近 7 天', fc ? money(fc.value) : moneyShort(act?.c7 || 0), '', '', fc ? `日均 ${money(fc.avg)}` : `近 30 天 ${moneyShort(act?.c30 || 0)} · 最近 ${act?.lastDay ? act.lastDay.slice(5) : '—'}`)}
     </div></div>

@@ -232,7 +232,7 @@ export function render(v) {
 
   // 单位成本
   const unit = rows.filter(r => r.perM != null && r.tokens >= 1e5).sort((a, b) => b.perM - a.perM);
-  rankList($('#gUnit', v), unit.map(r => ({ id: r.id, label: r.name, sub: `${tokFmt(r.tokens)} Token`, value: r.perM, color: colorOf.get(r.id) || 'var(--other)' })),
+  rankList($('#gUnit', v), unit.map(r => ({ id: r.id, label: r.name, sub: `${tokFmt(r.tokens)} tokens`, value: r.perM, color: colorOf.get(r.id) || 'var(--other)' })),
     { limit: 10, total: 0, empty: 'Token ≥ 10 万的分组不足', onClick: it => app.go(groupHash(dim, it.id)) });
 }
 
@@ -455,7 +455,7 @@ export function renderDetail(v, arg) {
 
   // 模型排行
   const pm = aggregate(prevLines, l => l.model);
-  rankList($('#gdModels', v), sortedAggs(aggregate(lines, l => l.model)).map(x => ({ id: x.key, label: x.key, sub: `${x.keys.size} 个 Key · ${tokFmt(totalTokens(x))} Token`, value: x.cost, gross: x.gross, prev: pm.get(x.key)?.cost ?? 0, color: DIMS.model.color(x.key) })),
+  rankList($('#gdModels', v), sortedAggs(aggregate(lines, l => l.model)).map(x => ({ id: x.key, label: x.key, sub: `${x.keys.size} 个 Key · ${tokFmt(totalTokens(x))} tokens`, value: x.cost, gross: x.gross, prev: pm.get(x.key)?.cost ?? 0, color: DIMS.model.color(x.key) })),
     { total: a.cost, showDelta: true, limit: 12, onClick: it => app.openModel(it.id, scope) });
 
   // 关联维度

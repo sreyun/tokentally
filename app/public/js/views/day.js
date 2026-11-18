@@ -65,7 +65,7 @@ export function openDay(date, scope = null) {
     const pm = aggregate(prevLines, l => l.model);
     // 模型详情沿用当前范围（不限定日期）
     const mScope = s ? { ...s } : null;
-    rankList($('#dyModels'), sortedAggs(aggregate(lines, l => l.model)).map(x => ({ id: x.key, label: x.key, sub: `${tokFmt(totalTokens(x))} Token`, value: x.cost, gross: x.gross, prev: pm.get(x.key)?.cost ?? 0, color: DIMS.model.color(x.key) })),
+    rankList($('#dyModels'), sortedAggs(aggregate(lines, l => l.model)).map(x => ({ id: x.key, label: x.key, sub: `${tokFmt(totalTokens(x))} tokens`, value: x.cost, gross: x.gross, prev: pm.get(x.key)?.cost ?? 0, color: DIMS.model.color(x.key) })),
       { total: a.cost, showDelta: true, limit: 20, onClick: it => app.openModel(it.id, mScope) });
   }
   const byItem = aggregate(lines, l => `${l.model}\u0001${l.io}`);

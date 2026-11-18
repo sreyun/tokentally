@@ -22,5 +22,5 @@ export function tokUnit(max) {
 export const tokIn = (n, u) => (Number(n || 0) / u.div).toLocaleString('zh-CN', { minimumFractionDigits: u.dec, maximumFractionDigits: u.dec }) + (u.unit ? ' ' + u.unit : '');
 /** 单个数值：按自身大小取单位 */
 export const tok = n => tokIn(n, tokUnit(n));
-/** 图表标题中的单位：“M”；不足 1 千时为“个” */
-export const tokUnitLabel = u => u.unit || '个';
+/** 图表标题中的单位：“M tokens”；不足 1 千时为“tokens” */
+export const tokUnitLabel = u => (u.unit ? `${u.unit} tokens` : 'tokens');
