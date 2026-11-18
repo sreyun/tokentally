@@ -34,7 +34,7 @@ docker compose up -d --build
 也可以不在服务器上构建，直接使用发布到华为云容器镜像服务（SWR）的镜像（amd64 / arm64，见[第 9 节](#9-镜像构建与发布华为云-swr)）：在 `.env` 中设置 `APP_IMAGE`（生产环境建议固定版本号）后拉取并启动：
 
 ```bash
-echo 'APP_IMAGE=swr.cn-east-3.myhuaweicloud.com/sreyun/tokentally:1.10.1' >> .env
+echo 'APP_IMAGE=swr.cn-east-3.myhuaweicloud.com/sreyun/tokentally:1.10.10' >> .env
 ```
 
 ```bash
@@ -209,7 +209,7 @@ scrape_configs:
 | 提示缺少接口权限 | 按“权限”章节为 RAM / CAM 子用户授权，权限生效约需 1 分钟 |
 | 腾讯云费用出现在“无 API Key” | 该部分账单在 TokenHub 用量中找不到对应模型（控制台体验、非 API Key 调用、超过 90 天的账期等） |
 | 已保存的密钥无法解密 | `APP_MASTER_KEY` 被更换；恢复原主密钥，或在管理页重新填写访问密钥与告警渠道 |
-| 告警未收到 | 在“告警通知”中点“测试”；查看渠道卡片的最近错误；钉钉 / 飞书“自定义关键词”建议设为“费用”或产品名称。保存配置不会立即推送：报表看渠道卡片上的“下次报表”时间，告警在出现新的条件时发送 |
+| 告警未收到 | 在“告警通知”中点“测试”；查看渠道卡片的最近错误；钉钉 / 飞书“自定义关键词”建议设为“Token”“费用”或产品名称（有 Token 数据时报表标题为“Token 用量日报 / 周报 / 月报”）。保存配置不会立即推送：报表看渠道卡片上的“下次报表”时间，告警在出现新的条件时发送 |
 | 阿里云调用次数“发现指标”找不到指标 | 确认百炼已开启监控数据投递且投递到所填实例（投递后约数分钟出现数据）；HTTP API 地址填写实例“设置”页中的地址；VPC 内网地址需本系统位于同一 VPC |
 | 调用次数提示“标签值未匹配” | 所选 API Key 标签的值不是 API Key ID（或 Key 尚未同步）；在“发现指标”结果中改选正确的标签，或先同步 API Key |
 | 页面放着不动一段时间后要求重新登录 | 正常：后台轮询不会延长会话，空闲超过 `SESSION_IDLE_MINUTES`（默认 120 分钟）后需重新登录 |
@@ -221,19 +221,19 @@ scrape_configs:
 
 | 触发 | 行为 |
 |---|---|
-| 创建 tag `v1.10.1` | 校验版本 + 构建 + 启动自检 + 推送：`1.10.1`、`1.10`、`1`、`latest`、`sha-xxxxxxx` |
-| 创建预发布 tag `v1.10.1-rc1` | 只推 `1.10.1-rc1`、`sha-xxxxxxx`，不动 `latest` / `1.10` / `1` |
+| 创建 tag `v1.10.10` | 校验版本 + 构建 + 启动自检 + 推送：`1.10.10`、`1.10`、`1`、`latest`、`sha-xxxxxxx` |
+| 创建预发布 tag `v1.10.10-rc1` | 只推 `1.10.10-rc1`、`sha-xxxxxxx`，不动 `latest` / `1.10` / `1` |
 | 推送 `main` / Pull Request | 不构建镜像（质量门禁由 `ci` 工作流负责） |
 | 手动触发（workflow_dispatch） | 填写要发布的 tag 与是否更新 `latest`；按该 tag 检出源码，版本与内容严格对应 |
 
 发布流程（先把 `app/package.json`、`app/src/server.mjs` 与 `docker-compose.yml` 中的版本号改为新版本并提交）：
 
 ```bash
-git tag -a v1.10.1 -m v1.10.1
+git tag -a v1.10.10 -m v1.10.10
 ```
 
 ```bash
-git push origin v1.10.1
+git push origin v1.10.10
 ```
 
 需要在仓库 **Settings → Secrets and variables → Actions** 配置两个 Secret：
@@ -258,7 +258,7 @@ printf '%s' "$AK" | openssl dgst -binary -sha256 -hmac "$SK" | od -An -vtx1 | tr
 | `IMAGE_NAME` | `tokentally` | 镜像名 |
 
 ```bash
-docker pull swr.cn-east-3.myhuaweicloud.com/sreyun/tokentally:1.10.1
+docker pull swr.cn-east-3.myhuaweicloud.com/sreyun/tokentally:1.10.10
 ```
 
 - **版本必须与 tag 一致**：版本号写在源码中，tag（去掉前缀 `v` 与预发布后缀）与 `package.json`、`server.mjs` 不一致时不发布，避免镜像显示的版本与标签不符。
@@ -274,13 +274,13 @@ docker pull swr.cn-east-3.myhuaweicloud.com/sreyun/tokentally:1.10.1
 服务器不能访问 SWR 时，在能联网的机器上按服务器架构拉取并导出镜像，拷贝到服务器后导入：
 
 ```bash
-docker pull --platform linux/amd64 swr.cn-east-3.myhuaweicloud.com/sreyun/tokentally:1.10.1
-docker save -o tokentally-image.tar swr.cn-east-3.myhuaweicloud.com/sreyun/tokentally:1.10.1
+docker pull --platform linux/amd64 swr.cn-east-3.myhuaweicloud.com/sreyun/tokentally:1.10.10
+docker save -o tokentally-image.tar swr.cn-east-3.myhuaweicloud.com/sreyun/tokentally:1.10.10
 ```
 
 ```bash
 docker load -i tokentally-image.tar
-echo 'APP_IMAGE=swr.cn-east-3.myhuaweicloud.com/sreyun/tokentally:1.10.1' >> .env
+echo 'APP_IMAGE=swr.cn-east-3.myhuaweicloud.com/sreyun/tokentally:1.10.10' >> .env
 docker compose up -d
 ```
 

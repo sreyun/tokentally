@@ -38,9 +38,10 @@ TokenTally syncs keys and bills (read-only) into a local SQLite database, analys
 - **Multi-dimensional analysis** — key, model, workspace, cost center, owner, cloud, billing item, day, ISO week, weekday; free-form pivot with drill-down, CSV export and print / PDF.
 - **Linked filters & drill-down** — pick a workspace and the key and model filters only list what belongs to it; conflicting filters are cleared automatically. A workspace → key → model drill tree, plus clickable legends, bar segments, heatmap cells, matrix cells and bill-detail cells. Filters and the period live in the URL, so views can be shared and the browser Back button undoes a drill-down step; alert and report links open the matching page and period.
 - **Business analysis** — cost by workspace (or cost center / owner / cloud) with a detail page per workspace listing all of its keys, models, key × model matrix and trends.
-- **Token & call statistics** — token structure, cache hit rate, unit cost, daily average and peak for every key and model, plus requests, success rate and average tokens / cost per request (Tencent TokenHub usage; Alibaba Cloud via the CloudMonitor Prometheus instance that Bailian monitoring exports to).
+- **Key analysis** — usage-first KPIs; usage and cost rankings (cost ranked by list price, so fully discounted keys are not pushed to the bottom); daily usage / cost stacked by key; distribution by workspace / cost center / owner / cloud; an efficiency quadrant (usage × unit-cost bubbles); token structure; a key × model heatmap; change attribution; and a governance panel (idle, unrestricted IP, all-model access, no cost center, no description, over budget) that filters the key table.
+- **Token & call statistics** — usage first: token counts on every page and in every report use K / M / B tokens, like the cloud consoles. Token structure, cache hit rate, unit cost (¥ / M tokens), daily average and peak for every key and model, plus requests, success rate and average tokens / cost per request (Tencent TokenHub usage; Alibaba Cloud via the CloudMonitor Prometheus instance that Bailian monitoring exports to).
 - **Budgets** — a monthly total budget plus monthly budgets per **cost center (department)** and per API key, all on payable amount. Cost-center spend is the month's bills grouped by each key's current cost-center tag; the unassigned bucket ("未分配成本中心") covers untagged keys and spend without a key and can have its own budget. Usage shows in business analysis (grouped by cost center), the cost-center detail page, key governance (over / forecast over budget) and the monthly report's cost-center ranking.
-- **Alerts & reports** — up to 5 channels; budget, spend anomaly, sync failure, key changes, plus daily / weekly / monthly reports with @mentions and signed webhooks.
+- **Alerts & reports** — up to 5 channels; budget, spend anomaly, sync failure, key changes, plus usage-first daily / weekly / monthly reports (token usage before cost, cost rankings by list price) with @mentions and signed webhooks.
 
   | Alert | Fires when | Dedupe |
   |---|---|---|
@@ -115,6 +116,7 @@ flowchart LR
 - [x] Alibaba Cloud call counts via CloudMonitor Prometheus
 - [x] Business analysis, linked filters and multi-level drill-down
 - [x] Email reports with the full cost overview, per-workspace / per-key channel scope, read-only share links
+- [x] Usage-first reports and pages with K / M / B tokens; multi-dimensional key analysis
 - [x] Cost-center (department) budgets and alerts
 - [ ] More platforms (Volcengine Ark, Baidu Qianfan, …)
 - [ ] Excel reports, SSO / LDAP
