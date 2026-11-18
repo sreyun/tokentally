@@ -802,6 +802,7 @@ dialog.modal .dlg-b { max-height: calc(100vh - 140px); }
 .fc-kpis > div { display: grid; gap: 2px; min-width: 0; align-content: start; }
 .fc-kpis span, .fc-kpis small { font-size: 11.5px; color: var(--ink-3); overflow-wrap: anywhere; }
 .fc-kpis b { font-size: 17px; font-weight: 700; font-variant-numeric: tabular-nums; color: var(--ink); }
+.fc-kpis.long b { font-size: 14.5px; white-space: nowrap; }
 .fc-kpis b.bad-text { color: var(--crit-ink); } .fc-kpis b.warn-text { color: var(--warn-ink); } .fc-kpis b.ok-text { color: var(--good-ink); }
 .fc-note { font-size: 12px; color: var(--ink-3); }
 .fc-sec { font-weight: 650; font-size: 13px; color: var(--ink); margin-top: 4px; }
