@@ -1,7 +1,7 @@
 /* API Key 详情：单个 Key 的费用、趋势、模型构成、计费项、渠道、权限与变更历史 */
 import {
   $, esc, state, ui, app, http, money, moneyShort, compact, tokFmt, intFmt, pct, sum, uniq, metricVal, METRICS, NONE_KEY, DIMS, keyObj, keyShort, keyDesc, wsName,
-  aggregate, aggAll, sortedAggs, totalTokens, deltaPill, tipRows, icon, help, segCtl, fmtTime, budgetOf, budgetLevel, forecastOf, channelLabel,
+  aggregate, aggAll, sortedAggs, rankVal, totalTokens, deltaPill, tipRows, icon, help, segCtl, fmtTime, budgetOf, budgetLevel, forecastOf, channelLabel,
   WEEK, weekday, ioInfo, num, periodTag, daysBetween, copyBtn, PROVIDERS, provTag, isAdmin, usageAgg, normModel, REQ_SRC,
   dimLink, NO_WS, groupHash, callsOn, perCallCovered, coveredCost, failRateOf, perCall, toneOf } from '../core.js';
 import { columnChart, rankList, segbar, legendList, legendHtml, bindLegend, bindActivate } from '../charts.js';
@@ -192,7 +192,7 @@ export function render(v, id) {
   }));
   $('#csvI', v).onclick = () => ti.csv(`Key_${id}_计费项_${periodTag()}.csv`);
 
-  rankList($('#kCh', v), sortedAggs(aggregate(lines, l => l.channel)).map(x => ({ id: x.key, label: channelLabel(x.key), sub: x.key || '', value: x.cost, gross: x.gross })), { total: a.cost, onClick: it => app.setFilter({ key: id, channel: it.id }, '#/detail', true) });
+  rankList($('#kCh', v), sortedAggs(aggregate(lines, l => l.channel), rankVal).map(x => ({ id: x.key, label: channelLabel(x.key), sub: x.key || '', value: x.cost, gross: x.gross })), { total: a.cost, onClick: it => app.setFilter({ key: id, channel: it.id }, '#/detail', true) });
   v.querySelector('[data-key-detail]').onclick = () => app.setFilter({ key: id }, '#/detail', true);
   v.querySelector('[data-edit-tags]')?.addEventListener('click', () => editTags([id]));
   loadChanges(v, id);

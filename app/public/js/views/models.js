@@ -1,7 +1,7 @@
 /* 模型分析：模型费用、Token 结构、单位成本、计费维度、Key × 模型矩阵、模型详情抽屉 */
 import {
   $, esc, state, ui, app, money, moneyShort, compact, tokFmt, intFmt, pct, sum, uniq, metricVal, METRICS, NONE_KEY, DIMS, keyShort,
-  filterLines, aggregate, aggAll, sortedAggs, totalTokens, unitsText, deltaPill, tipRows, icon, help, segCtl, ioInfo, num, periodTag, WEEK, weekday, copyBtn, PROVIDERS, provTag, multiCloud, usageFiltered, usageAgg, normModel, REQ_SRC,
+  filterLines, aggregate, aggAll, sortedAggs, rankVal, totalTokens, unitsText, deltaPill, tipRows, icon, help, segCtl, ioInfo, num, periodTag, WEEK, weekday, copyBtn, PROVIDERS, provTag, multiCloud, usageFiltered, usageAgg, normModel, REQ_SRC,
   scopeLines, scopeUsage, scopeLabel, scopeFilter, dimVal, dimName, groupHash, NO_WS, callsOn, hasTags, perCall, perCallCovered, coveredCost, failRateOf, scopeColors, toneOf } from '../core.js';
 import { tokenStatsHtml, drawDailyTokens, drawDailyRequests, periodDays, reqHelp } from '../stats.js';
 import { columnChart, rankList, stackRank, segbar, legendHtml, bindLegend } from '../charts.js';
@@ -274,14 +274,14 @@ export function openModel(model, scope = null) {
       xs: days, series, cell: (x, s) => cell.get(x + '|' + s) || 0, height: 220, xLabel: x => x.slice(5), tipTitle: x => `${x}（周${WEEK[weekday(x)]}）`, empty: '暂无按日数据',
       onX: x => app.openDay(x, dayScope()), onSeg: (x, k) => app.openDay(x, dayScope({ key: k })), clickHint: '点击查看当日明细', segHint: '点击柱段只看该 Key',
     });
-    rankList($('#dmKeys'), sortedAggs(aggregate(lines, DIMS.key.of)).map(x => {
+    rankList($('#dmKeys'), sortedAggs(aggregate(lines, DIMS.key.of), rankVal).map(x => {
       const k = state.apiKeys.get(x.key);
       return { id: x.key, label: keyShort(x.key), sub: [k ? dimName('ws', k.wsKey || NO_WS) : '', `${tokFmt(totalTokens(x))} tokens`, (u => (u && u.requests ? `${intFmt(u.requests)} 次 · 单次 ${intFmt(u.tokens / u.requests)} Token` : ''))(usByKey.get(x.key === NONE_KEY ? '' : x.key))].filter(Boolean).join(' · '), value: x.cost, gross: x.gross, prev: pk.get(x.key)?.cost ?? 0, color: DIMS.key.color(x.key) };
     }), { total: a.cost, showDelta: true, limit: 20, onClick: it => { if (it.id !== NONE_KEY) { d.close(); app.go(`#/key/${encodeURIComponent(it.id)}`); } } });
   }
   if ($('#dmWs')) {
     const pw = aggregate(prevLines, dimVal.ws);
-    rankList($('#dmWs'), sortedAggs(aggregate(lines, dimVal.ws)).map(x => ({ id: x.key, label: dimName('ws', x.key), sub: `${x.keys.size} 个 Key · ${tokFmt(totalTokens(x))} tokens`, value: x.cost, gross: x.gross, prev: pw.get(x.key)?.cost ?? 0, color: DIMS.ws.color(x.key) })),
+    rankList($('#dmWs'), sortedAggs(aggregate(lines, dimVal.ws), rankVal).map(x => ({ id: x.key, label: dimName('ws', x.key), sub: `${x.keys.size} 个 Key · ${tokFmt(totalTokens(x))} tokens`, value: x.cost, gross: x.gross, prev: pw.get(x.key)?.cost ?? 0, color: DIMS.ws.color(x.key) })),
       { total: a.cost, showDelta: true, limit: 12, onClick: it => { d.close(); app.go(groupHash('ws', it.id)); } });
   }
   const byItem = aggregate(lines, l => `${l.io}\u0001${l.listPrice}\u0001${l.listPriceUnit}`);

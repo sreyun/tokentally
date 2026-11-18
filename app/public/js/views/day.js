@@ -1,6 +1,6 @@
 /* 当日明细抽屉：从每日费用图表 / 热力图 / 明细下钻，查看某一天（可限定 Key、业务空间、模型等范围）的费用构成 */
 import { $, esc, state, ui, app, money, tokFmt, intFmt, pct, sum, metricVal, METRICS, NONE_KEY, DIMS, keyShort,
-  aggregate, aggAll, sortedAggs, totalTokens, deltaPill, icon, ioInfo, WEEK, weekday, addDays, scopeLines, scopeUsage, scopeLabel, scopeFilter,
+  aggregate, aggAll, sortedAggs, rankVal, totalTokens, deltaPill, icon, ioInfo, WEEK, weekday, addDays, scopeLines, scopeUsage, scopeLabel, scopeFilter,
   dimVal, dimName, groupHash, callsOn, usageAgg, toneOf } from '../core.js';
 import { rankList } from '../charts.js';
 import { table } from '../table.js';
@@ -53,19 +53,19 @@ export function openDay(date, scope = null) {
   if (!lines.length) { $('#dyItems').innerHTML = '<div class="nodata">当天没有费用</div>'; ['#dyKeys', '#dyWs', '#dyModels'].forEach(x => { const el = $(x); if (el) el.innerHTML = ''; }); return; }
   if (showKeys) {
     const pk = aggregate(prevLines, DIMS.key.of);
-    rankList($('#dyKeys'), sortedAggs(aggregate(lines, DIMS.key.of)).map(x => ({ id: x.key, label: keyShort(x.key), sub: x.key !== NONE_KEY ? [dimName('ws', state.apiKeys.get(x.key)?.wsKey || '__nows'), x.key].join(' · ') : '', value: x.cost, gross: x.gross, prev: pk.get(x.key)?.cost ?? 0, color: DIMS.key.color(x.key) })),
+    rankList($('#dyKeys'), sortedAggs(aggregate(lines, DIMS.key.of), rankVal).map(x => ({ id: x.key, label: keyShort(x.key), sub: x.key !== NONE_KEY ? [dimName('ws', state.apiKeys.get(x.key)?.wsKey || '__nows'), x.key].join(' · ') : '', value: x.cost, gross: x.gross, prev: pk.get(x.key)?.cost ?? 0, color: DIMS.key.color(x.key) })),
       { total: a.cost, showDelta: true, limit: 20, onClick: it => { if (it.id !== NONE_KEY) { d.close(); app.go(`#/key/${encodeURIComponent(it.id)}`); } } });
   }
   if (showWs) {
     const pw = aggregate(prevLines, dimVal.ws);
-    rankList($('#dyWs'), sortedAggs(aggregate(lines, dimVal.ws)).map(x => ({ id: x.key, label: dimName('ws', x.key), sub: `${x.keys.size} 个 Key`, value: x.cost, gross: x.gross, prev: pw.get(x.key)?.cost ?? 0, color: DIMS.ws.color(x.key) })),
+    rankList($('#dyWs'), sortedAggs(aggregate(lines, dimVal.ws), rankVal).map(x => ({ id: x.key, label: dimName('ws', x.key), sub: `${x.keys.size} 个 Key`, value: x.cost, gross: x.gross, prev: pw.get(x.key)?.cost ?? 0, color: DIMS.ws.color(x.key) })),
       { total: a.cost, showDelta: true, limit: 12, onClick: it => { d.close(); app.go(groupHash('ws', it.id)); } });
   }
   if (showModels) {
     const pm = aggregate(prevLines, l => l.model);
     // 模型详情沿用当前范围（不限定日期）
     const mScope = s ? { ...s } : null;
-    rankList($('#dyModels'), sortedAggs(aggregate(lines, l => l.model)).map(x => ({ id: x.key, label: x.key, sub: `${tokFmt(totalTokens(x))} tokens`, value: x.cost, gross: x.gross, prev: pm.get(x.key)?.cost ?? 0, color: DIMS.model.color(x.key) })),
+    rankList($('#dyModels'), sortedAggs(aggregate(lines, l => l.model), rankVal).map(x => ({ id: x.key, label: x.key, sub: `${tokFmt(totalTokens(x))} tokens`, value: x.cost, gross: x.gross, prev: pm.get(x.key)?.cost ?? 0, color: DIMS.model.color(x.key) })),
       { total: a.cost, showDelta: true, limit: 20, onClick: it => app.openModel(it.id, mScope) });
   }
   const byItem = aggregate(lines, l => `${l.model}\u0001${l.io}`);

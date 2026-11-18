@@ -1,7 +1,7 @@
 /* 成本概览：本期费用、预算与预测、趋势、关键发现、Top Key / 模型、构成、归因、治理摘要 */
 import {
   $, esc, state, ui, app, money, moneyShort, compact, tokFmt, intFmt, pct, sum, uniq, metricVal, METRICS, NONE_KEY, DIMS, keyShort, wsName,
-  filterLines, aggregate, aggAll, sortedAggs, totalTokens, topModels, deltaPill, tipRows, icon, help, segCtl, forecastOf, budgetOf,
+  filterLines, aggregate, aggAll, sortedAggs, rankVal, totalTokens, topModels, deltaPill, tipRows, icon, help, segCtl, forecastOf, budgetOf,
   budgetBar, activeFilterCount, channelLabel, addDays, daysBetween, WEEK, weekday, isCurrentMonth, lastDayOf as lastDayOfCycle,
   multiCloud, hasTags, PROVIDERS, usageFiltered, usageAgg, callsOn, NO_WS, NO_CC, NO_OWNER, groupHash, dimVal, dimName, toneOf,
 } from '../core.js';
@@ -143,12 +143,12 @@ export function render(v) {
   $('#insights').innerHTML = ins.length ? ins.map(x => `<li class="ins ${x.level}"><span class="ins-ico">${icon(x.icon)}</span><div><div class="ins-t">${esc(x.title)}</div><div class="ins-d">${x.html}</div>${x.go ? `<button class="link" data-go="${esc(x.go)}">${esc(x.goLabel || '查看')} →</button>` : ''}${x.day ? `<button class="link" data-day="${esc(x.day)}">${esc(x.dayLabel || '查看当日明细')} →</button>` : ''}${x.model ? `<button class="link" data-model="${esc(x.model)}">${esc(x.modelLabel || '查看模型')} →</button>` : ''}</div></li>`).join('') : '<li class="nodata">暂无需要关注的发现</li>';
 
   // 排行只显示前 10 项：只为前面的项生成提示内容（上千个 Key 时逐个生成会明显拖慢页面）
-  rankList($('#rkKeys'), sortedAggs(byKey).map((a, i) => ({
+  rankList($('#rkKeys'), sortedAggs(byKey, rankVal).map((a, i) => ({
     id: a.key, label: keyShort(a.key), sub: a.key === NONE_KEY ? '' : [multiCloud() ? PROVIDERS[state.apiKeys.get(a.key)?.provider || 'aliyun'] : '', state.apiKeys.get(a.key)?.costCenter || wsName(state.apiKeys.get(a.key)?.wsKey || [...a.wss][0] || '')].filter(Boolean).join(' · '),
     value: a.cost, gross: a.gross, prev: pByKey.get(a.key)?.cost ?? 0, color: DIMS.key.color(a.key),
     tip: i >= 12 ? '' : tipRows(DIMS.key.short(a.key), [['费用', money(a.cost)], ['占比', pct(a.cost, cur.cost)], ['上期', money(pByKey.get(a.key)?.cost || 0)], ['Token', tokFmt(totalTokens(a))], ['主要模型', topModels(a, 2).join('、')]]),
   })), { total: cur.cost, showDelta: true, onClick: it => (it.id === NONE_KEY ? app.setFilter({ key: NONE_KEY }, '#/detail') : app.go(`#/key/${encodeURIComponent(it.id)}`)) });
-  rankList($('#rkModels'), sortedAggs(byModel).map((a, i) => ({
+  rankList($('#rkModels'), sortedAggs(byModel, rankVal).map((a, i) => ({
     id: a.key, label: a.key, sub: `${a.keys.size} 个 Key`, value: a.cost, gross: a.gross, prev: pByModel.get(a.key)?.cost ?? 0, color: DIMS.model.color(a.key),
     tip: i >= 12 ? '' : tipRows(a.key, [['费用', money(a.cost)], ['占比', pct(a.cost, cur.cost)], ['上期', money(pByModel.get(a.key)?.cost || 0)], ['Token', tokFmt(totalTokens(a))], ['每百万 Token', totalTokens(a) ? money(a.cost / totalTokens(a) * 1e6) : '—']]),
   })), { total: cur.cost, showDelta: true, onClick: it => app.openModel(it.id) });
