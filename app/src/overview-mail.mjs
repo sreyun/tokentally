@@ -179,8 +179,8 @@ export function renderOverviewHtml(spec, { store, today, link = '', scope = null
   const K = {
     cost: forecast != null ? kpi('预计本月费用', yuan(forecast), '', '按已完整日的日均推算') : kpi('日均费用', yuan(avgDay), '', `${elapsed} 天`),
     keys: kpi('活跃 API Key', `${activeKeys} / ${inScope ? scopeKeys.size : keys.size}`, delta(activeKeys, pActive, true), top1 ? `最高：${keyName(top1.key)} 占 ${pct(top1.cost, cur.cost)}` : ''),
-    tok: kpi('Token 总量', compact(cur.tokens), delta(cur.tokens, pv.tokens, true), `输入 ${compact(cur.tIn)} · 输出 ${compact(cur.tOut)}`),
-    perm: kpi('每百万 Token 成本', perM == null ? '—' : yuan(perM), perM != null && pPerM ? delta(perM, pPerM) : '', '应付 ÷ Token × 10⁶'),
+    tok: kpi('总用量', `${compact(cur.tokens)} tokens`, delta(cur.tokens, pv.tokens, true), `输入 ${compact(cur.tIn)} · 输出 ${compact(cur.tOut)}`),
+    perm: kpi('单位成本', perM == null ? '—' : `${yuan(perM)} / M tokens`, perM != null && pPerM ? delta(perM, pPerM) : '', '按应付金额计算'),
     hit: kpi('缓存命中率', hit == null ? '—' : (hit * 100).toFixed(1) + '%', hit != null && pHit != null ? `<span style="color:${hit >= pHit ? '#15803d' : '#b42318'}">${hit >= pHit ? '▲' : '▼'} ${Math.abs((hit - pHit) * 100).toFixed(1)}pp</span>` : '', '缓存命中 ÷ 输入 Token'),
     models: kpi('使用模型', String(models), '', models ? `主力：${[...byModel.values()].sort((a, b) => b.cost - a.cost)[0].key}` : ''),
   };
@@ -212,9 +212,9 @@ export function renderOverviewHtml(spec, { store, today, link = '', scope = null
     if (!items.length) return '<div style="color:#64748b;font-size:13px">暂无数据</div>';
     const max = items[0].tokens || 1;
     return `<table role="presentation" cellpadding="0" cellspacing="0" style="width:100%;border-collapse:collapse">
-    <tr><th style="${S.th}">#</th><th style="${S.th}">${esc(nameHead)}</th><th style="${S.th};text-align:right">Token 用量</th><th style="${S.th}">占比</th><th style="${S.th};text-align:right">环比</th></tr>
+    <tr><th style="${S.th}">#</th><th style="${S.th}">${esc(nameHead)}</th><th style="${S.th};text-align:right">用量</th><th style="${S.th}">占比</th><th style="${S.th};text-align:right">环比</th></tr>
     ${items.map((it, i) => `<tr><td style="${S.td};color:#64748b">${i + 1}</td><td style="${S.td}">${esc(it.name)}</td>
-      <td style="${S.td};text-align:right;font-weight:600;white-space:nowrap">${esc(compact(it.tokens))}</td>
+      <td style="${S.td};text-align:right;font-weight:600;white-space:nowrap">${esc(compact(it.tokens))} tokens</td>
       <td style="${S.td}">${bar(it.tokens, max, '#14a38b')}<span style="font-size:11px;color:#64748b">${pct(it.tokens, cur.tokens)}</span></td>
       <td style="${S.td};text-align:right;white-space:nowrap">${delta(it.tokens, it.prev, true)}</td></tr>`).join('')}</table>`;
   };
@@ -287,8 +287,8 @@ export function renderOverviewHtml(spec, { store, today, link = '', scope = null
   const insHtml = ins.length ? ins.map(t => `<div style="padding:8px 10px;margin-bottom:6px;background:#f7f9fc;border:1px solid #eef2f7;border-radius:8px;font-size:13px;line-height:1.6;color:#334155">${t}</div>`).join('') : '<div style="color:#64748b;font-size:13px">暂无需要关注的发现</div>';
 
   // 用量优先：有 Token 数据时指标卡、Token 趋势与 Token 排行排在费用之前
-  const costTrend = section('每日费用', '按 API Key 堆叠 · 应付金额', costChart), tokTrend = section('每日 Token', '按 Token 类型堆叠', tokChart);
-  const tokRanks = hasTok ? `${section('API Key Token 用量排行', `环比：${prevLabel}`, tkRank)}${section('模型 Token 用量排行', `环比：${prevLabel}`, tmRank)}` : '';
+  const costTrend = section('每日费用', '按 API Key 堆叠 · 应付金额（元）', costChart), tokTrend = section('每日用量', '按 Token 类型堆叠 · 单位 tokens', tokChart);
+  const tokRanks = hasTok ? `${section('API Key 用量排行', `环比：${prevLabel}`, tkRank)}${section('模型用量排行', `环比：${prevLabel}`, tmRank)}` : '';
   const html = `${hasTok ? `${kpis}${hero}${tokTrend}${costTrend}${tokRanks}` : `${hero}${kpis}${costTrend}${tokTrend}`}
     ${section('API Key 费用排行', `环比：${prevLabel}`, kRank)}
     ${section('模型费用排行', `环比：${prevLabel}`, mRank)}
@@ -297,9 +297,9 @@ export function renderOverviewHtml(spec, { store, today, link = '', scope = null
     ${section('Key 治理', '风险与合规检查', govHtml)}
     ${section('关键发现', '', insHtml)}
     ${link ? `<div style="text-align:center;margin:6px 0 4px"><a href="${esc(link)}" style="display:inline-block;padding:9px 18px;background:#2563eb;color:#ffffff;border-radius:8px;text-decoration:none;font-size:13px;font-weight:600">在系统中查看完整成本概览</a></div>` : ''}`;
-  const text = [...(hasTok ? [`${label} Token ${tok(cur.tokens)}，输入 ${tok(cur.tIn)} tokens，输出 ${tok(cur.tOut)} tokens${hit != null ? `，缓存命中率 ${(hit * 100).toFixed(1)}%` : ''}`] : []), `${label} 应付金额 ${yuan(cur.cost)}（原价 ${yuan(cur.gross)}，折扣 ${yuan(discount)}，优惠券抵扣 ${yuan(coupons)}）`, `较${prevLabel} ${yuan(pv.cost)}`,
-    forecast != null ? `预计本月 ${yuan(forecast)}` : `日均 ${yuan(avgDay)}`, `活跃 API Key ${activeKeys} 个 · 使用模型 ${models} 个${hasTok ? '' : ` · Token ${compact(cur.tokens)}`}`,
-    ...(hasTok ? ['', 'API Key Token 用量排行：', ...byTok(byKey).slice(0, 10).map((a, i) => `${i + 1}. ${keyName(a.key)} ${compact(a.tokens)} tokens（${pct(a.tokens, cur.tokens)}）`)] : []),
+  const text = [...(hasTok ? [`${label} 用量 ${tok(cur.tokens)} tokens，输入 ${tok(cur.tIn)} tokens，输出 ${tok(cur.tOut)} tokens${hit != null ? `，缓存命中率 ${(hit * 100).toFixed(1)}%` : ''}`] : []), `${label} 应付金额 ${yuan(cur.cost)}（原价 ${yuan(cur.gross)}，折扣 ${yuan(discount)}，优惠券抵扣 ${yuan(coupons)}）`, `较${prevLabel} ${yuan(pv.cost)}`,
+    forecast != null ? `预计本月 ${yuan(forecast)}` : `日均 ${yuan(avgDay)}`, `活跃 API Key ${activeKeys} 个 · 使用模型 ${models} 个${hasTok ? '' : ` · 用量 ${compact(cur.tokens)} tokens`}`,
+    ...(hasTok ? ['', 'API Key 用量排行：', ...byTok(byKey).slice(0, 10).map((a, i) => `${i + 1}. ${keyName(a.key)} ${compact(a.tokens)} tokens（${pct(a.tokens, cur.tokens)}）`)] : []),
     '', 'API Key 费用排行：', ...keyItems.slice(0, 10).map((a, i) => `${i + 1}. ${keyName(a.key)} ${yuan(a.cost)}（${a.cost > 0.005 ? pct(a.cost, cur.cost) : `已全部抵扣，原价 ${yuan(a.gross)}`}）`),
     '', '模型费用排行：', ...modelItems.slice(0, 10).map((a, i) => `${i + 1}. ${a.key} ${yuan(a.cost)}（${a.cost > 0.005 ? pct(a.cost, cur.cost) : `已全部抵扣，原价 ${yuan(a.gross)}`}）`)].join('\n');
   const fullLabel = inScope ? `${label} · ${scope.label || '指定范围'}` : label;
