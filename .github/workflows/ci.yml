@@ -35,7 +35,7 @@ jobs:
         run: |
           pkg=$(node -p "require('./app/package.json').version")
           src=$(grep -oP "^const VERSION = '\K[^']+" app/src/server.mjs)
-          compose=$(grep -oP 'bailian-cost:\K[0-9][^}"\s]*' docker-compose.yml | head -1)
+          compose=$(grep -oP 'tokentally:\K[0-9][^}"\s]*' docker-compose.yml | head -1)
           echo "package.json=$pkg server.mjs=$src docker-compose.yml=$compose"
           if [ "$pkg" != "$src" ] || [ "$pkg" != "$compose" ]; then
             echo "::error::版本号不一致：package.json=$pkg，server.mjs=$src，docker-compose.yml=$compose"

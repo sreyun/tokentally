@@ -1,9 +1,9 @@
 # TokenTally 大模型 API Key 费用分析（阿里云百炼 + 腾讯云 TokenHub）—— 零第三方依赖（node:http + node:sqlite + node:crypto）
-# 生产环境建议把基础镜像固定到具体版本或 digest，例如 node:24.11.1-alpine3.22
+# 基础镜像固定到具体版本：同一个 tag 重新构建得到的是同一个 Node 与 Alpine；升级时改这里并跑一遍 CI
 # 基础镜像仓库可在构建时替换（国内可用镜像站加速），例如
 #   --build-arg BASE_REGISTRY=docker.m.daocloud.io
 ARG BASE_REGISTRY=docker.io
-FROM ${BASE_REGISTRY}/library/node:24-alpine
+FROM ${BASE_REGISTRY}/library/node:24.22.3-alpine3.24
 
 ENV NODE_ENV=production \
     PORT=8080 \

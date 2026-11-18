@@ -10,8 +10,8 @@ services:
     # 在 .env 中设置 APP_IMAGE 后执行 docker compose pull app && docker compose up -d，例如
     #   APP_IMAGE=swr.cn-east-3.myhuaweicloud.com/sreyun/tokentally:1.10.5
     # 设置 APP_IMAGE 后不要再加 --build，否则会在本机重新构建并覆盖该镜像标签
-    image: ${APP_IMAGE:-bailian-cost:1.10.5}
-    container_name: bailian-cost
+    image: ${APP_IMAGE:-tokentally:1.10.5}
+    container_name: tokentally
     restart: unless-stopped
     env_file: .env
     environment:
@@ -23,6 +23,7 @@ services:
     ports:
       - "${BIND_ADDR:-0.0.0.0}:${HTTP_PORT:-8080}:8080"
     volumes:
+      # 数据卷沿用旧名 bailian-data（库文件名 bailian-cost.db 同理）：改名会让已部署的环境挂到一个新的空卷上
       - bailian-data:/data
     # ---- 容器加固 ----
     read_only: true
@@ -50,8 +51,8 @@ services:
 
   # 可选：Caddy 反向代理，自动申请 Let's Encrypt 证书（需域名解析到本机且开放 80/443）
   caddy:
-    image: caddy:2-alpine
-    container_name: bailian-cost-caddy
+    image: caddy:2.11.9-alpine
+    container_name: tokentally-caddy
     profiles: ["https"]
     restart: unless-stopped
     depends_on:
