@@ -30,10 +30,13 @@ export const compact = n => (n == null ? '—' : compactFmt.format(n));
  * Token 数量：与云厂商控制台、报表消息一致按量换算为 K（千）/ M（百万）/ B（十亿），不足 1 千显示整数
  * （阈值按显示精度取整后的值判断，与 src/tokens.mjs 相同）。金额、请求次数仍用 compact（万 / 亿）
  */
+// 不足 1 千时最多保留 2 位小数（日均、图表纵轴刻度可能是小数），整数仍显示为整数
+const TOK_FMT = [[999.5, 1, '', new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 2 })], [999.95e3, 1e3, 'K', new Intl.NumberFormat('zh-CN', { minimumFractionDigits: 1, maximumFractionDigits: 1 })],
+  [999.995e6, 1e6, 'M', new Intl.NumberFormat('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })], [Infinity, 1e9, 'B', new Intl.NumberFormat('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })]];
 export const tokFmt = n => {
   if (n == null) return '—';
-  const a = Math.abs(n), [div, unit, dec] = a < 999.5 ? [1, '', 0] : a < 999.95e3 ? [1e3, 'K', 1] : a < 999.995e6 ? [1e6, 'M', 2] : [1e9, 'B', 2];
-  return (n / div).toLocaleString('zh-CN', { minimumFractionDigits: dec, maximumFractionDigits: dec }) + (unit ? ' ' + unit : '');
+  const [, div, unit, f] = TOK_FMT.find(x => Math.abs(n) < x[0]);
+  return f.format(n / div) + (unit ? ' ' + unit : '');
 };
 export const moneyShort = n => (Math.abs(n) >= 1e5 ? (n < 0 ? '-' : '') + curSym() + compact(Math.abs(n)) : money(n));
 export const signedMoney = n => (n > 0 ? '+' : n < 0 ? '−' : '') + money(Math.abs(n));
