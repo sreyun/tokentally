@@ -65,6 +65,8 @@ TokenTally syncs keys and bills (read-only) into a local SQLite database, analys
 | <img src="docs/images/key-detail.jpg" alt="Key detail"> | <img src="docs/images/model-detail.jpg" alt="Model detail"> |
 | **Cost allocation: cost center × model** | **Key governance** |
 | <img src="docs/images/pivot.jpg" alt="Pivot"> | <img src="docs/images/governance.jpg" alt="Governance"> |
+| **Key analysis: efficiency quadrant & charts** | **Report preview (Feishu card)** |
+| <img src="docs/images/keys-charts.jpg" alt="Key analysis charts"> | <img src="docs/images/report-preview.jpg" alt="Report preview"> |
 
 ## Quick start
 

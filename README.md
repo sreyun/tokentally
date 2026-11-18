@@ -56,6 +56,8 @@
 | <img src="docs/images/key-detail.jpg" alt="Key 详情"> | <img src="docs/images/model-detail.jpg" alt="模型详情"> |
 | **成本分摊：成本中心 × 模型** | **Key 治理** |
 | <img src="docs/images/pivot.jpg" alt="成本分摊透视"> | <img src="docs/images/governance.jpg" alt="Key 治理"> |
+| **Key 分析：效率象限与多维图表** | **报表预览（飞书卡片）** |
+| <img src="docs/images/keys-charts.jpg" alt="Key 分析图表"> | <img src="docs/images/report-preview.jpg" alt="报表预览"> |
 
 > 截图均为演示模式下随机生成的虚构数据。
 
@@ -276,7 +278,7 @@ flowchart LR
 | `BACKUP_KEEP` / `BACKUP_HOUR` | 7 / 3 | 自动备份份数（0 关闭）与时间 |
 | `METRICS_TOKEN` | — | ≥16 位，开启 `/metrics` |
 | `DEMO_DATA` | false | 演示模式 |
-| `APP_IMAGE` | 本机构建 | 使用 CI 发布到华为云 SWR 的镜像，如 `swr.cn-east-3.myhuaweicloud.com/sreyun/tokentally:1.10.10`（`docker compose pull app && docker compose up -d`） |
+| `APP_IMAGE` | 本机构建 | 使用 CI 发布到华为云 SWR 的镜像，如 `swr.cn-east-3.myhuaweicloud.com/sreyun/tokentally:1.10.11`（`docker compose pull app && docker compose up -d`） |
 | `TENCENT_ENDPOINT_OVERRIDE` | — | 仅测试 / 私有网关 |
 </details>
 

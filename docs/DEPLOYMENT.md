@@ -34,7 +34,7 @@ docker compose up -d --build
 也可以不在服务器上构建，直接使用发布到华为云容器镜像服务（SWR）的镜像（amd64 / arm64，见[第 9 节](#9-镜像构建与发布华为云-swr)）：在 `.env` 中设置 `APP_IMAGE`（生产环境建议固定版本号）后拉取并启动：
 
 ```bash
-echo 'APP_IMAGE=swr.cn-east-3.myhuaweicloud.com/sreyun/tokentally:1.10.10' >> .env
+echo 'APP_IMAGE=swr.cn-east-3.myhuaweicloud.com/sreyun/tokentally:1.10.11' >> .env
 ```
 
 ```bash
@@ -258,7 +258,7 @@ printf '%s' "$AK" | openssl dgst -binary -sha256 -hmac "$SK" | od -An -vtx1 | tr
 | `IMAGE_NAME` | `tokentally` | 镜像名 |
 
 ```bash
-docker pull swr.cn-east-3.myhuaweicloud.com/sreyun/tokentally:1.10.10
+docker pull swr.cn-east-3.myhuaweicloud.com/sreyun/tokentally:1.10.11
 ```
 
 - **版本必须与 tag 一致**：版本号写在源码中，tag（去掉前缀 `v` 与预发布后缀）与 `package.json`、`server.mjs` 不一致时不发布，避免镜像显示的版本与标签不符。
@@ -274,13 +274,13 @@ docker pull swr.cn-east-3.myhuaweicloud.com/sreyun/tokentally:1.10.10
 服务器不能访问 SWR 时，在能联网的机器上按服务器架构拉取并导出镜像，拷贝到服务器后导入：
 
 ```bash
-docker pull --platform linux/amd64 swr.cn-east-3.myhuaweicloud.com/sreyun/tokentally:1.10.10
-docker save -o tokentally-image.tar swr.cn-east-3.myhuaweicloud.com/sreyun/tokentally:1.10.10
+docker pull --platform linux/amd64 swr.cn-east-3.myhuaweicloud.com/sreyun/tokentally:1.10.11
+docker save -o tokentally-image.tar swr.cn-east-3.myhuaweicloud.com/sreyun/tokentally:1.10.11
 ```
 
 ```bash
 docker load -i tokentally-image.tar
-echo 'APP_IMAGE=swr.cn-east-3.myhuaweicloud.com/sreyun/tokentally:1.10.10' >> .env
+echo 'APP_IMAGE=swr.cn-east-3.myhuaweicloud.com/sreyun/tokentally:1.10.11' >> .env
 docker compose up -d
 ```
 
