@@ -165,11 +165,9 @@ const delta = (label, a, b) => ({ label, text: chg(a, b), dir: b > 0 && Math.abs
  * extra(r) 可附加 sub: { text, level }（如成本中心的预算使用情况），飞书卡片显示在名称下方，文本消息接在行尾
  */
 const topRows = (rows, n, nameOf, total, extra = null) => {
-  // 应付为 0 但有原价的项（被优惠券或订阅抵扣——节省计划 / 资源包——全额覆盖）同样列出：排在有应付的项之后（按原价排序），注明“已全部抵扣”。
-  // 此前只列应付大于 0 的项，多个 Key / 模型在用时排行只剩一两个，与“有消费的 API Key”个数、Token 排行对不上
-  const pos = rows.filter(r => r.cost > 0.005).sort((x, y) => y.cost - x.cost);
-  const off = rows.filter(r => !(r.cost > 0.005) && (r.gross || 0) >= 0.005).sort((x, y) => y.gross - x.gross);
-  return [...pos, ...off].slice(0, n).map(r => {
+  // 按优惠前原价排名：被优惠券或订阅（节省计划 / 资源包）抵扣的部分同样是实际用量，应付为 0 的项按原价参与排名，并注明“已全部抵扣”
+  const val = r => Math.max(r.gross || 0, r.cost || 0);
+  return rows.filter(r => r.cost > 0.005 || (r.gross || 0) >= 0.005).sort((x, y) => val(y) - val(x)).slice(0, n).map(r => {
     const x = extra ? extra(r) : {};
     if (r.cost > 0.005) return { name: nameOf(r), value: yuan(r.cost), share: pct(total ? r.cost / total * 100 : 0), ...x };
     const note = `已全部抵扣，原价 ${yuan(r.gross)}`;

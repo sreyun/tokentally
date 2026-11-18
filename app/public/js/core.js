@@ -631,7 +631,9 @@ export const aggAll = lines => { const a = newAgg('all'); lines.forEach(l => add
 export const totalTokens = a => a.tIn + a.tOut + a.tEmb + a.tOther;
 export const topModels = (a, n = 3) => [...a.models.entries()].sort((x, y) => y[1] - x[1]).slice(0, n).map(e => e[0]);
 export const unitsText = a => Object.entries(a.units).map(([u, v]) => `${numFmt(v)} ${u}`).join('；');
-export const sortedAggs = (m, f = a => a.cost) => [...m.values()].sort((a, b) => f(b) - f(a));
+// 默认按优惠前原价排名：被优惠券 / 资源包 / 节省计划抵扣的部分同样是实际用量，不能因应付为 0 排到后面
+export const rankVal = a => Math.max(a.gross || 0, a.cost || 0);
+export const sortedAggs = (m, f = rankVal) => [...m.values()].sort((a, b) => f(b) - f(a));
 
 /* =========================================================================
  * 环比徽标

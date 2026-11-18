@@ -201,7 +201,7 @@ export function renderOverviewHtml(spec, { store, today, link = '', scope = null
 
   /* 4. 排行 */
   // 排行：应付为 0 但有原价（被全额抵扣）的项排在有应付的项之后（按原价排序）
-  const rankSort = (a, b) => (b.cost > 0.005) - (a.cost > 0.005) || b.cost - a.cost || b.gross - a.gross;
+  const rankSort = (a, b) => Math.max(b.gross || 0, b.cost) - Math.max(a.gross || 0, a.cost) || b.cost - a.cost; // 按优惠前原价排名
   const keyItems = [...byKey.values()].filter(a => a.cost > 0.005 || a.gross >= 0.005).sort(rankSort);
   const kRank = rankTable(keyItems.slice(0, 10).map(a => ({ name: keyName(a.key), sub: a.key ? `${a.key}${keys.get(a.key)?.workspace_name ? ' · ' + keys.get(a.key).workspace_name : ''}` : '', cost: a.cost, gross: a.gross, prev: pByKey.get(a.key)?.cost || 0 })), { total: cur.cost, nameHead: 'API Key', extra: keyItems.length > 10 ? `另有 ${keyItems.length - 10} 个 Key 未显示` : '' });
   const modelItems = [...byModel.values()].filter(a => a.cost > 0.005 || a.gross >= 0.005).sort(rankSort);

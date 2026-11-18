@@ -162,10 +162,10 @@ export function lineChart(el, { xs, lines, height = 260, xLabel = x => x, tipTit
 
 /** 两行式排行：名称/数值 + 条形/占比/环比 */
 export function rankList(el, items, { fmt = v => money(v), limit = 10, onClick, total, showDelta = false, goodWhenUp = false, empty = '暂无数据', color } = {}) {
-  // 金额为 0 但有原价的项（被优惠券或订阅抵扣——节省计划 / 资源包——全额覆盖）同样保留：排在有金额的项之后、按原价排序，并标注“已全部抵扣”。
-  // 此前只保留金额大于 0 的项，默认“应付”口径下多个 Key / 模型在用，排行只剩一两个，与 Token 总量、原价对不上（gross 由调用方传入）
+  // 金额为 0 但有原价的项（被优惠券或订阅抵扣——节省计划 / 资源包——全额覆盖）同样保留并标注“已全部抵扣”；
+  // 顺序沿用调用方（sortedAggs 默认按优惠前原价排名），抵扣掉的部分同样是实际用量，不再排到有金额的项之后（gross 由调用方传入）
   const off = i => !(i.value > 0) && (i.gross || 0) >= 0.005;
-  items = [...items.filter(i => i.value > 0), ...items.filter(off).sort((a, b) => b.gross - a.gross)];
+  items = items.filter(i => i.value > 0 || off(i));
   if (!items.length) { el.innerHTML = `<div class="nodata">${esc(empty)}</div>`; return; }
   const max = Math.max(...items.map(i => i.value)) || 1;
   const tot = total ?? sum(items, i => i.value);
