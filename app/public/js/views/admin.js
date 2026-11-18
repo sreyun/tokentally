@@ -601,7 +601,7 @@ const RULE_LABEL = { pct: '达到预警阈值', over: '超出预算', forecast: 
 const EVENT_ICON = { budget: 'wallet', anomaly: 'warn', sync: 'sync', keyChange: 'key', daily: 'calendar', weekly: 'calendar', monthly: 'calendar' };
 /** 飞书实际使用的卡片样式（机器人不接受图表 / 卡片组件时自动降级） */
 const STYLE_NOTE = { chart: '（飞书完整卡片：指标 + 趋势图 + 排行）', card: '（飞书卡片：该机器人不支持趋势图，已自动省略）', plain: '（飞书简洁卡片：该机器人不支持新版卡片组件）' };
-/** 报表预览：按飞书卡片的布局展示（指标面板 / 趋势柱状图 / 排行表 / 异常条目） */
+/** 报表预览：按飞书卡片的布局展示（指标面板 / 趋势柱状图 / 排行表 / 异常条目）；与飞书卡片一样用量在上、费用在下 */
 function cardPreview(r) {
   const d = r.doc, TONE = { bad: 'bad', warn: 'warn', good: 'good', up: 'bad', down: 'good' }, TXT = { bad: 'bad-text', warn: 'warn-text', good: 'ok-text', up: 'bad-text', down: 'ok-text' };
   const md = s => esc(s).replace(/\*\*(.+?)\*\*/g, '<b>$1</b>');
@@ -614,7 +614,7 @@ function cardPreview(r) {
   // 同一天的多个系列（应付 + 灰色的“优惠与抵扣”）与飞书卡片一样叠加为一根柱子，柱高为合计（即原价）
   const chart = c => {
     if (!c?.values?.length) return '';
-    const unit = /Token/.test(c.title) ? ` ${c.unit && c.unit !== '个' ? c.unit + ' ' : ''}Token` : ' 元';
+    const unit = /Token/.test(c.title) ? ` ${c.unit && c.unit !== '个' ? c.unit + (c.unitName ? `（${c.unitName}）` : ' ') : ''}Token` : ' 元';
     const days = [], byD = new Map();
     for (const v of c.values) { let g = byD.get(v.d); if (!g) { byD.set(v.d, g = []); days.push(v.d); } g.push(v); }
     const tot = d => byD.get(d).reduce((s, v) => s + Math.max(0, v.v), 0), max = Math.max(1e-9, ...days.map(tot));
@@ -626,7 +626,7 @@ function cardPreview(r) {
   };
   const secs = (d.sections || []).filter(s => s.rows?.length || s.items?.length).map(s => `<div class="fc-sec">${esc(s.title)}${s.note ? `<span class="fc-sub">${esc(s.note)}</span>` : ''}</div>${s.rows?.length ? `<div class="fc-rows">${s.head ? `<div class="fc-head"><em></em><span>${esc(s.head[0])}</span><b>${esc(s.head[1])}</b><small>${esc(s.head[2] || '')}</small></div>` : ''}${s.rows.map((x, i) => `<div><em>${i + 1}</em><span>${esc(x.name)}${x.sub?.text ? `<i class="fc-rsub ${TXT[x.sub.level] || ''}">${esc(x.sub.text)}</i>` : ''}</span><b>${esc(x.value)}</b><small>${esc(x.share || '')}</small></div>`).join('')}</div>` : s.items.map(i => `<div class="fc-item"><span class="pill ${TONE[i.level] || 'info'}">${esc(i.tag || '提示')}</span> ${md(i.text)}</div>`).join('')}`).join('');
   return `<div class="fc"><div class="fc-h"><div><b>${esc(r.title)}</b>${tags}</div>${r.empty ? '<span class="pill neutral">无费用，定时发送时将跳过</span>' : ''}</div>
-    <div class="fc-b">${panel(d.kpis)}${panel(d.usage)}${(d.notes || []).map(n => `<div class="fc-note">${esc(n)}</div>`).join('')}${chart(d.chart)}${chart(d.tokenChart)}${secs}</div>
+    <div class="fc-b">${panel(d.usage)}${panel(d.kpis)}${(d.notes || []).map(n => `<div class="fc-note">${esc(n)}</div>`).join('')}${chart(d.tokenChart)}${chart(d.chart)}${secs}</div>
     <div class="fc-f muted">飞书卡片预览 · 钉钉 / 企业微信 / 邮件为文本消息，内容相同</div></div>`;
 }
 
