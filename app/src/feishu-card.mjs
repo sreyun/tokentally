@@ -1,7 +1,7 @@
 /**
  * 飞书群机器人消息卡片（卡片 JSON 1.0）
  *
- * 布局：标题栏（主题色 + 副标题 + 状态标签）→ 指标面板（灰底分栏）→ 趋势图（VChart 柱状图）→ 排行表（分栏对齐名称 / 金额 / 占比）
+ * 布局：标题栏（主题色 + 副标题 + 状态标签）→ 指标面板（灰底分栏，用量在前、费用在后）→ 趋势图（VChart 柱状图，Token 在前）→ 排行表（分栏对齐名称 / 数值 / 占比）
  *      → 告警条目（彩色标签）→ 操作按钮 → 备注页脚。
  *
  * 兼容性：
@@ -106,12 +106,13 @@ function chartEl(c) {
  */
 export function feishuCard({ title, subtitle, level = 'info', doc = {}, footer, link, links = [], buttons = null, mentions, chart = true }) {
   const E = [];
-  if (doc.kpis?.length) E.push(kpiPanel(doc.kpis));
+  // 用量优先：Token 指标卡与 Token 趋势图排在费用之前
   if (doc.usage?.length) E.push(kpiPanel(doc.usage));
+  if (doc.kpis?.length) E.push(kpiPanel(doc.kpis));
   for (const n of doc.notes || []) E.push(md(font('grey', safe(n)), { text_size: 'notation' }));
   const at = mentions?.all ? '\n<at id=all></at>' : '';
   if (doc.items?.length) E.push(md(itemsMd(doc.items, 16000, at)));
-  for (const c of chart ? [doc.chart, doc.tokenChart] : []) if (c?.values?.length >= 3) E.push(md(`**${safe(c.title)}**`), chartEl(c));
+  for (const c of chart ? [doc.tokenChart, doc.chart] : []) if (c?.values?.length >= 3) E.push(md(`**${safe(c.title)}**`), chartEl(c));
   const secs = (doc.sections || []).filter(s => s.rows?.length || s.items?.length);
   if (secs.length && E.length) E.push({ tag: 'hr' });
   for (const s of secs) {

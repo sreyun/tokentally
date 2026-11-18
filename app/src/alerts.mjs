@@ -22,6 +22,7 @@ import { sendMail, parseRecipients, normalizeSmtp, SMTP_SECURITY } from './smtp.
 import { renderOverviewHtml, renderEmail, scopePredicate } from './overview-mail.mjs';
 import { feishuCard, feishuFormatError } from './feishu-card.mjs';
 import { feishuAppLink } from './share.mjs';
+import { tokUnit, tokIn, tok, tokUnitLabel } from './tokens.mjs';
 import { NO_CC } from './db.mjs';
 
 /** 推送范围：全部 / 指定 API Key / 指定业务空间（最多 200 个） */
@@ -186,18 +187,10 @@ const head = (kind, name, basis) => ({
 const rowLines = (rows, kind) => rows.map((r, i) => `${i + 1}. ${r.name} ${r.value}${kind === 'token' ? ' Token' : ''}${r.share ? `（占 ${r.share}）` : ''}${r.sub?.text ? `，${r.sub.text}` : ''}`);
 /** 结构化分节 → 文本行（钉钉 / 企业微信 / 邮件 / 通用 Webhook / 通知记录使用） */
 const sectionLines = sections => sections.flatMap(s => (s.rows?.length ? ['', `#### ${s.title}${s.note ? `（${s.note}）` : ''}`, ...rowLines(s.rows, s.kind)] : s.items?.length ? ['', `#### ${s.title}`, ...s.items.map(i => i.text)] : []));
-/**
- * Token 单位：默认用“亿”（最大值不少于 0.1 亿时整组统一用亿，如 0.29 亿，避免同一组里亿与万混用、趋势图标签过长），
- * 量很小的账号依次用“万”与“个”
- */
-const tokUnit = max => (max >= 1e7 ? { div: 1e8, unit: '亿', dec: 2 } : max >= 1e4 ? { div: 1e4, unit: '万', dec: 1 } : { div: 1, unit: '', dec: 0 });
-const tokIn = (n, u) => (Number(n || 0) / u.div).toLocaleString('zh-CN', { minimumFractionDigits: u.dec, maximumFractionDigits: u.dec }) + (u.unit ? ' ' + u.unit : '');
-/** Token 数量（指标面板等单个数值）：与排行、趋势图同一规则——不少于 0.1 亿用“亿”，否则用“万”，很小时用整数 */
-const tok = n => tokIn(n, tokUnit(Number(n) || 0));
 /** 单位成本：每百万 Token 的应付金额 */
 const perM = (cost, tokens) => (tokens > 0 ? `¥${(cost / tokens * 1e6).toFixed(2)} / 百万 Token` : '—');
 const perMv = (cost, tokens) => (tokens > 0 ? `¥${(cost / tokens * 1e6).toFixed(2)}` : '—');
-/** Token 排行：[{ name, value: 'x.xx 亿', share }]，同一区块统一单位 */
+/** Token 排行：[{ name, value: '12.34 M', share }]，同一区块按最大值统一单位（K / M / B） */
 const tokRows = (rows, n, nameOf, total) => {
   const list = rows.filter(r => (r.tokens || 0) > 0).sort((x, y) => y.tokens - x.tokens).slice(0, n), u = tokUnit(list[0]?.tokens || 0);
   return list.map(r => ({ name: nameOf(r), value: tokIn(r.tokens, u), share: pct(total ? r.tokens / total * 100 : 0) }));
@@ -214,12 +207,12 @@ function dailyChart(title, rows, from, to, kOf, colors, val = r => r.cost || 0, 
   for (let d = first > from ? first : from; d <= to; d = addDays(d, 1)) values.push({ d: d.slice(5), v: Math.round((by.get(d) || 0) * scale * 100) / 100, k: kOf(d) });
   return values.length >= 3 ? { title, values, colors, unit: '元' } : null;
 }
-/** 每日 Token 柱状图：按区间内单日最大值选择单位（默认亿），标题注明单位 */
+/** 每日 Token 柱状图：按区间内单日最大值选择单位（K / M / B），标题注明单位 */
 function tokenChart(title, rows, from, to, kOf, colors) {
   const by = new Map();
   for (const r of rows) if (r.day >= from && r.day <= to) by.set(r.day, (by.get(r.day) || 0) + (r.tokens || 0));
   const u = tokUnit(Math.max(0, ...by.values()));
-  const c = dailyChart(`${title}（${u.unit || '个'}）`, rows, from, to, kOf, colors, r => r.tokens || 0, 1 / u.div);
+  const c = dailyChart(`${title}（单位：${tokUnitLabel(u)}）`, rows, from, to, kOf, colors, r => r.tokens || 0, 1 / u.div);
   return c && { ...c, unit: u.unit || '个' };
 }
 const pause = ms => (ms > 0 ? new Promise(r => setTimeout(r, ms)) : Promise.resolve());
@@ -272,8 +265,21 @@ export const ratioText = ({ i, o }) => (i > 0 && o > 0 ? `输入 : 输出 = ${i 
 const cacheKpi = c => (c.hit == null ? [] : [{ label: '缓存命中率', value: `${(c.hit * 100).toFixed(1)}%`, sub: c.saved >= 0.005 ? `估算节省 ${yuan(c.saved)}` : `命中 ${tok(c.tHit)} Token` }]);
 /** 文本消息中 Token 行的后缀：“；缓存命中率 95.1%，估算节省 ¥x” */
 const cacheText = c => (c.hit == null ? '' : `；缓存命中率 ${(c.hit * 100).toFixed(1)}%${c.saved >= 0.005 ? `，估算节省 ${yuan(c.saved)}` : ''}`);
-/** 文本消息的 Token 行（日报 / 周报 / 月报一致）：Token、涨跌与单位成本；累计或日均 Token 与输入输出比；缓存命中率与估算节省 */
-const tokLine = ({ label, t, pt, vs, cost, gross = 0, second, ratio, cache }) => `${label} ${tok(t)}，${vs} ${chg(t, pt)}${t > 0 ? `，单位成本 ${perM(cost, t)}${offUnit(cost, gross) ? `（按原价 ${perMv(gross, t)}）` : ''}` : ''}；${second}${ratio ? `（${ratio}）` : ''}${cacheText(cache)}`;
+/** 文本消息的 Token 行（日报 / 周报 / 月报一致，正文第一行，加粗）：Token 与涨跌；累计或日均 Token 与输入输出比；缓存命中率与估算节省 */
+const tokLine = ({ label, t, pt, vs, second, ratio, cache }) => `**${label} ${tok(t)}**，${vs} ${chg(t, pt)}；${second}${ratio ? `（${ratio}）` : ''}${cacheText(cache)}`;
+/** 费用行后缀：“，单位成本 ¥x / 百万 Token（按原价 ¥y）” */
+const unitText = (cost, gross, t) => (t > 0 ? `，单位成本 ${perM(cost, t)}${offUnit(cost, gross) ? `（按原价 ${perMv(gross, t)}）` : ''}` : '');
+/**
+ * 报表正文开头：用量优先——有 Token 数据时 Token 行在前并加粗，费用行随后（不加粗，行尾附单位成本）；
+ * 没有任何 Token 数据（只有按次 / 按张计费的模型）时仍以加粗的费用行开头
+ */
+const lead = (tokenLine, costLine, unit = '') => (tokenLine ? [tokenLine, strip(costLine) + unit] : [costLine]);
+/** 排行区块顺序：Token 用量排行在前，其次是提示类条目（如异常提示），费用排行在后 */
+const tokFirst = sections => [...sections.filter(x => x.kind === 'token'), ...sections.filter(x => !x.kind), ...sections.filter(x => x.kind && x.kind !== 'token')];
+/** 报表标题：有 Token 数据时为“Token 用量日报 / 周报 / 月报”，否则沿用“费用日报 / 周报 / 月报” */
+const rptName = (kind, hasTok) => `${hasTok ? 'Token 用量' : '费用'}${kind}`;
+/** 标题栏的用量涨跌标签（中性颜色）：“Token 较前一日 ↑ 12.0%” */
+const tokTag = (vs, a, b) => { const d = delta(vs, a, b); return d.dir ? { text: `Token ${vs} ${d.dir === 'up' ? '↑' : '↓'} ${d.text.replace(/^[+−]/, '')}`, level: 'info' } : null; };
 /** 应付为 0 但有原价（全额抵扣）：单位成本 ¥0.00 会被误读为成本为零，同时给出按原价计算的单位成本 */
 const offUnit = (cost, gross) => Math.abs(cost) < 0.005 && gross >= 0.005;
 const unitSub = (cost, gross, t) => (offUnit(cost, gross) && t > 0 ? `按原价 ${perMv(gross, t)} / 百万 Token` : '每百万 Token');
@@ -634,15 +640,14 @@ export class AlertService {
       const y = rows14.filter(r => r.day === day), pd = rows14.filter(r => r.day === pday);
       const yc = y.reduce((s, r) => s + r.cost, 0), pc = pd.reduce((s, r) => s + r.cost, 0), yt = y.reduce((s, r) => s + (r.tokens || 0), 0), pt = pd.reduce((s, r) => s + (r.tokens || 0), 0);
       const byKey = new Map(); for (const r of y) { const a = byKey.get(r.id) || byKey.set(r.id, { id: r.id, cost: 0, gross: 0, tokens: 0 }).get(r.id); a.cost += r.cost; a.gross += r.gross || 0; a.tokens += r.tokens || 0; }
-      const sections = [{ title: '昨日 API Key Top 5', rows: topRows([...byKey.values()], 5, r => this.keyName(r.id, keys), yc), ...head('cost', 'API Key', '范围内昨日总费用') }, { title: '昨日 Token 用量 · API Key Top 5', rows: tokRows([...byKey.values()], 5, r => this.keyName(r.id, keys), yt), ...head('token', 'API Key', '范围内昨日总 Token') }];
+      const sections = tokFirst([{ title: '昨日 API Key Top 5', rows: topRows([...byKey.values()], 5, r => this.keyName(r.id, keys), yc), ...head('cost', 'API Key', '范围内昨日总费用') }, { title: '昨日 Token 用量 · API Key Top 5', rows: tokRows([...byKey.values()], 5, r => this.keyName(r.id, keys), yt), ...head('token', 'API Key', '范围内昨日总 Token') }]);
       const hasTok = (st.tokens || 0) > 0 || rows14.some(r => (r.tokens || 0) > 0);
       const yo = offStats(y), zn = zeroNote(yo, true);
       // 范围内本月 Token 的输入输出比；昨日的缓存命中率与估算节省
       const mr = ratioText({ i: st.tokIn || 0, o: st.tokOut || 0 });
       const cy = hasTok ? cacheStats(this.scopeRows(this.store.tokenIoRows(day, day), scope, keys)) : { hit: null };
-      const lines = [`**昨日（${day.slice(5)}）应付 ${yuan(yc)}**，较前一日 ${chg(yc, pc)}${offText(yo)}`, ...(zn ? [zn] : []),
-        `${accLabel} ${yuan(st.cost)}${st.forecast != null ? `，预计月末 ${yuan(st.forecast)}` : ''}${st.budget ? `，范围内 Key 预算 ${yuan(st.budget)}（已用 ${pct(st.cost / st.budget * 100)}）` : ''}`,
-        ...(hasTok ? [tokLine({ label: '昨日 Token', t: yt, pt, vs: '较前一日', cost: yc, gross: yo.gross, second: `${accLabel} ${tok(st.tokens || 0)}`, ratio: mr, cache: cy })] : []), scopeNote, ...sectionLines(sections)];
+      const lines = [...lead(hasTok ? tokLine({ label: `昨日（${day.slice(5)}）Token`, t: yt, pt, vs: '较前一日', cost: yc, gross: yo.gross, second: `${accLabel} ${tok(st.tokens || 0)}`, ratio: mr, cache: cy }) : null, `**昨日（${day.slice(5)}）应付 ${yuan(yc)}**，较前一日 ${chg(yc, pc)}${offText(yo)}`, unitText(yc, yo.gross, yt)), ...(zn ? [zn] : []),
+        `${accLabel} ${yuan(st.cost)}${st.forecast != null ? `，预计月末 ${yuan(st.forecast)}` : ''}${st.budget ? `，范围内 Key 预算 ${yuan(st.budget)}（已用 ${pct(st.cost / st.budget * 100)}）` : ''}`, scopeNote, ...sectionLines(sections)];
       const d = delta('较前一日', yc, pc);
       const doc = {
         tags: [{ text: '指定范围', level: 'info' }],
@@ -655,7 +660,7 @@ export class AlertService {
         chart: costChart('近 14 日每日费用（元）', rows14, addDays(day, -13), day, x => (x === day ? '昨日' : '此前'), { 此前: BLUE_L, 昨日: BLUE }),
         tokenChart: hasTok ? tokenChart('近 14 日每日 Token', rows14, addDays(day, -13), day, x => (x === day ? '昨日' : '此前'), { 此前: TEAL_L, 昨日: TEAL }) : null,
       };
-      return { title: `费用日报 · ${day}${tag}`, level: 'info', lines, doc, empty: yc < 0.005 && st.cost < 0.005 && yo.gross < 0.005 && (st.gross || 0) < 0.005, period: today, ready: true, path: '#/overview' };
+      return { title: `${rptName('日报', hasTok)} · ${day}${tag}`, level: 'info', lines, doc, empty: yc < 0.005 && st.cost < 0.005 && yo.gross < 0.005 && (st.gross || 0) < 0.005, period: today, ready: true, path: '#/overview' };
     }
     const weekly = kind === 'weekly';
     const lw = isoWeek(addDays(isoWeek(today).from, -1)), pw = isoWeek(addDays(lw.from, -1));
@@ -664,7 +669,7 @@ export class AlertService {
     const vs = weekly ? '较前一周' : '较上月', pLbl = weekly ? '前一周' : '上月';
     const tRows = list => { const u = tokUnit(Math.max(0, ...(list || []).map(x => x.tokens || 0))); return (list || []).map(x => ({ name: clean(x.name), value: tokIn(x.tokens, u), share: st.tokens ? pct(x.tokens / st.tokens * 100) : '' })); };
     const pb = weekly ? '范围内上周总' : `范围内 ${period} 总`;
-    const sections = [{ title: 'API Key Top 5', rows: rowsOf(st.topKeys), ...head('cost', 'API Key', pb + '费用') }, { title: '模型 Top 3', rows: rowsOf(st.topModels), ...head('cost', '模型', pb + '费用') }, { title: 'Token 用量 · API Key Top 5', rows: tRows(st.tokenKeys), ...head('token', 'API Key', pb + ' Token') }, { title: 'Token 用量 · 模型 Top 3', rows: tRows(st.tokenModels), ...head('token', '模型', pb + ' Token') }];
+    const sections = tokFirst([{ title: 'API Key Top 5', rows: rowsOf(st.topKeys), ...head('cost', 'API Key', pb + '费用') }, { title: '模型 Top 3', rows: rowsOf(st.topModels), ...head('cost', '模型', pb + '费用') }, { title: 'Token 用量 · API Key Top 5', rows: tRows(st.tokenKeys), ...head('token', 'API Key', pb + ' Token') }, { title: 'Token 用量 · 模型 Top 3', rows: tRows(st.tokenModels), ...head('token', '模型', pb + ' Token') }]);
     const hasTok = (st.tokens || 0) > 0 || (st.prevTokens || 0) > 0;
     const so = { gross: st.gross || 0, cost: st.cost, off: (st.gross || 0) - st.cost, zero: st.zeroDays || [] }, zn = zeroNote(so);
     // 范围内有消费的 API Key（按原价计）：本期与上期
@@ -676,9 +681,8 @@ export class AlertService {
     const cw = hasTok ? cacheStats(this.scopeRows(weekly ? this.store.tokenIoRows(lw.from, lw.to) : this.store.tokenIoRows(period, period, 'M'), scope, keys)) : { hit: null };
     const head1 = weekly ? `**上周（${lw.from.slice(5)} ~ ${lw.to.slice(5)}）应付 ${yuan(st.cost)}**` : `**${period} 账期应付 ${yuan(st.cost)}**`;
     const tl = weekly ? '上周 Token' : `${period} Token`;
-    const lines = [`${head1}，${vs} ${chg(st.cost, st.prevCost)}，日均应付 ${yuan(st.cost / mdays)}${offText(so)}`, ...(zn ? [zn] : []),
-      ...(!weekly && st.budget ? [`范围内 Key 预算 ${yuan(st.budget)}，${st.cost > st.budget ? `超出 ${yuan(st.cost - st.budget)}` : `使用 ${pct(st.cost / st.budget * 100)}`}`] : []),
-      ...(hasTok ? [tokLine({ label: tl, t: st.tokens || 0, pt: st.prevTokens || 0, vs, cost: st.cost, gross: so.gross, second: `日均 ${tok((st.tokens || 0) / mdays)}`, ratio: mr, cache: cw })] : []), scopeNote, ...sectionLines(sections)];
+    const lines = [...lead(hasTok ? tokLine({ label: weekly ? `上周（${lw.from.slice(5)} ~ ${lw.to.slice(5)}）Token` : `${period} 账期 Token`, t: st.tokens || 0, pt: st.prevTokens || 0, vs, cost: st.cost, gross: so.gross, second: `日均 ${tok((st.tokens || 0) / mdays)}`, ratio: mr, cache: cw }) : null, `${head1}，${vs} ${chg(st.cost, st.prevCost)}，日均应付 ${yuan(st.cost / mdays)}${offText(so)}`, unitText(st.cost, so.gross, st.tokens || 0)), ...(zn ? [zn] : []),
+      ...(!weekly && st.budget ? [`范围内 Key 预算 ${yuan(st.budget)}，${st.cost > st.budget ? `超出 ${yuan(st.cost - st.budget)}` : `使用 ${pct(st.cost / st.budget * 100)}`}`] : []), scopeNote, ...sectionLines(sections)];
     const d = delta(vs, st.cost, st.prevCost);
     const doc = { tags: [{ text: '指定范围', level: 'info' }],
       kpis: [{ label: weekly ? '上周应付（元）' : `${period} 应付（元）`, value: yuan(st.cost), delta: d }, ...grossKpi(weekly ? '上周原价（元）' : '原价（元）', so),
@@ -686,7 +690,7 @@ export class AlertService {
       usage: hasTok ? [{ label: tl, value: tok(st.tokens || 0), delta: udelta(vs, st.tokens || 0, st.prevTokens || 0) }, { label: '日均 Token', value: tok((st.tokens || 0) / mdays), ...ratioSub(mr) },
         { label: weekly ? '上周单位成本（元）' : '单位成本（元）', value: perMv(st.cost, st.tokens), sub: unitSub(st.cost, so.gross, st.tokens || 0) }, ...cacheKpi(cw)] : null,
       notes: [weekly ? `统计周期：${lw.from} ~ ${lw.to}（较前一周 ${pw.from.slice(5)} ~ ${pw.to.slice(5)}）` : null, zn, scopeNote].filter(Boolean), sections };
-    return { title: `${weekly ? '费用周报' : '费用月报'} · ${period}${tag}`, level: 'info', lines, doc, empty: st.cost < 0.005 && st.prevCost < 0.005 && so.gross < 0.005 && (st.prevGross || 0) < 0.005, period, ready: kind === 'monthly' ? globalReady : true, path: '#/overview' };
+    return { title: `${rptName(weekly ? '周报' : '月报', hasTok)} · ${period}${tag}`, level: 'info', lines, doc, empty: st.cost < 0.005 && st.prevCost < 0.005 && so.gross < 0.005 && (st.prevGross || 0) < 0.005, period, ready: kind === 'monthly' ? globalReady : true, path: '#/overview' };
   }
 
   /* ---------- 名称 ---------- */
@@ -867,13 +871,14 @@ export class AlertService {
       const used = cost / b.monthly * 100;
       return [{ label, value: pct(used), tone: used >= 100 ? 'bad' : used >= alertPct ? 'warn' : null, sub: cost > b.monthly ? `超出 ${yuan(cost - b.monthly)}` : `预算 ${yuan(b.monthly)}` }];
     };
-    const dirTag = d => (d.dir ? { text: `${d.label} ${d.dir === 'up' ? '↑' : '↓'} ${d.text.replace(/^[+−]/, '')}`, level: d.dir === 'up' ? 'bad' : 'good' } : null);
+    const dirTag = d => (d.dir ? { text: `应付${d.label} ${d.dir === 'up' ? '↑' : '↓'} ${d.text.replace(/^[+−]/, '')}`, level: d.dir === 'up' ? 'bad' : 'good' } : null);
     /*
      * 日报 / 周报 / 月报的版式一致（周报、月报的第二个排行区块为各自的维度：增长最快 / 按成本中心；日报为异常提示）：
      *  指标卡两行各四栏——费用：应付（较上期）/ 原价（优惠与抵扣）/ 日报“本月累计 · 预计月末”，周报、月报“日均应付 · 上期日均”/
      *  月度预算使用率（设置了月度预算的日报、月报）或有消费的 API Key；用量：Token（较上期）/ 日报“本月累计 Token”，周报、月报“日均 Token”
      *  （说明行为输入输出比）/ 单位成本 / 缓存命中率（估算节省）。
-     *  文本消息依次为：标题行、应付为 0 的说明、累计与预算、按云厂商、Token 行、（月报）成本中心预算、排行
+     *  用量优先：飞书卡片中用量指标卡、Token 趋势图与 Token 排行排在费用之前；
+     *  文本消息依次为：Token 行（加粗）、费用行（附单位成本）、应付为 0 的说明、累计与预算、按云厂商、（月报）成本中心预算、Token 排行、费用排行
      */
     if (kind === 'daily') {
       // 月累计按“昨日”所在的月份统计：每月 1 日的日报描述的是上月最后一天，应给出上月合计，而不是本月刚开始的累计
@@ -897,23 +902,22 @@ export class AlertService {
       const mr = hasTok ? ratioText(ioTokens(this.store.monthTokenIo(cycle))) : null;
       const cy = hasTok ? cacheStats(this.store.tokenIoRows(day, day)) : { hit: null };
       const ps = provSplit(y);
-      const lines = [`**昨日（${day.slice(5)}）应付 ${yuan(yc)}**，较前一日 ${chg(yc, pc)}${offText(yo)}`, ...(zn ? [zn] : []),
-        `${accLabel} ${yuan(mtd)}${fc != null ? `，预计月末 ${yuan(fc)}` : ''}${b.monthly ? `，月度预算 ${yuan(b.monthly)}（已用 ${pct(mtd / b.monthly * 100)}）` : ''}`, ...(ps ? [ps] : []),
-        ...(hasTok ? [tokLine({ label: '昨日 Token', t: yt, pt, vs: '较前一日', cost: yc, gross: yo.gross, second: `${accLabel} ${tok(mt)}`, ratio: mr, cache: cy })] : [])];
+      const lines = [...lead(hasTok ? tokLine({ label: `昨日（${day.slice(5)}）Token`, t: yt, pt, vs: '较前一日', cost: yc, gross: yo.gross, second: `${accLabel} ${tok(mt)}`, ratio: mr, cache: cy }) : null, `**昨日（${day.slice(5)}）应付 ${yuan(yc)}**，较前一日 ${chg(yc, pc)}${offText(yo)}`, unitText(yc, yo.gross, yt)), ...(zn ? [zn] : []),
+        `${accLabel} ${yuan(mtd)}${fc != null ? `，预计月末 ${yuan(fc)}` : ''}${b.monthly ? `，月度预算 ${yuan(b.monthly)}（已用 ${pct(mtd / b.monthly * 100)}）` : ''}`, ...(ps ? [ps] : [])];
       const an = this.evaluateAnomaly(today);
       const byKeyY = sumBy(y, r => r.id).map(x => ({ id: x.k, cost: x.cost, gross: x.gross, tokens: x.tokens })), byModelY = this.store.dailyByModel(day, day);
-      const sections = [
+      const sections = tokFirst([
         { title: '昨日 API Key Top 5', rows: topRows(byKeyY, 5, r => this.keyName(r.id, keys), yc), ...head('cost', 'API Key', '昨日总费用') },
         { title: '异常提示', items: an.map(i => ({ text: i.text, tag: i.tag, level: i.level })) },
         { title: '昨日模型 Top 3', rows: topRows(byModelY, 3, r => clean(r.model), yc), ...head('cost', '模型', '昨日总费用') },
         { title: '昨日 Token 用量 · API Key Top 5', rows: tokRows(byKeyY, 5, r => this.keyName(r.id, keys), yt), ...head('token', 'API Key', '昨日总 Token') },
         { title: '昨日 Token 用量 · 模型 Top 3', rows: tokRows(byModelY, 3, r => clean(r.model), yt), ...head('token', '模型', '昨日总 Token') },
-      ];
+      ]);
       lines.push(...sectionLines(sections));
       const d = delta('较前一日', yc, pc);
       const doc = {
         // 昨日应付因全部抵扣为 0 时不显示“较前一日 ↓ 100%”：费用并没有下降
-        tags: [zn ? null : dirTag(d), an.length ? { text: `${an.length} 项异常`, level: 'warn' } : null],
+        tags: [hasTok ? tokTag('较前一日', yt, pt) : null, zn ? null : dirTag(d), an.length ? { text: `${an.length} 项异常`, level: 'warn' } : null],
         kpis: [{ label: '昨日应付（元）', value: yuan(yc), delta: d }, ...grossKpi('昨日原价（元）', yo),
           { label: `${accLabel}（元）`, value: yuan(mtd), sub: fc != null ? `预计月末 ${yuan(fc)}` : '' },
           ...(b.monthly ? budgetKpi(mtd) : [activeKpi(activeKeys(y), '前一日', activeKeys(p))])],
@@ -924,7 +928,7 @@ export class AlertService {
         tokenChart: hasTok ? tokenChart('近 14 日每日 Token', rows14, addDays(day, -13), day, x => (x === day ? '昨日' : '此前'), { 此前: TEAL_L, 昨日: TEAL }) : null,
       };
       // 应付为 0 但有原价（全部被抵扣）不算空报表：照常发送
-      return { title: `费用日报 · ${day}`, level: 'info', lines, doc, empty: yc < 0.005 && mtd < 0.005 && yo.gross < 0.005 && mg < 0.005, period: today, path: `#/overview?from=${day}&to=${day}` };
+      return { title: `${rptName('日报', hasTok)} · ${day}`, level: 'info', lines, doc, empty: yc < 0.005 && mtd < 0.005 && yo.gross < 0.005 && mg < 0.005, period: today, path: `#/overview?from=${day}&to=${day}` };
     }
     if (kind === 'weekly') {
       const last = isoWeek(addDays(isoWeek(today).from, -1)), prev = isoWeek(addDays(last.from, -1));
@@ -938,22 +942,21 @@ export class AlertService {
       // 上周的输入输出比、缓存命中率与估算节省（日账单）
       const io2 = hasTok ? this.store.tokenIoRows(last.from, last.to) : [];
       const cw = hasTok ? cacheStats(io2) : { hit: null }, wr = hasTok ? ratioText(ioTokens(io2)) : null;
-      const lines = [`**上周（${last.from.slice(5)} ~ ${last.to.slice(5)}）应付 ${yuan(c)}**，较前一周 ${chg(c, o)}，日均应付 ${yuan(c / 7)}${offText(wo)}`, ...(zn ? [zn] : []), ...(ps ? [ps] : []),
-        ...(hasTok ? [tokLine({ label: '上周 Token', t: ct, pt: ot, vs: '较前一周', cost: c, gross: wo.gross, second: `日均 ${tok(ct / 7)}`, ratio: wr, cache: cw })] : [])];
+      const lines = [...lead(hasTok ? tokLine({ label: `上周（${last.from.slice(5)} ~ ${last.to.slice(5)}）Token`, t: ct, pt: ot, vs: '较前一周', cost: c, gross: wo.gross, second: `日均 ${tok(ct / 7)}`, ratio: wr, cache: cw }) : null, `**上周（${last.from.slice(5)} ~ ${last.to.slice(5)}）应付 ${yuan(c)}**，较前一周 ${chg(c, o)}，日均应付 ${yuan(c / 7)}${offText(wo)}`, unitText(c, wo.gross, ct)), ...(zn ? [zn] : []), ...(ps ? [ps] : [])];
       const byModelW = this.store.dailyByModel(last.from, last.to);
       const kc = sumBy(cur, r => r.id), ko = new Map(sumBy(old, r => r.id).map(x => [x.k, x.cost]));
       const up = kc.map(x => ({ id: x.k, d: x.cost - (ko.get(x.k) || 0) })).filter(x => x.d >= 1).sort((x, y) => y.d - x.d).slice(0, 3);
-      const sections = [
+      const sections = tokFirst([
         { title: 'API Key Top 5', rows: topRows(kc.map(x => ({ id: x.k, cost: x.cost, gross: x.gross })), 5, r => this.keyName(r.id, keys), c), ...head('cost', 'API Key', '上周总费用') },
         { title: '增长最快（较前一周）', rows: up.map(x => ({ name: this.keyName(x.id, keys), value: '+' + yuan(x.d) })), ...head('delta', 'API Key') },
         { title: '模型 Top 3', rows: topRows(byModelW, 3, r => clean(r.model), c), ...head('cost', '模型', '上周总费用') },
         { title: 'Token 用量 · API Key Top 5', rows: tokRows(kc.map(x => ({ id: x.k, tokens: x.tokens })), 5, r => this.keyName(r.id, keys), ct), ...head('token', 'API Key', '上周总 Token') },
         { title: 'Token 用量 · 模型 Top 3', rows: tokRows(byModelW, 3, r => clean(r.model), ct), ...head('token', '模型', '上周总 Token') },
-      ];
+      ]);
       lines.push(...sectionLines(sections));
       const d = delta('较前一周', c, o);
       const doc = {
-        tags: [dirTag(d)],
+        tags: [hasTok ? tokTag('较前一周', ct, ot) : null, dirTag(d)],
         kpis: [{ label: '上周应付（元）', value: yuan(c), delta: d }, ...grossKpi('上周原价（元）', wo),
           { label: '日均应付（元）', value: yuan(c / 7), sub: `前一周日均 ${yuan(o / 7)}` }, activeKpi(activeKeys(cur), '前一周', activeKeys(old))],
         usage: hasTok ? [{ label: '上周 Token', value: tok(ct), delta: udelta('较前一周', ct, ot) }, { label: '日均 Token', value: tok(ct / 7), ...ratioSub(wr) },
@@ -962,7 +965,7 @@ export class AlertService {
         chart: costChart('近两周每日费用（元）', rows, prev.from, last.to, x => (x >= last.from ? '上周' : '前一周'), { 前一周: BLUE_L, 上周: BLUE }),
         tokenChart: hasTok ? tokenChart('近两周每日 Token', rows, prev.from, last.to, x => (x >= last.from ? '上周' : '前一周'), { 前一周: TEAL_L, 上周: TEAL }) : null,
       };
-      return { title: `费用周报 · ${last.key}`, level: 'info', lines, doc, empty: c < 0.005 && o < 0.005 && wo.gross < 0.005 && og < 0.005, period: last.key, path: `#/overview?from=${last.from}&to=${last.to}` };
+      return { title: `${rptName('周报', hasTok)} · ${last.key}`, level: 'info', lines, doc, empty: c < 0.005 && o < 0.005 && wo.gross < 0.005 && og < 0.005, period: last.key, path: `#/overview?from=${last.from}&to=${last.to}` };
     }
     // monthly
     const cycle = addMonths(today.slice(0, 7), -1), pcyc = addMonths(cycle, -1);
@@ -991,20 +994,19 @@ export class AlertService {
     const ccCost = new Map(cc.map(x => [x.k, x.cost]));
     const ccSet = Object.keys(ccB).filter(k => ccBudget(k)), ccOver = ccSet.filter(k => (ccCost.get(k) || 0) > ccBudget(k)).sort((x, y) => ((ccCost.get(y) || 0) - ccBudget(y)) - ((ccCost.get(x) || 0) - ccBudget(x)));
     const ccNote = ccSet.length ? `成本中心预算 ${ccSet.length} 个，${ccOver.length ? `${ccOver.length} 个超出：${ccOver.slice(0, 3).map(k => `${ccLabel(k)} 超出 ${yuan((ccCost.get(k) || 0) - ccBudget(k))}`).join('、')}${ccOver.length > 3 ? ` 等 ${ccOver.length} 个` : ''}` : '均未超出'}` : null;
-    const lines = [`**${cycle} 账期应付 ${yuan(c)}**，较上月 ${chg(c, o)}，日均应付 ${yuan(c / mdays)}${offText({ gross: g, off: g - c })}`, ...(zn ? [zn] : []),
-      ...(b.monthly ? [`月度预算 ${yuan(b.monthly)}，${c > b.monthly ? `超出 ${yuan(c - b.monthly)}` : `使用 ${pct(c / b.monthly * 100)}`}`] : []), ...(ps ? [ps] : []),
-      ...(hasTok ? [tokLine({ label: `${cycle} Token`, t: ct, pt: ot, vs: '较上月', cost: c, gross: g, second: `日均 ${tok(ct / mdays)}`, ratio: mr, cache: cm })] : []), ...(ccNote ? [ccNote] : [])];
-    const sections = [
+    const lines = [...lead(hasTok ? tokLine({ label: `${cycle} 账期 Token`, t: ct, pt: ot, vs: '较上月', cost: c, gross: g, second: `日均 ${tok(ct / mdays)}`, ratio: mr, cache: cm }) : null, `**${cycle} 账期应付 ${yuan(c)}**，较上月 ${chg(c, o)}，日均应付 ${yuan(c / mdays)}${offText({ gross: g, off: g - c })}`, unitText(c, g, ct)), ...(zn ? [zn] : []),
+      ...(b.monthly ? [`月度预算 ${yuan(b.monthly)}，${c > b.monthly ? `超出 ${yuan(c - b.monthly)}` : `使用 ${pct(c / b.monthly * 100)}`}`] : []), ...(ps ? [ps] : []), ...(ccNote ? [ccNote] : [])];
+    const sections = tokFirst([
       { title: 'API Key Top 5', rows: topRows(sumBy(rows, r => r.id).map(x => ({ id: x.k, cost: x.cost, gross: x.gross })), 5, r => this.keyName(r.id, keys), c), ...head('cost', 'API Key', `${cycle} 总费用`) },
       { title: '按成本中心', rows: cc.length > 1 || (cc[0] && cc[0].k !== NO_CC) ? topRows(cc, 6, r => ccLabel(r.k), c, ccSub) : [], ...head('cost', '成本中心', `${cycle} 总费用`) },
       { title: '模型 Top 3', rows: topRows(byModelM, 3, r => clean(r.model), c), ...head('cost', '模型', `${cycle} 总费用`) },
       { title: 'Token 用量 · API Key Top 5', rows: tokRows(sumBy(rows, r => r.id).map(x => ({ id: x.k, tokens: x.tokens })), 5, r => this.keyName(r.id, keys), ct), ...head('token', 'API Key', `${cycle} 总 Token`) },
       { title: 'Token 用量 · 模型 Top 3', rows: tokRows(byModelM, 3, r => clean(r.model), ct), ...head('token', '模型', `${cycle} 总 Token`) },
-    ];
+    ]);
     lines.push(...sectionLines(sections));
     const d = delta('较上月', c, o);
     const doc = {
-      tags: [dirTag(d), b.monthly && c > b.monthly ? { text: '超出预算', level: 'bad' } : null, ...(ccOver.length ? [{ text: `${ccOver.length} 个成本中心超支`, level: 'bad' }] : [])],
+      tags: [hasTok ? tokTag('较上月', ct, ot) : null, b.monthly && c > b.monthly ? { text: '超出预算', level: 'bad' } : null, ...(ccOver.length ? [{ text: `${ccOver.length} 个成本中心超支`, level: 'bad' }] : []), dirTag(d)],
       kpis: [{ label: `${cycle} 应付（元）`, value: yuan(c), delta: d }, ...grossKpi('原价（元）', { gross: g, off: g - c }),
         { label: '日均应付（元）', value: yuan(c / mdays), sub: `上月日均 ${yuan(o / pdays)}` }, ...(b.monthly ? budgetKpi(c) : [activeKpi(activeKeys(rows), '上月', activeKeys(prows))])],
       usage: hasTok ? [{ label: `${cycle} Token`, value: tok(ct), delta: udelta('较上月', ct, ot) }, { label: '日均 Token', value: tok(ct / mdays), ...ratioSub(mr) },
@@ -1013,7 +1015,7 @@ export class AlertService {
       chart: costChart(`${cycle} 每日费用（元）`, mdaily, cycle + '-01', last, () => '每日应付', { 每日应付: BLUE }),
       tokenChart: hasTok ? tokenChart(`${cycle} 每日 Token`, mdaily, cycle + '-01', last, () => '每日 Token', { '每日 Token': TEAL }) : null,
     };
-    return { title: `费用月报 · ${cycle}`, level: 'info', lines, doc, empty: c < 0.005 && o < 0.005 && g < 0.005 && og < 0.005, period: cycle, ready: this.monthlyReady(today), path: `#/overview?cycle=${cycle}` };
+    return { title: `${rptName('月报', hasTok)} · ${cycle}`, level: 'info', lines, doc, empty: c < 0.005 && o < 0.005 && g < 0.005 && og < 0.005, period: cycle, ready: this.monthlyReady(today), path: `#/overview?cycle=${cycle}` };
   }
   /**
    * 月报在上月出账后发送：每个已配置云厂商的上月账期都已定稿即发送；账单同步持续失败时最晚 10 日发送（避免永远不发）。
