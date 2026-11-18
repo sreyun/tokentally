@@ -1,7 +1,7 @@
 /* Key 分析：全部 API Key 的用量、费用、效率、多维分布、模型分布、变动、治理与明细（用量在前、费用在后） */
 import {
   $, esc, state, ui, app, money, moneyShort, tokFmt, intFmt, pct, sum, uniq, metricVal, METRICS, NONE_KEY, DIMS, keyObj, keyDesc, keyShort, wsName,
-  filterLines, aggregate, sortedAggs, newAgg, totalTokens, topModels, unitsText, deltaPill, tipRows, icon, help, segCtl, fmtTime, budgetOf, budgetLevel,
+  filterLines, aggregate, aggAll, sortedAggs, newAgg, totalTokens, topModels, unitsText, deltaPill, tipRows, icon, help, segCtl, fmtTime, budgetOf, budgetLevel,
   forecastOf, isCurrentMonth, periodTag, copyBtn, PROVIDERS, provTag, multiCloud, isAdmin, modal, http, toast, NO_CC, NO_WS, NO_OWNER, perCallCovered, perCall, daysBetween, usageFiltered, usageAgg, REQ_SRC,
   dimLink, groupHash, hasTags, callsOn, coveredCost, failRateOf, addDays, rankVal, scopeColors, dimVal, dimName, toneOf, WEEK, weekday,
 } from '../core.js';
@@ -136,9 +136,12 @@ export function render(v) {
   const days = uniq(daily.map(l => l.date)).sort();
   const calDays = Math.max(1, daysBetween(pp.from, pp.to < state.today ? pp.to : state.today));
   const used = r => r.id !== NONE_KEY && (r.cost > 0 || r.gross >= 0.005 || r.tokens > 0);
-  const spent = rows.filter(used), pActive = rows.filter(r => r.id !== NONE_KEY && (r.prevCost > 0 || r.prevTok > 0)).length;
-  const tok = sum(rows, r => r.tokens), pTok = sum(rows, r => r.prevTok), prevCost = sum(rows, r => r.prevCost), gross = sum(rows, r => r.gross);
-  const tIn = sum(rows, r => r.tIn), tCache = sum(rows, r => r.tCache), tOut = sum(rows, r => r.tOut), pTIn = sum(rows, r => r.prevTIn), pTCache = sum(rows, r => r.prevTCache);
+  // 上期基准直接取上期账单（不经 rows 过滤）：只在上期有用量的 Key 也要计入环比基准与变动归因
+  const prevLines = filterLines(state.prev), pByKey = aggregate(prevLines, DIMS.key.of), pAll = aggAll(prevLines);
+  const usedAgg = a => a.key !== NONE_KEY && (a.cost > 0 || a.gross >= 0.005 || totalTokens(a) > 0);
+  const spent = rows.filter(used), pActive = [...pByKey.values()].filter(usedAgg).length;
+  const tok = sum(rows, r => r.tokens), pTok = totalTokens(pAll), prevCost = pAll.cost, gross = sum(rows, r => r.gross);
+  const tIn = sum(rows, r => r.tIn), tCache = sum(rows, r => r.tCache), tOut = sum(rows, r => r.tOut), pTIn = pAll.tIn, pTCache = pAll.tCache;
   const perM = tok ? total / tok * 1e6 : null, pPerM = pTok ? prevCost / pTok * 1e6 : null;
   const hit = tIn ? tCache / tIn : null, pHit = pTIn ? pTCache / pTIn : null;
   const byTok = rows.filter(r => r.tokens > 0).sort((a, b) => b.tokens - a.tokens);
@@ -154,7 +157,7 @@ export function render(v) {
   const dimOpts = { ws: '业务空间', ...(hasTags() ? { cc: '成本中心', owner: '负责人' } : {}), ...(multiCloud() ? { provider: '云厂商' } : {}) };
   if (!dimOpts[ui.kDim]) ui.kDim = 'ws';
   const TC = { tok: '用量', cost: '费用' };
-  const top1 = byTok[0], topC = byCost[0];
+  const top1 = byTok[0], topC = rows.filter(r => r.cost > 0).sort((a, b) => b.cost - a.cost)[0];
 
   v.innerHTML = `
     <div class="kpis even">
@@ -251,7 +254,8 @@ export function render(v) {
 
   // 变动归因
   const vTok = ui.kVar !== 'cost';
-  divergingList($('#kVar', v), rows.map(r => ({ id: r.id, label: r.desc, cur: vTok ? r.tokens : r.cost, prev: vTok ? r.prevTok : r.prevCost, delta: vTok ? r.tokens - r.prevTok : r.cost - r.prevCost })),
+  const cByKey = aggregate(lines, DIMS.key.of), vOf = a => (a ? (vTok ? totalTokens(a) : a.cost) : 0);
+  divergingList($('#kVar', v), uniq([...cByKey.keys(), ...pByKey.keys()]).map(id => { const c = vOf(cByKey.get(id)), q = vOf(pByKey.get(id)); return { id, label: keyShort(id), cur: c, prev: q, delta: c - q }; }),
     { limit: 8, onClick: it => goKey(it.id), ...(vTok ? { fmt: tokT, noun: '用量', neutral: true } : {}) });
 
   // 治理概览
