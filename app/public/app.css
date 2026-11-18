@@ -977,3 +977,27 @@ dialog.modal .dlg-b { max-height: calc(100vh - 140px); }
 .share-fail-card p { margin: 6px 0; font-size: 13.5px; line-height: 1.7; color: var(--ink-2); }
 .share-fail-card p.muted { font-size: 12px; color: var(--ink-3); }
 .share-new .inp.sm { height: 30px; }
+
+/* ---------------- Key 分析 ---------------- */
+.kpis.even { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+@media (max-width: 1180px) { .kpis.even { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.lgl.wide .li { grid-template-columns: 10px minmax(0, 1fr) auto auto; }
+.lgl.wide .li em { min-width: 72px; }
+.chart .qline { stroke: var(--border-strong); stroke-width: 1; stroke-dasharray: 4 4; }
+.chart .qlabel { fill: var(--muted); font-size: 11px; }
+.chart circle.pt { fill-opacity: .55; stroke-width: 1.5; cursor: default; transition: fill-opacity .15s; }
+.chart circle.pt[role="button"] { cursor: pointer; }
+.chart circle.pt:hover, .chart circle.pt:focus { fill-opacity: .9; outline: none; }
+.heat.mx thead th { writing-mode: vertical-rl; transform: rotate(180deg); text-align: left; padding: 4px 0; max-height: 132px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.heat.mx td { width: 44px; min-width: 36px; }
+.gchips { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; margin-top: 14px; }
+.gchip { display: grid; grid-template-columns: auto 1fr; column-gap: 8px; align-items: baseline; text-align: left; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--r); background: var(--surface); color: var(--ink); cursor: pointer; font: inherit; }
+.gchip:hover { background: var(--surface-2); }
+.gchip b { font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; color: var(--muted); }
+.gchip.hit b { color: var(--warn); }
+.gchip span { font-weight: 600; font-size: 13px; }
+.gchip small { grid-column: 1 / -1; color: var(--muted); font-size: 11.5px; line-height: 1.45; margin-top: 4px; }
+.gchip.on { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; background: var(--surface-2); }
+.kflag-on { margin-left: 8px; display: inline-flex; align-items: center; gap: 4px; }
+.kflag-on .link { padding: 0 2px; font-size: 14px; line-height: 1; }
+.rank.neu .dv-bar .neg i { background: var(--s1); } .rank.neu .dv-bar .pos i { background: var(--s3); }
