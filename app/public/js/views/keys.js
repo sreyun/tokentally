@@ -1,6 +1,6 @@
 /* Key 分析：全部 API Key 的费用、用量、效率、预算与属性 */
 import {
-  $, esc, state, ui, app, money, moneyShort, compact, intFmt, pct, sum, uniq, metricVal, METRICS, NONE_KEY, DIMS, keyObj, keyDesc, keyShort, wsName,
+  $, esc, state, ui, app, money, moneyShort, tokFmt, intFmt, pct, sum, uniq, metricVal, METRICS, NONE_KEY, DIMS, keyObj, keyDesc, keyShort, wsName,
   filterLines, aggregate, sortedAggs, newAgg, totalTokens, topModels, unitsText, deltaPill, tipRows, icon, help, segCtl, fmtTime, budgetOf, budgetLevel,
   forecastOf, isCurrentMonth, periodTag, copyBtn, PROVIDERS, provTag, multiCloud, isAdmin, modal, http, toast, NO_CC, NO_WS, NO_OWNER, perCallCovered, perCall, daysBetween, usageFiltered, usageAgg, REQ_SRC,
   dimLink, groupHash, hasTags, callsOn, coveredCost, failRateOf,
@@ -160,7 +160,7 @@ export function render(v) {
     { key: 'tOut', label: '输出 Token', align: 'r', fmt: x => intFmt(x) },
     { key: 'hit', label: '缓存命中率', align: 'r', fmt: x => (x == null ? '—' : (x * 100).toFixed(1) + '%'), sortVal: r => r.hit ?? -1, csv: r => (r.hit == null ? '' : (r.hit * 100).toFixed(2) + '%') },
     { key: 'perM', label: '¥/百万Token', title: '费用 ÷ 总 Token × 10⁶', align: 'r', fmt: x => (x == null ? '—' : money(x)), sortVal: r => r.perM ?? -1 },
-    { key: 'dayTok', label: '日均 Token', title: '总 Token ÷ 统计周期内已过的自然日数', align: 'r', fmt: x => (x ? compact(x) : '—'), csv: r => Math.round(r.dayTok) },
+    { key: 'dayTok', label: '日均 Token', title: '总 Token ÷ 统计周期内已过的自然日数', align: 'r', fmt: x => (x ? tokFmt(x) : '—'), csv: r => Math.round(r.dayTok) },
     ...(hasUsage ? [
       { key: 'requests', label: '请求数', title: REQ_SRC, align: 'r', fmt: x => (x == null ? '<span class="muted">—</span>' : intFmt(x)), sortVal: r => r.requests ?? -1 },
       { key: 'tokPer', label: '单次均 Token', title: '单次平均 Token = 总 Token ÷ 请求数（阿里云取同日同 Key 同模型的账单 Token）', align: 'r', fmt: x => (x == null ? '<span class="muted">—</span>' : intFmt(x)), sortVal: r => r.tokPer ?? -1, csv: r => (r.tokPer == null ? '' : Math.round(r.tokPer)) },

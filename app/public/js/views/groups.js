@@ -4,7 +4,7 @@
  *  - 详情页（#/group/<维度>/<ID>）：该分组的费用、关联 Key（含无消费的 Key）、模型、Key × 模型、关联维度、月度与变更
  * ========================================================================= */
 import {
-  $, esc, state, ui, app, LS, http, money, moneyShort, compact, intFmt, pct, sum, uniq, metricVal, METRICS, NONE_KEY, DIMS,
+  $, esc, state, ui, app, LS, http, money, moneyShort, compact, tokFmt, intFmt, pct, sum, uniq, metricVal, METRICS, NONE_KEY, DIMS,
   keyObj, keyShort, filterLines, aggregate, addAgg, aggAll, sortedAggs, newAgg, totalTokens, topModels, deltaPill, icon, help, segCtl,
   fmtTime, periodTag, copyBtn, PROVIDERS, provTag, multiCloud, hasTags, NO_WS, NO_CC, NO_OWNER, dimVal, keyDimVal, dimName, DIM_LABEL,
   scopeLines, scopeUsage, groupHash, dimLink, isSet, keyMatch, usageFiltered, usageAgg, callsOn, perCallCovered, perCall, coveredCost, daysBetween, WEEK, weekday, channelLabel, toneOf,
@@ -199,7 +199,7 @@ export function render(v) {
         return `<b class="${cls(lv)}">${(x * 100).toFixed(1)}%</b><span class="sub">${money(r.bUsed)} / ${money(r.budget)}</span>${r.bFc != null ? `<span class="sub ${cls(fl)}">预计月末 ${(r.bFc / r.budget * 100).toFixed(0)}%</span>` : ''}`;
       },
     }] : []),
-    { key: 'tokens', label: '总 Token', align: 'r', fmt: x => (x ? compact(x) : '—'), csv: r => Math.round(r.tokens) },
+    { key: 'tokens', label: '总 Token', align: 'r', fmt: x => (x ? tokFmt(x) : '—'), csv: r => Math.round(r.tokens) },
     { key: 'perM', label: '¥/百万Token', align: 'r', fmt: x => (x == null ? '—' : money(x)), sortVal: r => r.perM ?? -1, csv: r => (r.perM == null ? '' : r.perM.toFixed(4)) },
     { key: 'hit', label: '缓存命中率', align: 'r', fmt: x => (x == null ? '—' : (x * 100).toFixed(1) + '%'), sortVal: r => r.hit ?? -1, csv: r => (r.hit == null ? '' : (r.hit * 100).toFixed(2) + '%') },
     ...(hasUsage ? [
@@ -220,7 +220,7 @@ export function render(v) {
     onRowClick: r => app.go(groupHash(dim, r.id)), columns: cols, empty: `当前筛选下没有${G.label}`,
     csvExtra: [{ label: `${G.label} ID`, val: r => r.id }, { label: '上期费用', val: r => r.prev.toFixed(6) }, { label: '云厂商', val: r => r.providers.map(p => PROVIDERS[p] || p).join('、') },
       ...(ccBud ? [{ label: '月度预算', val: r => (r.budget ? r.budget.toFixed(2) : '') }, { label: '本期应付（预算口径）', val: r => (r.budget ? r.bUsed.toFixed(6) : '') }, { label: '预计月末', val: r => (r.bFc != null ? r.bFc.toFixed(2) : '') }] : [])],
-    footer: rs => cols.map(c => ({ name: `合计 ${rs.length} 个`, keys: String(sum(rs, r => r.keys)), cost: money(sum(rs, r => r.cost)), chg: deltaPill(sum(rs, r => r.cost), sum(rs, r => r.prev)), tokens: compact(sum(rs, r => r.tokens)), requests: hasUsage ? intFmt(sum(rs, r => r.requests || 0)) : '' }[c.key] ?? '')),
+    footer: rs => cols.map(c => ({ name: `合计 ${rs.length} 个`, keys: String(sum(rs, r => r.keys)), cost: money(sum(rs, r => r.cost)), chg: deltaPill(sum(rs, r => r.cost), sum(rs, r => r.prev)), tokens: tokFmt(sum(rs, r => r.tokens)), requests: hasUsage ? intFmt(sum(rs, r => r.requests || 0)) : '' }[c.key] ?? '')),
   }).setRows(rows);
   $('#csv', v).onclick = () => t.csv(`${G.label}费用_${periodTag()}.csv`);
 
@@ -232,7 +232,7 @@ export function render(v) {
 
   // 单位成本
   const unit = rows.filter(r => r.perM != null && r.tokens >= 1e5).sort((a, b) => b.perM - a.perM);
-  rankList($('#gUnit', v), unit.map(r => ({ id: r.id, label: r.name, sub: `${compact(r.tokens)} Token`, value: r.perM, color: colorOf.get(r.id) || 'var(--other)' })),
+  rankList($('#gUnit', v), unit.map(r => ({ id: r.id, label: r.name, sub: `${tokFmt(r.tokens)} Token`, value: r.perM, color: colorOf.get(r.id) || 'var(--other)' })),
     { limit: 10, total: 0, empty: 'Token ≥ 10 万的分组不足', onClick: it => app.go(groupHash(dim, it.id)) });
 }
 
@@ -277,7 +277,7 @@ function drillTree(el, lines, prevLines, dim) {
       out.push(`<tr class="tr-lv${lvl}"><td class="tree-name" style="--lv:${lvl}">${lvl < 2 ? `<button type="button" class="tg" data-tg="${esc(path)}" aria-expanded="${isOpen}" aria-label="${isOpen ? '收起' : '展开'}">${icon('chevR')}</button>` : '<span class="tg-sp"></span>'}<span class="tree-label">${nameCell(lvl, n, path, anc)}</span>${sub ? `<span class="muted tree-sub">${esc(sub)}</span>` : ''}</td>
         <td class="r">${esc(money(n.agg.cost))}</td><td class="r">${deltaPill(n.agg.cost, n.prev)}</td>
         <td class="r"><span class="share-bar" title="占上级 ${pct(n.agg.cost, parentCost)}"><i style="width:${parentCost ? Math.min(100, n.agg.cost / parentCost * 100).toFixed(1) : 0}%"></i></span>${pct(n.agg.cost, parentCost)}</td>
-        <td class="r">${tok ? compact(tok) : '—'}</td><td class="r">${tok ? money(n.agg.cost / tok * 1e6) : '—'}</td></tr>`);
+        <td class="r">${tok ? tokFmt(tok) : '—'}</td><td class="r">${tok ? money(n.agg.cost / tok * 1e6) : '—'}</td></tr>`);
       if (isOpen) walk(n.kids, lvl + 1, path, n.agg.cost, [...anc, n.id]);
     }
     if (list.length > shown.length) out.push(`<tr class="tr-more"><td colspan="6" style="--lv:${lvl}" class="tree-name muted">另有 ${list.length - shown.length} 项（合计 ${esc(money(sum(list.slice(TREE_LIMIT), n => n.agg.cost)))}）未展开显示，可在明细表或成本分摊中查看</td></tr>`);
@@ -365,7 +365,7 @@ export function renderDetail(v, arg) {
       ${tile('wallet', `本期费用 · ${METRICS[ui.f.metric]}`, money(a.cost), deltaPill(a.cost, pa.cost), state.compareLabel, `上期 ${money(pa.cost)} · 原价 ${moneyShort(a.gross)}`)}
       ${tile('layers', '费用排名', rank ? `第 ${rank}<small>/ ${ranked.length}</small>` : '—', '', '', `占全部费用 ${pct(a.cost, totalAll)}`)}
       ${tile('key', '活跃 Key', `${activeKeys}<small>/ ${memKeys.length}</small>`, '', '', (top => (top ? `最高：${keyShort(top.key)} 占 ${pct(top.cost, a.cost)}` : '—'))(sortedAggs(aggregate(lines, DIMS.key.of)).filter(x => x.cost > 0)[0]))}
-      ${tile('token', 'Token 总量', compact(tokens), deltaPill(tokens, ptokens, { neutral: true }), state.compareLabel, us && us.requests ? `请求 ${compact(us.requests)} 次 · 单次 ${intFmt(us.tokens / us.requests)} Token` : `输入 ${compact(a.tIn)} · 输出 ${compact(a.tOut)}`)}
+      ${tile('token', 'Token 总量', tokFmt(tokens), deltaPill(tokens, ptokens, { neutral: true }), state.compareLabel, us && us.requests ? `请求 ${compact(us.requests)} 次 · 单次 ${intFmt(us.tokens / us.requests)} Token` : `输入 ${tokFmt(a.tIn)} · 输出 ${tokFmt(a.tOut)}`)}
       ${tile('unit', '每百万 Token 成本', perM == null ? '—' : money(perM), perM == null ? '' : deltaPill(perM, pPerM), perM == null ? '' : state.compareLabel, '费用 ÷ 总 Token × 10⁶')}
       ${ccBudget ? budgetTile(a.pretax, ccBudget, ccFc)
         : tile('cache', '缓存命中率', hit == null ? '—' : (hit * 100).toFixed(1) + '%', hit == null ? '' : deltaPill(hit, pHit, { pp: true, goodWhenUp: true }), hit == null ? '' : state.compareLabel, `${a.models.size} 个模型`)}
@@ -432,7 +432,7 @@ export function renderDetail(v, arg) {
     { key: 'cost', label: `费用（${METRICS[ui.f.metric]}）`, align: 'r', fmt: x => dataBar(x, kmax), csv: r => r.cost.toFixed(6) },
     { key: 'chg', label: state.compareLabel, align: 'r', fmt: (x, r) => deltaPill(r.cost, r.prev), sortVal: r => r.cost - r.prev, csv: r => (r.cost - r.prev).toFixed(6) },
     { key: 'share', label: '占比', align: 'r', fmt: x => (x ? (x * 100).toFixed(1) + '%' : '—'), csv: r => (r.share * 100).toFixed(2) + '%' },
-    { key: 'tokens', label: '总 Token', align: 'r', fmt: x => (x ? compact(x) : '—'), csv: r => Math.round(r.tokens) },
+    { key: 'tokens', label: '总 Token', align: 'r', fmt: x => (x ? tokFmt(x) : '—'), csv: r => Math.round(r.tokens) },
     { key: 'perM', label: '¥/百万Token', align: 'r', fmt: x => (x == null ? '—' : money(x)), sortVal: r => r.perM ?? -1 },
     { key: 'hit', label: '缓存命中率', align: 'r', fmt: x => (x == null ? '—' : (x * 100).toFixed(1) + '%'), sortVal: r => r.hit ?? -1 },
     ...(kHasUsage ? [
@@ -449,13 +449,13 @@ export function renderDetail(v, arg) {
     rowClass: r => (r.status === '已删除' ? 'deleted' : ''),
     onRowClick: r => (r.id === NONE_KEY ? app.setFilter({ ...scope, key: NONE_KEY }, '#/detail', true) : app.go(`#/key/${encodeURIComponent(r.id)}`)),
     csvExtra: [{ label: 'API Key ID', val: r => (r.id === NONE_KEY ? '' : r.id) }, { label: '上期费用', val: r => r.prev.toFixed(6) }],
-    footer: rs => kcols.map(c => ({ desc: `合计 ${rs.length} 个`, cost: money(sum(rs, r => r.cost)), chg: deltaPill(sum(rs, r => r.cost), sum(rs, r => r.prev)), tokens: compact(sum(rs, r => r.tokens)), requests: kHasUsage ? intFmt(sum(rs, r => r.requests || 0)) : '', c7: money(sum(rs, r => r.c7)) }[c.key] ?? '')),
+    footer: rs => kcols.map(c => ({ desc: `合计 ${rs.length} 个`, cost: money(sum(rs, r => r.cost)), chg: deltaPill(sum(rs, r => r.cost), sum(rs, r => r.prev)), tokens: tokFmt(sum(rs, r => r.tokens)), requests: kHasUsage ? intFmt(sum(rs, r => r.requests || 0)) : '', c7: money(sum(rs, r => r.c7)) }[c.key] ?? '')),
   }).setRows(krows);
   $('#csvK', v).onclick = () => tk.csv(`${G.label}_${dimName(dim, id)}_API_Key_${periodTag()}.csv`);
 
   // 模型排行
   const pm = aggregate(prevLines, l => l.model);
-  rankList($('#gdModels', v), sortedAggs(aggregate(lines, l => l.model)).map(x => ({ id: x.key, label: x.key, sub: `${x.keys.size} 个 Key · ${compact(totalTokens(x))} Token`, value: x.cost, gross: x.gross, prev: pm.get(x.key)?.cost ?? 0, color: DIMS.model.color(x.key) })),
+  rankList($('#gdModels', v), sortedAggs(aggregate(lines, l => l.model)).map(x => ({ id: x.key, label: x.key, sub: `${x.keys.size} 个 Key · ${tokFmt(totalTokens(x))} Token`, value: x.cost, gross: x.gross, prev: pm.get(x.key)?.cost ?? 0, color: DIMS.model.color(x.key) })),
     { total: a.cost, showDelta: true, limit: 12, onClick: it => app.openModel(it.id, scope) });
 
   // 关联维度

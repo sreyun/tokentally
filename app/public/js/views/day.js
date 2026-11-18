@@ -1,5 +1,5 @@
 /* 当日明细抽屉：从每日费用图表 / 热力图 / 明细下钻，查看某一天（可限定 Key、业务空间、模型等范围）的费用构成 */
-import { $, esc, state, ui, app, money, compact, intFmt, pct, sum, metricVal, METRICS, NONE_KEY, DIMS, keyShort,
+import { $, esc, state, ui, app, money, tokFmt, intFmt, pct, sum, metricVal, METRICS, NONE_KEY, DIMS, keyShort,
   aggregate, aggAll, sortedAggs, totalTokens, deltaPill, icon, ioInfo, WEEK, weekday, addDays, scopeLines, scopeUsage, scopeLabel, scopeFilter,
   dimVal, dimName, groupHash, callsOn, usageAgg, toneOf } from '../core.js';
 import { rankList } from '../charts.js';
@@ -40,7 +40,7 @@ export function openDay(date, scope = null) {
   $('#drawerBody').innerHTML = `
     <div class="kpi-wrap" style="margin:0"><div class="kpi-row n4">
       ${tile('wallet', `当日费用 · ${METRICS[ui.f.metric]}`, money(a.cost), deltaPill(a.cost, pa.cost), '较前一日', `前一日 ${money(pa.cost)}`)}
-      ${tile('token', 'Token', compact(t), deltaPill(t, pt, { neutral: true }), '较前一日', du && du.requests ? `请求 ${intFmt(du.requests)} 次 · 单次 ${intFmt(du.tokens / du.requests)} Token` : `输入 ${compact(a.tIn)} · 输出 ${compact(a.tOut)}`)}
+      ${tile('token', 'Token', tokFmt(t), deltaPill(t, pt, { neutral: true }), '较前一日', du && du.requests ? `请求 ${intFmt(du.requests)} 次 · 单次 ${intFmt(du.tokens / du.requests)} Token` : `输入 ${tokFmt(a.tIn)} · 输出 ${tokFmt(a.tOut)}`)}
       ${tile('unit', '每百万 Token', t ? money(a.cost / t * 1e6) : '—', t && pt ? deltaPill(a.cost / t, pa.cost / pt) : '', '较前一日', '费用 ÷ Token × 10⁶')}
       ${tile('cache', '缓存命中率', a.tIn ? pct(a.tCache, a.tIn) : '—', a.tIn && pa.tIn ? deltaPill(a.tCache / a.tIn, pa.tCache / pa.tIn, { pp: true, goodWhenUp: true }) : '', '较前一日', `${a.keys.size} 个 Key · ${a.models.size} 个模型`)}
     </div></div>
@@ -65,7 +65,7 @@ export function openDay(date, scope = null) {
     const pm = aggregate(prevLines, l => l.model);
     // 模型详情沿用当前范围（不限定日期）
     const mScope = s ? { ...s } : null;
-    rankList($('#dyModels'), sortedAggs(aggregate(lines, l => l.model)).map(x => ({ id: x.key, label: x.key, sub: `${compact(totalTokens(x))} Token`, value: x.cost, gross: x.gross, prev: pm.get(x.key)?.cost ?? 0, color: DIMS.model.color(x.key) })),
+    rankList($('#dyModels'), sortedAggs(aggregate(lines, l => l.model)).map(x => ({ id: x.key, label: x.key, sub: `${tokFmt(totalTokens(x))} Token`, value: x.cost, gross: x.gross, prev: pm.get(x.key)?.cost ?? 0, color: DIMS.model.color(x.key) })),
       { total: a.cost, showDelta: true, limit: 20, onClick: it => app.openModel(it.id, mScope) });
   }
   const byItem = aggregate(lines, l => `${l.model}\u0001${l.io}`);

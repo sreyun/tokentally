@@ -3,7 +3,7 @@
  * 规范：柱宽 ≤24px、顶端 4px 圆角、2px 段间隙；折线 2px；网格线 1px 实线；
  *      ≥2 个系列必有图例；文字使用文本色，不使用系列色。
  * ========================================================================= */
-import { esc, sum, money, compact, curSym, intFmt, pct, isWeekend, WEEK, weekday, tipRows, deltaPill, DIMS, sortedAggs } from './core.js';
+import { esc, sum, money, compact, tokFmt, curSym, intFmt, pct, isWeekend, WEEK, weekday, tipRows, deltaPill, DIMS, sortedAggs } from './core.js';
 
 export function niceStep(max, n = 4) {
   if (!(max > 0)) return 1;
@@ -55,7 +55,7 @@ export function sparkline(values, color = 'var(--s1)', { zero = true, proj = nul
  * onX(x)：点击柱（或键盘 Enter）；onSeg(x, seriesId)：点击柱中的某一段（按点击位置判定，'__other' 段回退为 onX）
  */
 export function columnChart(el, { xs, series, cell, avg = null, height = 260, xLabel = x => x, tipTitle = x => x, aria = '', empty = '暂无数据', weekend = true, onX, onSeg, clickHint = '', segHint = '', fmt = null }) {
-  const vf = fmt || money, af = fmt ? (v => (v ? compact(v) : '0')) : axisMoney;
+  const vf = fmt || money, af = fmt ? (v => (v ? fmt(v) : '0')) : axisMoney;
   if (!xs.length) { el.innerHTML = `<div class="nodata">${esc(empty)}</div>`; return; }
   const W = width(el), H = height;
   const m = { l: 60, r: 10, t: 16, b: 26 }, pw = W - m.l - m.r, ph = H - m.t - m.b;
@@ -197,7 +197,7 @@ export function divergingList(el, items, { limit = 10, onClick } = {}) {
 }
 
 /** 多段两行式排行（如 Token 构成） */
-export function stackRank(el, rows, parts, { fmt = compact, limit = 10, onClick, meta } = {}) {
+export function stackRank(el, rows, parts, { fmt = tokFmt, limit = 10, onClick, meta } = {}) {
   rows = rows.filter(r => r.parts.some(v => v > 0));
   if (!rows.length) { el.innerHTML = '<div class="nodata">暂无用量数据</div>'; return; }
   const max = Math.max(...rows.map(r => sum(r.parts, v => v))) || 1;

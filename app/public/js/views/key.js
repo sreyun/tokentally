@@ -1,6 +1,6 @@
 /* API Key 详情：单个 Key 的费用、趋势、模型构成、计费项、渠道、权限与变更历史 */
 import {
-  $, esc, state, ui, app, http, money, moneyShort, compact, intFmt, pct, sum, uniq, metricVal, METRICS, NONE_KEY, DIMS, keyObj, keyShort, keyDesc, wsName,
+  $, esc, state, ui, app, http, money, moneyShort, compact, tokFmt, intFmt, pct, sum, uniq, metricVal, METRICS, NONE_KEY, DIMS, keyObj, keyShort, keyDesc, wsName,
   aggregate, aggAll, sortedAggs, totalTokens, deltaPill, tipRows, icon, help, segCtl, fmtTime, budgetOf, budgetLevel, forecastOf, channelLabel,
   WEEK, weekday, ioInfo, num, periodTag, daysBetween, copyBtn, PROVIDERS, provTag, isAdmin, usageAgg, normModel, REQ_SRC,
   dimLink, NO_WS, groupHash, callsOn, perCallCovered, coveredCost, failRateOf, perCall, toneOf } from '../core.js';
@@ -70,9 +70,9 @@ export function render(v, id) {
       ${tile('wallet', `本期费用 · ${METRICS[ui.f.metric]}`, money(a.cost), deltaPill(a.cost, pa.cost), state.compareLabel, `上期 ${money(pa.cost)} · 原价 ${moneyShort(a.gross)}`)}
       ${us ? tile('activity', '请求次数', compact(us.requests), '', '', fr == null ? `成功率 —${us.requests ? '（未采集失败次数）' : ''}` : `成功率 ${((1 - fr) * 100).toFixed(2)}%`)
         : tile('layers', '费用排名', rank ? `第 ${rank}<small>/ ${allByKey.length}</small>` : '—', '', '', `占全部费用 ${pct(a.cost, totalAll)}`)}
-      ${tile('token', 'Token 总量', compact(tokens), deltaPill(tokens, ptokens, { neutral: true }), state.compareLabel, `输入 ${compact(a.tIn)} · 输出 ${compact(a.tOut)}`)}
+      ${tile('token', 'Token 总量', tokFmt(tokens), deltaPill(tokens, ptokens, { neutral: true }), state.compareLabel, `输入 ${tokFmt(a.tIn)} · 输出 ${tokFmt(a.tOut)}`)}
       ${tile('unit', '每百万 Token 成本', perM == null ? '—' : money(perM), perM == null ? '' : deltaPill(perM, pPerM), perM == null ? '' : state.compareLabel, '费用 ÷ 总 Token × 10⁶')}
-      ${tile('cache', '缓存命中率', hit == null ? '—' : (hit * 100).toFixed(1) + '%', hit == null ? '' : deltaPill(hit, pHit, { pp: true, goodWhenUp: true }), hit == null ? '' : state.compareLabel, hit == null ? '—' : `命中 ${compact(a.tCache)} Token`)}
+      ${tile('cache', '缓存命中率', hit == null ? '—' : (hit * 100).toFixed(1) + '%', hit == null ? '' : deltaPill(hit, pHit, { pp: true, goodWhenUp: true }), hit == null ? '' : state.compareLabel, hit == null ? '—' : `命中 ${tokFmt(a.tCache)} Token`)}
       ${budget ? budgetTile(a.pretax, budget, fc?.value ?? null)
         : tile('calendar', fc ? '预计本月' : '近 7 天', fc ? money(fc.value) : moneyShort(act?.c7 || 0), '', '', fc ? `日均 ${money(fc.avg)}` : `近 30 天 ${moneyShort(act?.c30 || 0)} · 最近 ${act?.lastDay ? act.lastDay.slice(5) : '—'}`)}
     </div></div>
