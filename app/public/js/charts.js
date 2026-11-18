@@ -180,18 +180,18 @@ export function rankList(el, items, { fmt = v => money(v), limit = 10, onClick, 
 }
 
 /** 发散排行：环比增减额 */
-export function divergingList(el, items, { limit = 10, onClick } = {}) {
+export function divergingList(el, items, { limit = 10, onClick, fmt = money, noun = '费用', neutral = false } = {}) {
   items = items.filter(i => Math.abs(i.delta) >= 0.005).sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta)).slice(0, limit);
   if (!items.length) { el.innerHTML = '<div class="nodata">与上期相比无明显变化</div>'; return; }
   const max = Math.max(...items.map(i => Math.abs(i.delta))) || 1;
-  el.innerHTML = `<div class="legend"><span><i style="background:var(--div-neg)"></i><em>费用减少</em></span><span><i style="background:var(--div-pos)"></i><em>费用增加</em></span></div>
-  <ol class="rank">${items.map((it, i) => {
+  el.innerHTML = `<div class="legend"><span><i style="background:${neutral ? 'var(--s1)' : 'var(--div-neg)'}"></i><em>${noun}减少</em></span><span><i style="background:${neutral ? 'var(--s3)' : 'var(--div-pos)'}"></i><em>${noun}增加</em></span></div>
+  <ol class="rank ${neutral ? 'neu' : ''}">${items.map((it, i) => {
     const w = Math.max(1.5, Math.abs(it.delta) / max * 100).toFixed(1);
-    const tip = tipRows(it.label, [['本期', money(it.cur)], ['上期', money(it.prev)], ['变动', (it.delta > 0 ? '+' : '') + money(it.delta)], ['变化率', it.prev ? pct(it.delta, it.prev) : '新增']]);
+    const tip = tipRows(it.label, [['本期', fmt(it.cur)], ['上期', fmt(it.prev)], ['变动', (it.delta > 0 ? '+' : '') + fmt(it.delta)], ['变化率', it.prev ? pct(it.delta, it.prev) : '新增']]);
     return `<li class="${onClick ? 'clickable' : ''}" data-idx="${i}" ${onClick ? 'tabindex="0" role="button"' : ''} data-tip="${esc(tip)}"><span class="rank-no">${i + 1}</span>
-      <div><div class="rank-top"><span class="rank-label" title="${esc(it.label + (it.sub ? " · " + it.sub : ""))}">${esc(it.label)}${it.sub ? `<small>${esc(it.sub)}</small>` : ''}</span><span class="rank-val ${it.delta > 0 ? 'bad-text' : 'ok-text'}">${it.delta > 0 ? '+' : '−'}${esc(money(Math.abs(it.delta)))}</span></div>
+      <div><div class="rank-top"><span class="rank-label" title="${esc(it.label + (it.sub ? " · " + it.sub : ""))}">${esc(it.label)}${it.sub ? `<small>${esc(it.sub)}</small>` : ''}</span><span class="rank-val ${neutral ? '' : it.delta > 0 ? 'bad-text' : 'ok-text'}">${it.delta > 0 ? '+' : '−'}${esc(fmt(Math.abs(it.delta)))}</span></div>
       <div class="rank-bot"><span class="dv-bar"><span class="neg">${it.delta < 0 ? `<i style="width:${w}%"></i>` : ''}</span><span class="pos">${it.delta > 0 ? `<i style="width:${w}%"></i>` : ''}</span></span>
-      <span class="rank-meta">${deltaPill(it.cur, it.prev)}</span></div></div></li>`;
+      <span class="rank-meta">${deltaPill(it.cur, it.prev, { neutral })}</span></div></div></li>`;
   }).join('')}</ol>`;
   bindActivate(el, 'li[data-idx]', li => onClick && onClick(items[+li.dataset.idx]));
 }
@@ -214,16 +214,16 @@ export function stackRank(el, rows, parts, { fmt = tokFmt, limit = 10, onClick, 
 }
 
 /** 分段条（整体构成） */
-export function segbar(parts, { thin = false } = {}) {
+export function segbar(parts, { thin = false, fmt = money, label = '金额' } = {}) {
   const total = sum(parts, p => p.value);
   if (!(total > 0)) return '<div class="nodata">暂无数据</div>';
   const darkText = c => /--s4\b/.test(c);
   return `<div class="segbar ${thin ? 'thin' : ''}" role="img" aria-label="${esc(parts.filter(p => p.value > 0).map(p => `${p.label} ${pct(p.value, total)}`).join('，'))}">${parts.filter(p => p.value > 0).map(p => {
     const share = p.value / total * 100;
-    return `<div style="flex:${p.value} 1 0;background:${p.color}" class="${darkText(p.color) ? 'dk' : ''}" data-tip="${esc(tipRows(p.label, [['金额', money(p.value)], ['占比', share.toFixed(1) + '%']]))}">${!thin && share >= 10 ? `<span>${share.toFixed(0)}%</span>` : ''}</div>`;
+    return `<div style="flex:${p.value} 1 0;background:${p.color}" class="${darkText(p.color) ? 'dk' : ''}" data-tip="${esc(tipRows(p.label, [[label, fmt(p.value)], ['占比', share.toFixed(1) + '%']]))}">${!thin && share >= 10 ? `<span>${share.toFixed(0)}%</span>` : ''}</div>`;
   }).join('')}</div>`;
 }
-export const legendList = (parts, total, clickable = false, hint = '') => `<div class="lgl">${parts.filter(p => p.value > 0).map(p => { const clk = clickable && p.id != null && p.id !== '__other'; return `<div class="li ${clk ? 'clickable' : ''}" data-pid="${esc(p.id ?? '')}" ${clk ? `tabindex="0" role="button"${hint ? ` title="${esc(`${p.label} · ${hint}`)}"` : ''}` : ''}><i style="background:${p.color}"></i><span title="${esc(p.label)}">${esc(p.label)}</span><b>${esc(money(p.value))}</b><em>${pct(p.value, total)}</em></div>`; }).join('')}</div>`;
+export const legendList = (parts, total, clickable = false, hint = '', fmt = money) => `<div class="lgl">${parts.filter(p => p.value > 0).map(p => { const clk = clickable && p.id != null && p.id !== '__other'; return `<div class="li ${clk ? 'clickable' : ''}" data-pid="${esc(p.id ?? '')}" ${clk ? `tabindex="0" role="button"${hint ? ` title="${esc(`${p.label} · ${hint}`)}"` : ''}` : ''}><i style="background:${p.color}"></i><span title="${esc(p.label)}">${esc(p.label)}</span><b>${esc(fmt(p.value))}</b><em>${pct(p.value, total)}</em></div>`; }).join('')}</div>`;
 export function topParts(aggMap, dim, n = 7) {
   const arr = sortedAggs(aggMap).filter(a => a.cost > 0);
   const head = arr.slice(0, n), rest = arr.slice(n);
@@ -232,8 +232,41 @@ export function topParts(aggMap, dim, n = 7) {
   return parts;
 }
 
+/**
+ * 气泡散点图：横轴对数刻度（用量跨度常达几个数量级），纵轴线性；气泡面积对应 r；
+ * 点数 ≥ 4 时以横纵中位数虚线划分四象限，右上象限（quad.tr）用警示色标出
+ */
+export function scatterChart(el, { points, height = 300, xFmt = tokFmt, yFmt = money, xTitle = '', yTitle = '', quad = null, onClick, aria = '', empty = '暂无数据' }) {
+  points = points.filter(p => p.x > 0 && Number.isFinite(p.y) && p.y >= 0);
+  if (!points.length) { el.innerHTML = `<div class="nodata">${esc(empty)}</div>`; return; }
+  const W = width(el), H = height, m = { l: 64, r: 18, t: 18, b: 40 }, pw = W - m.l - m.r, ph = H - m.t - m.b;
+  const lx = points.map(p => Math.log10(p.x));
+  const x0 = Math.floor(Math.min(...lx)), x1 = Math.max(x0 + 1, Math.ceil(Math.max(...lx)));
+  const ymax = Math.max(...points.map(p => p.y)), step = niceStep(ymax), top = Math.max(step, Math.ceil(ymax / step) * step);
+  const X = v => m.l + (Math.log10(v) - x0) / (x1 - x0) * pw, Y = v => m.t + ph - v / top * ph;
+  const rmax = Math.max(...points.map(p => p.r || 0)) || 1, R = v => 4 + Math.sqrt(Math.max(0, v || 0) / rmax) * 14;
+  let body = '';
+  for (let v = 0; v <= top + step / 2; v += step) { const y = Y(v); body += `<line class="gridline" x1="${m.l}" x2="${m.l + pw}" y1="${y}" y2="${y}"/><text x="${m.l - 8}" y="${y + 4}" text-anchor="end">${esc(yFmt(v))}</text>`; }
+  for (let e = x0; e <= x1; e++) { const x = X(10 ** e); body += `<line class="gridline" x1="${x}" x2="${x}" y1="${m.t}" y2="${m.t + ph}"/><text x="${x}" y="${m.t + ph + 16}" text-anchor="middle">${esc(xFmt(10 ** e))}</text>`; }
+  if (xTitle) body += `<text x="${m.l + pw}" y="${H - 4}" text-anchor="end">${esc(xTitle)}</text>`;
+  if (yTitle) body += `<text x="${m.l}" y="${m.t - 6}" text-anchor="start">${esc(yTitle)}</text>`;
+  const med = a => { const s = [...a].sort((p, q) => p - q), n = s.length; return n % 2 ? s[(n - 1) / 2] : (s[n / 2 - 1] + s[n / 2]) / 2; };
+  const split = points.length >= 4, mx = split ? med(points.map(p => p.x)) : 0, my = split ? med(points.map(p => p.y)) : 0;
+  const hot = p => split && p.x > mx && p.y > my;
+  if (split) {
+    body += `<line class="qline" x1="${X(mx)}" x2="${X(mx)}" y1="${m.t}" y2="${m.t + ph}"/><line class="qline" x1="${m.l}" x2="${m.l + pw}" y1="${Y(my)}" y2="${Y(my)}"/>`;
+    if (quad) body += [[quad.tr, m.l + pw - 4, m.t + 12, 'end'], [quad.tl, m.l + 4, m.t + 12, 'start'], [quad.br, m.l + pw - 4, m.t + ph - 6, 'end'], [quad.bl, m.l + 4, m.t + ph - 6, 'start']]
+      .filter(q => q[0]).map(([t, x, y, a]) => `<text class="qlabel" x="${x}" y="${y}" text-anchor="${a}">${esc(t)}</text>`).join('');
+  }
+  const order = points.map((p, i) => i).sort((a, b) => (points[b].r || 0) - (points[a].r || 0));
+  body += order.map(i => { const p = points[i], c = p.color || (hot(p) ? 'var(--crit)' : 'var(--s1)');
+    return `<circle class="pt" cx="${X(p.x).toFixed(1)}" cy="${Y(p.y).toFixed(1)}" r="${R(p.r).toFixed(1)}" style="fill:${c};stroke:${c}" data-idx="${i}" ${onClick ? 'tabindex="0" role="button"' : ''} aria-label="${esc(p.label)}" ${p.tip ? `data-tip="${esc(p.tip)}"` : ''}/>`; }).join('');
+  el.innerHTML = `<svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" role="img" aria-label="${esc(aria)}">${body}</svg>`;
+  if (onClick) bindActivate(el, 'circle[data-idx]', c => onClick(points[+c.dataset.idx]));
+}
+
 /** 热力表：rows × cols；onRow(rowId) 点击行名，onCell(rowId, colId) 点击有值的格子 */
-export function heatmap(el, { rows, cols, cell, total, fmt = money, onRow, onCell, cellHint = '', rowTip = r => r.label }) {
+export function heatmap(el, { rows, cols, cell, total, fmt = money, onRow, onCell, cellHint = '', rowTip = r => r.label, tipLabel = '费用' }) {
   if (!rows.length || !cols.length) { el.innerHTML = '<div class="nodata">暂无数据</div>'; return; }
   let max = 0;
   for (const r of rows) for (const c of cols) max = Math.max(max, cell(r.id, c.id));
@@ -241,7 +274,7 @@ export function heatmap(el, { rows, cols, cell, total, fmt = money, onRow, onCel
   el.innerHTML = `<div class="heat-wrap"><table class="heat"><thead><tr><th></th>${cols.map(c => `<th class="${c.we ? 'we' : ''}" title="${esc(c.title || c.label)}">${esc(c.label)}</th>`).join('')}<th style="text-align:right">合计</th></tr></thead><tbody>
     ${rows.map(r => `<tr><th class="${onRow ? 'clickable' : ''}" data-row="${esc(r.id)}" ${onRow ? 'tabindex="0" role="button"' : ''} title="${esc(rowTip(r))}"><i class="sw" style="background:${r.color}"></i>${esc(r.label)}</th>${cols.map(c => {
       const v = cell(r.id, c.id), clk = onCell && v > 0;
-      return `<td class="h${step(v)}${clk ? ' clk' : ''}" ${clk ? `data-r="${esc(r.id)}" data-c="${esc(c.id)}"` : ''} data-tip="${esc(tipRows(`${r.label} · ${c.title || c.label}`, [['费用', fmt(v)]]) + (clk && cellHint ? `<div class="tip-hint">${esc(cellHint)}</div>` : ''))}"></td>`;
+      return `<td class="h${step(v)}${clk ? ' clk' : ''}" ${clk ? `data-r="${esc(r.id)}" data-c="${esc(c.id)}"` : ''} data-tip="${esc(tipRows(`${r.label} · ${c.title || c.label}`, [[tipLabel, fmt(v)]]) + (clk && cellHint ? `<div class="tip-hint">${esc(cellHint)}</div>` : ''))}"></td>`;
     }).join('')}<td class="tot">${esc(fmt(total(r.id)))}</td></tr>`).join('')}
   </tbody></table></div>`;
   const act = e => {
