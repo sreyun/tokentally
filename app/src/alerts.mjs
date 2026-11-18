@@ -197,8 +197,8 @@ const tokRows = (rows, n, nameOf, total) => {
 };
 /** Token 排行区块（同一区块统一单位，数值自带 K / M / B） */
 const tokSec = (title, { rows }, name, basis) => ({ title, rows, ...head('token', name, basis) });
-/** 用量指标卡：数值自带 K / M / B */
-const tokKpi = (label, n, rest = {}) => ({ label, value: tok(n), ...rest });
+/** 用量指标卡：标签为“昨日用量 / 本月累计”等，数值写作“89.01 M tokens” */
+const tokKpi = (label, n, rest = {}) => ({ label, value: `${tok(n)} tokens`, ...rest });
 /** 用量涨跌：Token 增加不一定是坏事，卡片中用中性颜色显示 */
 const udelta = (label, a, b) => ({ ...delta(label, a, b), neutral: true });
 /** 每日柱状图数据：from..to 每天一根柱子，k 用于分组着色；val 取值（默认应付金额），scale 换算单位；有数据的天数不足 3 天时不画图 */
@@ -658,7 +658,7 @@ export class AlertService {
         kpis: [{ label: '昨日应付（元）', value: yuan(yc), delta: d }, ...grossKpi('昨日原价（元）', yo),
           { label: `${accLabel}（元）`, value: yuan(st.cost), sub: st.forecast != null ? `预计月末 ${yuan(st.forecast)}` : '' },
           ...(st.budget ? budgetKpi : [activeKpi(activeKeys(y), '前一日', activeKeys(pd))])],
-        usage: hasTok ? [tokKpi('昨日 Token', yt, { delta: udelta('较前一日', yt, pt) }), tokKpi(`${accLabel} Token`, st.tokens || 0, ratioSub(mr)),
+        usage: hasTok ? [tokKpi('昨日用量', yt, { delta: udelta('较前一日', yt, pt) }), tokKpi(accLabel, st.tokens || 0, ratioSub(mr)),
           { label: '昨日单位成本（元）', value: perMv(yc, yt), sub: unitSub(yc, yo.gross, yt) }, ...cacheKpi(cy)] : null,
         notes: [zn, scopeNote].filter(Boolean), sections,
         chart: costChart('近 14 日每日费用（元）', rows14, addDays(day, -13), day, x => (x === day ? '昨日' : '此前'), { 此前: BLUE_L, 昨日: BLUE }),
@@ -684,14 +684,14 @@ export class AlertService {
     const mr = ratioText({ i: st.tokIn || 0, o: st.tokOut || 0 });
     const cw = hasTok ? cacheStats(this.scopeRows(weekly ? this.store.tokenIoRows(lw.from, lw.to) : this.store.tokenIoRows(period, period, 'M'), scope, keys)) : { hit: null };
     const head1 = weekly ? `**上周（${lw.from.slice(5)} ~ ${lw.to.slice(5)}）应付 ${yuan(st.cost)}**` : `**${period} 账期应付 ${yuan(st.cost)}**`;
-    const tl = weekly ? '上周 Token' : `${period} Token`;
+    const tl = weekly ? '上周用量' : `${period} 用量`;
     const lines = [...lead(hasTok ? tokLine({ label: weekly ? `上周（${lw.from.slice(5)} ~ ${lw.to.slice(5)}）Token` : `${period} 账期 Token`, t: st.tokens || 0, pt: st.prevTokens || 0, vs, cost: st.cost, gross: so.gross, second: `日均 ${tok((st.tokens || 0) / mdays)} tokens`, ratio: mr, cache: cw }) : null, `${head1}，${vs} ${chg(st.cost, st.prevCost)}，日均应付 ${yuan(st.cost / mdays)}${offText(so)}`, unitText(st.cost, so.gross, st.tokens || 0)), ...(zn ? [zn] : []),
       ...(!weekly && st.budget ? [`范围内 Key 预算 ${yuan(st.budget)}，${st.cost > st.budget ? `超出 ${yuan(st.cost - st.budget)}` : `使用 ${pct(st.cost / st.budget * 100)}`}`] : []), scopeNote, ...sectionLines(sections)];
     const d = delta(vs, st.cost, st.prevCost);
     const doc = { tags: [{ text: '指定范围', level: 'info' }],
       kpis: [{ label: weekly ? '上周应付（元）' : `${period} 应付（元）`, value: yuan(st.cost), delta: d }, ...grossKpi(weekly ? '上周原价（元）' : '原价（元）', so),
         { label: '日均应付（元）', value: yuan(st.cost / mdays), sub: `${pLbl}日均 ${yuan(st.prevCost / pdays)}` }, ...(!weekly && st.budget ? budgetKpi : [activeKpi(an, pLbl, apn)])],
-      usage: hasTok ? [tokKpi(tl, st.tokens || 0, { delta: udelta(vs, st.tokens || 0, st.prevTokens || 0) }), tokKpi('日均 Token', (st.tokens || 0) / mdays, ratioSub(mr)),
+      usage: hasTok ? [tokKpi(tl, st.tokens || 0, { delta: udelta(vs, st.tokens || 0, st.prevTokens || 0) }), tokKpi('日均用量', (st.tokens || 0) / mdays, ratioSub(mr)),
         { label: weekly ? '上周单位成本（元）' : '单位成本（元）', value: perMv(st.cost, st.tokens), sub: unitSub(st.cost, so.gross, st.tokens || 0) }, ...cacheKpi(cw)] : null,
       notes: [weekly ? `统计周期：${lw.from} ~ ${lw.to}（较前一周 ${pw.from.slice(5)} ~ ${pw.to.slice(5)}）` : null, zn, scopeNote].filter(Boolean), sections };
     return { title: `${rptName(weekly ? '周报' : '月报', hasTok)} · ${period}${tag}`, level: 'info', lines, doc, empty: st.cost < 0.005 && st.prevCost < 0.005 && so.gross < 0.005 && (st.prevGross || 0) < 0.005, period, ready: kind === 'monthly' ? globalReady : true, path: '#/overview' };
@@ -925,7 +925,7 @@ export class AlertService {
         kpis: [{ label: '昨日应付（元）', value: yuan(yc), delta: d }, ...grossKpi('昨日原价（元）', yo),
           { label: `${accLabel}（元）`, value: yuan(mtd), sub: fc != null ? `预计月末 ${yuan(fc)}` : '' },
           ...(b.monthly ? budgetKpi(mtd) : [activeKpi(activeKeys(y), '前一日', activeKeys(p))])],
-        usage: hasTok ? [tokKpi('昨日 Token', yt, { delta: udelta('较前一日', yt, pt) }), tokKpi(`${accLabel} Token`, mt, ratioSub(mr)),
+        usage: hasTok ? [tokKpi('昨日用量', yt, { delta: udelta('较前一日', yt, pt) }), tokKpi(accLabel, mt, ratioSub(mr)),
           { label: '昨日单位成本（元）', value: perMv(yc, yt), sub: unitSub(yc, yo.gross, yt) }, ...cacheKpi(cy)] : null,
         notes: [zn, ps].filter(Boolean), sections,
         chart: costChart('近 14 日每日费用（元）', rows14, addDays(day, -13), day, x => (x === day ? '昨日' : '此前'), { 此前: BLUE_L, 昨日: BLUE }),
@@ -963,7 +963,7 @@ export class AlertService {
         tags: [hasTok ? tokTag('较前一周', ct, ot) : null, dirTag(d)],
         kpis: [{ label: '上周应付（元）', value: yuan(c), delta: d }, ...grossKpi('上周原价（元）', wo),
           { label: '日均应付（元）', value: yuan(c / 7), sub: `前一周日均 ${yuan(o / 7)}` }, activeKpi(activeKeys(cur), '前一周', activeKeys(old))],
-        usage: hasTok ? [tokKpi('上周 Token', ct, { delta: udelta('较前一周', ct, ot) }), tokKpi('日均 Token', ct / 7, ratioSub(wr)),
+        usage: hasTok ? [tokKpi('上周用量', ct, { delta: udelta('较前一周', ct, ot) }), tokKpi('日均用量', ct / 7, ratioSub(wr)),
           { label: '上周单位成本（元）', value: perMv(c, ct), sub: unitSub(c, wo.gross, ct) }, ...cacheKpi(cw)] : null,
         notes: [`统计周期：${last.from} ~ ${last.to}（较前一周 ${prev.from.slice(5)} ~ ${prev.to.slice(5)}）`, zn, ps].filter(Boolean), sections,
         chart: costChart('近两周每日费用（元）', rows, prev.from, last.to, x => (x >= last.from ? '上周' : '前一周'), { 前一周: BLUE_L, 上周: BLUE }),
@@ -1013,7 +1013,7 @@ export class AlertService {
       tags: [hasTok ? tokTag('较上月', ct, ot) : null, b.monthly && c > b.monthly ? { text: '超出预算', level: 'bad' } : null, ...(ccOver.length ? [{ text: `${ccOver.length} 个成本中心超支`, level: 'bad' }] : []), dirTag(d)],
       kpis: [{ label: `${cycle} 应付（元）`, value: yuan(c), delta: d }, ...grossKpi('原价（元）', { gross: g, off: g - c }),
         { label: '日均应付（元）', value: yuan(c / mdays), sub: `上月日均 ${yuan(o / pdays)}` }, ...(b.monthly ? budgetKpi(c) : [activeKpi(activeKeys(rows), '上月', activeKeys(prows))])],
-      usage: hasTok ? [tokKpi(`${cycle} Token`, ct, { delta: udelta('较上月', ct, ot) }), tokKpi('日均 Token', ct / mdays, ratioSub(mr)),
+      usage: hasTok ? [tokKpi(`${cycle} 用量`, ct, { delta: udelta('较上月', ct, ot) }), tokKpi('日均用量', ct / mdays, ratioSub(mr)),
         { label: '单位成本（元）', value: perMv(c, ct), sub: unitSub(c, g, ct) }, ...cacheKpi(cm)] : null,
       notes: [zn, ps, ccNote].filter(Boolean), sections,
       chart: costChart(`${cycle} 每日费用（元）`, mdaily, cycle + '-01', last, () => '每日应付', { 每日应付: BLUE }),
