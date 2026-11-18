@@ -6,6 +6,7 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import zlib from 'node:zlib';
+import { promisify } from 'node:util';
 import net from 'node:net';
 import crypto from 'node:crypto';
 import { config } from './config.mjs';
@@ -331,12 +332,21 @@ function securityHeaders(req, res) {
   if (isHttps(req)) res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
 }
 
+/** 压缩在线程池中进行：同步压缩（gzipSync）会在压缩大响应时占住事件循环，期间其他请求都得不到处理 */
+const gzipAsync = promisify(zlib.gzip);
+/**
+ * 发送响应。超过 1KB 且客户端接受 gzip 时异步压缩后发送，返回 Promise（路由处理函数 return 它即可）；
+ * 压缩期间响应可能已由别处发出（如处理函数随后抛错、由统一错误处理返回 500）或连接已断开，此时不再重复发送
+ */
 function send(req, res, status, body, type, extra = {}) {
   const buf = Buffer.isBuffer(body) ? body : Buffer.from(body);
-  const gzip = buf.length > 1024 && /\bgzip\b/.test(req.headers['accept-encoding'] || '');
-  const out = gzip ? zlib.gzipSync(buf) : buf;
-  res.writeHead(status, { 'Content-Type': type, 'Content-Length': out.length, ...(gzip ? { 'Content-Encoding': 'gzip', Vary: 'Accept-Encoding' } : {}), ...extra });
-  res.end(req.method === 'HEAD' ? undefined : out);
+  const write = (out, gzip) => {
+    if (res.headersSent || res.destroyed) return;
+    res.writeHead(status, { 'Content-Type': type, 'Content-Length': out.length, ...(gzip ? { 'Content-Encoding': 'gzip', Vary: 'Accept-Encoding' } : {}), ...extra });
+    res.end(req.method === 'HEAD' ? undefined : out);
+  };
+  if (buf.length <= 1024 || !/\bgzip\b/.test(req.headers['accept-encoding'] || '')) return write(buf, false);
+  return gzipAsync(buf).then(out => write(out, true), () => write(buf, false));
 }
 const json = (req, res, status, obj) => { if (status >= 400 && obj?.error) res.opError = String(obj.error).slice(0, 200); return send(req, res, status, JSON.stringify(obj), 'application/json; charset=utf-8', { 'Cache-Control': 'no-store' }); };
 
@@ -1055,11 +1065,17 @@ route('GET', '/api/status', async (req, res, ctx) => json(req, res, 200, { ...st
 const dataCache = new Map();
 const CACHE_MAX_BYTES = 96 * 1048576, CACHE_ITEM_MAX = 32 * 1048576;
 let cacheBytes = 0;
-function cachedData(etag, url, dv) {
+const dataPending = new Map(); // etag -> 正在生成的响应：同一份数据的并发请求只查询、压缩一次
+async function cachedData(etag, url, dv) {
   let c = dataCache.get(etag);
   if (c) { dataCache.delete(etag); dataCache.set(etag, c); return c; }
+  let p = dataPending.get(etag);
+  if (!p) { p = buildData(etag, url, dv).finally(() => dataPending.delete(etag)); dataPending.set(etag, p); }
+  return p;
+}
+async function buildData(etag, url, dv) {
   const body = Buffer.from(JSON.stringify(getData(url, dv)));
-  c = { body, gz: body.length > 1024 ? zlib.gzipSync(body) : null };
+  const c = { body, gz: body.length > 1024 ? await gzipAsync(body) : null };
   c.size = body.length + (c.gz?.length || 0);
   if (c.size > CACHE_ITEM_MAX) return c; // 过大的响应不缓存
   dataCache.set(etag, c); cacheBytes += c.size;
@@ -1080,7 +1096,7 @@ route('GET', '/api/data', async (req, res, ctx) => {
   const etag = 'W/"' + sha256([dataVersionTag(dv), dataQueryKey(ctx.url)].join('|')).slice(0, 32) + '"';
   const headers = { 'Cache-Control': 'private, no-cache', ETag: etag };
   if (etagMatches(req.headers['if-none-match'], etag)) { res.writeHead(304, headers); return res.end(); }
-  const c = cachedData(etag, ctx.url, dv);
+  const c = await cachedData(etag, ctx.url, dv);
   const gzip = c.gz && /\bgzip\b/.test(req.headers['accept-encoding'] || '');
   const out = gzip ? c.gz : c.body;
   res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': out.length, ...(gzip ? { 'Content-Encoding': 'gzip' } : {}), Vary: 'Accept-Encoding', ...headers });
