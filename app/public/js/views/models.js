@@ -1,7 +1,7 @@
 /* 模型分析：模型费用、Token 结构、单位成本、计费维度、Key × 模型矩阵、模型详情抽屉 */
 import {
-  $, esc, state, ui, app, money, moneyShort, compact, intFmt, pct, sum, uniq, metricVal, METRICS, NONE_KEY, DIMS, keyShort,
-  filterLines, aggregate, aggAll, sortedAggs, totalTokens, unitsText, deltaPill, tipRows, icon, help, segCtl, ioInfo, num, periodTag, WEEK, weekday, copyBtn, PROVIDERS, provTag, multiCloud, usageFiltered, usageAgg, normModel, REQ_SRC,
+  $, esc, state, ui, app, money, moneyShort, compact, tokFmt, intFmt, pct, sum, uniq, metricVal, METRICS, NONE_KEY, DIMS, keyShort,
+  filterLines, aggregate, aggAll, sortedAggs, rankVal, totalTokens, unitsText, deltaPill, tipRows, icon, help, segCtl, ioInfo, num, periodTag, WEEK, weekday, copyBtn, PROVIDERS, provTag, multiCloud, usageFiltered, usageAgg, normModel, REQ_SRC,
   scopeLines, scopeUsage, scopeLabel, scopeFilter, dimVal, dimName, groupHash, NO_WS, callsOn, hasTags, perCall, perCallCovered, coveredCost, failRateOf, scopeColors, toneOf } from '../core.js';
 import { tokenStatsHtml, drawDailyTokens, drawDailyRequests, periodDays, reqHelp } from '../stats.js';
 import { columnChart, rankList, stackRank, segbar, legendHtml, bindLegend } from '../charts.js';
@@ -74,7 +74,7 @@ export function render(v) {
     <div class="stat-strip">
       <div><span>使用模型</span><b>${rows.filter(r => r.cost > 0 || r.gross >= 0.005 || (r.tIn || 0) + (r.tOut || 0) > 0).length}</b></div>
       <div><span>本期费用 · ${METRICS[ui.f.metric]}</span><b>${money(all.cost)}</b></div>
-      <div><span>Token 总量</span><b title="${intFmt(tok)}">${compact(tok)}</b></div>
+      <div><span>Token 总量</span><b title="${intFmt(tok)}">${tokFmt(tok)}</b></div>
       <div><span>平均 ¥/百万Token</span><b>${tok ? money(all.cost / tok * 1e6) : '—'}</b></div>
       <div><span>缓存命中率</span><b>${all.tIn ? pct(all.tCache, all.tIn) : '—'}</b></div>
       <div><span>输出 / 输入</span><b>${all.tIn ? (all.tOut / all.tIn * 100).toFixed(1) + '%' : '—'}</b></div>
@@ -106,7 +106,7 @@ export function render(v) {
       { key: 'ioRatio', label: '输出/输入', align: 'r', fmt: x => (x == null ? '—' : (x * 100).toFixed(1) + '%'), sortVal: r => r.ioRatio ?? -1 },
       { key: 'tEmb', label: '向量 Token', align: 'r', fmt: x => (x ? intFmt(x) : '—') },
       { key: 'perM', label: '¥/百万Token', align: 'r', fmt: x => (x == null ? '—' : money(x)), sortVal: r => r.perM ?? -1 },
-      { key: 'dayTok', label: '日均 Token', title: '总 Token ÷ 统计周期内已过的自然日数', align: 'r', fmt: x => (x ? compact(x) : '—'), csv: r => Math.round(r.dayTok) },
+      { key: 'dayTok', label: '日均 Token', title: '总 Token ÷ 统计周期内已过的自然日数', align: 'r', fmt: x => (x ? tokFmt(x) : '—'), csv: r => Math.round(r.dayTok) },
       ...(hasUsage ? [
         { key: 'requests', label: '请求数', title: REQ_SRC, align: 'r', fmt: x => (x == null ? '<span class="muted">—</span>' : intFmt(x)), sortVal: r => r.requests ?? -1 },
         { key: 'failRate', label: '失败率', align: 'r', fmt: x => (x == null ? '<span class="muted">—</span>' : `<span class="${x >= 0.05 ? 'bad-text' : x >= 0.01 ? 'warn-text' : ''}">${(x * 100).toFixed(2)}%</span>`), sortVal: r => r.failRate ?? -1, csv: r => (r.failRate == null ? '' : (r.failRate * 100).toFixed(2) + '%') },
@@ -126,7 +126,7 @@ export function render(v) {
     { limit: 12, onClick: r => openModel(r.model), meta: r => (r.hit != null ? `命中 ${(r.hit * 100).toFixed(0)}%` : '') });
   // 用量过小的模型单位成本无参考意义：只比较 Token ≥ 10 万的模型
   const unitRows = rows.filter(r => r.perM != null && r.tokens >= 1e5);
-  rankList($('#mdUnit', v), (unitRows.length ? unitRows : rows.filter(r => r.perM != null)).sort((a, b) => b.perM - a.perM).map(r => ({ id: r.model, label: r.model, sub: `${compact(r.tokens)} Token`, value: r.perM, color: DIMS.model.color(r.model) })),
+  rankList($('#mdUnit', v), (unitRows.length ? unitRows : rows.filter(r => r.perM != null)).sort((a, b) => b.perM - a.perM).map(r => ({ id: r.model, label: r.model, sub: `${tokFmt(r.tokens)} tokens`, value: r.perM, color: DIMS.model.color(r.model) })),
     { limit: 12, total: 0, onClick: it => openModel(it.id) });
   const excluded = rows.filter(r => r.perM != null && r.tokens < 1e5).length;
   if (unitRows.length && excluded) $('#mdUnit', v).insertAdjacentHTML('beforeend', `<div class="panel-foot">仅比较 Token ≥ 10 万的模型，另有 ${excluded} 个低用量模型未列入（见上方明细表）。</div>`);
@@ -191,7 +191,7 @@ export function keyModelMatrix(el, lines, { cellScope = k => ({ key: k }), headS
   for (const l of lines) { const mk = models.includes(l.model) ? l.model : '__other'; const k = (l.apiKeyId || NONE_KEY) + '|' + mk; cell.set(k, (cell.get(k) || 0) + val(l)); }
   for (const x of cell.values()) max = Math.max(max, x);
   const cols = models.concat(extra.length ? ['__other'] : []);
-  const fmt = x => (useTok ? compact(x) : moneyShort(x));
+  const fmt = x => (useTok ? tokFmt(x) : moneyShort(x));
   const shade = x => (x > 0 && max ? Math.min(7, Math.max(1, Math.ceil(Math.sqrt(x / max) * 7))) : 0);
   const sc = s => esc(JSON.stringify(s));
   el.innerHTML = `<div class="tbl-wrap"><table class="dt ${ui.density === 'compact' ? 'compact' : ''}"><thead><tr><th class="sticky">API Key</th>${cols.map(c => (c === '__other' ? `<th class="r">其他 ${extra.length} 个</th>` : `<th class="r mono"><button type="button" class="lnk" data-model="${esc(c)}"${headScope ? ` data-scope="${sc(headScope)}"` : ''} title="查看模型详情：${esc(c)}">${esc(c)}</button></th>`)).join('')}<th class="r">合计</th></tr></thead><tbody>
@@ -243,7 +243,7 @@ export function openModel(model, scope = null) {
   $('#drawerBody').innerHTML = `
     <div class="kpi-wrap" style="margin:0"><div class="kpi-row n4">
       ${tile('wallet', `费用 · ${METRICS[ui.f.metric]}`, money(a.cost), deltaPill(a.cost, pa.cost), state.compareLabel, `占全部 ${pct(a.cost, tot)}`)}
-      ${tile('token', 'Token', compact(t), deltaPill(t, pt, { neutral: true }), state.compareLabel, `输入 ${compact(a.tIn)} · 输出 ${compact(a.tOut)}`)}
+      ${tile('token', 'Token', tokFmt(t), deltaPill(t, pt, { neutral: true }), state.compareLabel, `输入 ${tokFmt(a.tIn)} · 输出 ${tokFmt(a.tOut)}`)}
       ${tile('unit', '每百万 Token', t ? money(a.cost / t * 1e6) : '—', t && pt ? deltaPill(a.cost / t, pa.cost / pt) : '', state.compareLabel, '费用 ÷ Token × 10⁶')}
       ${tile('cache', '缓存命中率', a.tIn ? pct(a.tCache, a.tIn) : '—', a.tIn && pa.tIn ? deltaPill(a.tCache / a.tIn, pa.tCache / pa.tIn, { pp: true, goodWhenUp: true }) : '', state.compareLabel, `${a.keys.size} 个 Key 使用`)}
     </div></div>
@@ -274,14 +274,14 @@ export function openModel(model, scope = null) {
       xs: days, series, cell: (x, s) => cell.get(x + '|' + s) || 0, height: 220, xLabel: x => x.slice(5), tipTitle: x => `${x}（周${WEEK[weekday(x)]}）`, empty: '暂无按日数据',
       onX: x => app.openDay(x, dayScope()), onSeg: (x, k) => app.openDay(x, dayScope({ key: k })), clickHint: '点击查看当日明细', segHint: '点击柱段只看该 Key',
     });
-    rankList($('#dmKeys'), sortedAggs(aggregate(lines, DIMS.key.of)).map(x => {
+    rankList($('#dmKeys'), sortedAggs(aggregate(lines, DIMS.key.of), rankVal).map(x => {
       const k = state.apiKeys.get(x.key);
-      return { id: x.key, label: keyShort(x.key), sub: [k ? dimName('ws', k.wsKey || NO_WS) : '', `${compact(totalTokens(x))} Token`, (u => (u && u.requests ? `${intFmt(u.requests)} 次 · 单次 ${intFmt(u.tokens / u.requests)} Token` : ''))(usByKey.get(x.key === NONE_KEY ? '' : x.key))].filter(Boolean).join(' · '), value: x.cost, gross: x.gross, prev: pk.get(x.key)?.cost ?? 0, color: DIMS.key.color(x.key) };
+      return { id: x.key, label: keyShort(x.key), sub: [k ? dimName('ws', k.wsKey || NO_WS) : '', `${tokFmt(totalTokens(x))} tokens`, (u => (u && u.requests ? `${intFmt(u.requests)} 次 · 单次 ${intFmt(u.tokens / u.requests)} Token` : ''))(usByKey.get(x.key === NONE_KEY ? '' : x.key))].filter(Boolean).join(' · '), value: x.cost, gross: x.gross, prev: pk.get(x.key)?.cost ?? 0, color: DIMS.key.color(x.key) };
     }), { total: a.cost, showDelta: true, limit: 20, onClick: it => { if (it.id !== NONE_KEY) { d.close(); app.go(`#/key/${encodeURIComponent(it.id)}`); } } });
   }
   if ($('#dmWs')) {
     const pw = aggregate(prevLines, dimVal.ws);
-    rankList($('#dmWs'), sortedAggs(aggregate(lines, dimVal.ws)).map(x => ({ id: x.key, label: dimName('ws', x.key), sub: `${x.keys.size} 个 Key · ${compact(totalTokens(x))} Token`, value: x.cost, gross: x.gross, prev: pw.get(x.key)?.cost ?? 0, color: DIMS.ws.color(x.key) })),
+    rankList($('#dmWs'), sortedAggs(aggregate(lines, dimVal.ws), rankVal).map(x => ({ id: x.key, label: dimName('ws', x.key), sub: `${x.keys.size} 个 Key · ${tokFmt(totalTokens(x))} tokens`, value: x.cost, gross: x.gross, prev: pw.get(x.key)?.cost ?? 0, color: DIMS.ws.color(x.key) })),
       { total: a.cost, showDelta: true, limit: 12, onClick: it => { d.close(); app.go(groupHash('ws', it.id)); } });
   }
   const byItem = aggregate(lines, l => `${l.io}\u0001${l.listPrice}\u0001${l.listPriceUnit}`);

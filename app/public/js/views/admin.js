@@ -614,7 +614,7 @@ function cardPreview(r) {
   // 同一天的多个系列（应付 + 灰色的“优惠与抵扣”）与飞书卡片一样叠加为一根柱子，柱高为合计（即原价）
   const chart = c => {
     if (!c?.values?.length) return '';
-    const unit = /Token/.test(c.title) ? ` ${c.unit && c.unit !== '个' ? c.unit + (c.unitName ? `（${c.unitName}）` : ' ') : ''}Token` : ' 元';
+    const unit = /Token/.test(c.title) ? ` ${c.unit && c.unit !== '个' ? c.unit + ' ' : ''}tokens` : ' 元';
     const days = [], byD = new Map();
     for (const v of c.values) { let g = byD.get(v.d); if (!g) { byD.set(v.d, g = []); days.push(v.d); } g.push(v); }
     const tot = d => byD.get(d).reduce((s, v) => s + Math.max(0, v.v), 0), max = Math.max(1e-9, ...days.map(tot));

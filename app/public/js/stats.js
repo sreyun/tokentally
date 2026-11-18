@@ -3,7 +3,7 @@
  *  - Token：总量与结构（输入非缓存 / 缓存命中 / 输出 / 向量）、输出/输入比、日均、峰值日、消耗天数、按次计费用量
  *  - 调用（腾讯云 TokenHub 用量统计；阿里云百炼监控投递的云监控 Prometheus）：请求次数、成功率、单次平均 Token（输入 / 输出 / 缓存命中）、单次平均费用、每千次费用
  * ========================================================================= */
-import { esc, state, ui, money, compact, intFmt, uniq, sum, WEEK, weekday, daysBetween, totalTokens, deltaPill, unitsText, icon, help, perCallCovered, perCall, coveredCost, REQ_SRC } from './core.js';
+import { esc, state, ui, money, tokFmt, intFmt, uniq, sum, WEEK, weekday, daysBetween, totalTokens, deltaPill, unitsText, icon, help, perCallCovered, perCall, coveredCost, REQ_SRC } from './core.js';
 import { columnChart, legendHtml } from './charts.js';
 
 export const periodDays = p => Math.max(1, daysBetween(p.from, p.to < state.today ? p.to : state.today));
@@ -32,15 +32,15 @@ export function tokenStatsHtml({ a, pa, daily, us, period, scope = 'key', provid
         : `阿里云百炼 OpenAPI 与费用中心账单不含调用次数。管理员可在“系统管理 → 阿里云接入 → 调用次数”中接入百炼监控投递的云监控 Prometheus，接入后显示${scope === 'key' ? '该 Key' : '该模型'}的请求次数、成功率与单次平均；也可在百炼控制台“监控告警”中查看。`;
   return `<div class="tok-grid ${dense ? 'dense' : ''}">
       <div class="tok-group"><h4>Token 消耗</h4><div class="tok-cells">
-        ${cell('总 Token', compact(tokens), `${deltaPill(tokens, ptokens, { neutral: true })} <span class="muted">${esc(state.compareLabel)}</span>`, 'big')}
-        ${cell('输入（非缓存）', compact(nIn), share(nIn))}
-        ${cell('缓存命中', compact(a.tCache), a.tIn ? `命中率 ${(a.tCache / a.tIn * 100).toFixed(1)}%` : '')}
-        ${cell('输出', compact(a.tOut), share(a.tOut))}
-        ${a.tEmb ? cell('向量', compact(a.tEmb), share(a.tEmb)) : ''}
+        ${cell('总 Token', tokFmt(tokens), `${deltaPill(tokens, ptokens, { neutral: true })} <span class="muted">${esc(state.compareLabel)}</span>`, 'big')}
+        ${cell('输入（非缓存）', tokFmt(nIn), share(nIn))}
+        ${cell('缓存命中', tokFmt(a.tCache), a.tIn ? `命中率 ${(a.tCache / a.tIn * 100).toFixed(1)}%` : '')}
+        ${cell('输出', tokFmt(a.tOut), share(a.tOut))}
+        ${a.tEmb ? cell('向量', tokFmt(a.tEmb), share(a.tEmb)) : ''}
         ${cell('输出 / 输入', a.tIn ? (a.tOut / a.tIn * 100).toFixed(1) + '%' : '—', '输出 Token ÷ 输入 Token')}
-        ${cell('日均 Token', compact(tokens / calDays), `按 ${calDays} 个自然日`)}
-        ${cell('峰值日', peak ? compact(peak[1]) : '—', peak ? `${peak[0].slice(5)}（周${WEEK[weekday(peak[0])]}）` : '')}
-        ${cell('消耗天数', `${active}<small>/ ${calDays}</small>`, active ? `活跃日均 ${compact(tokens / active)}` : '')}
+        ${cell('日均 Token', tokFmt(tokens / calDays), `按 ${calDays} 个自然日`)}
+        ${cell('峰值日', peak ? tokFmt(peak[1]) : '—', peak ? `${peak[0].slice(5)}（周${WEEK[weekday(peak[0])]}）` : '')}
+        ${cell('消耗天数', `${active}<small>/ ${calDays}</small>`, active ? `活跃日均 ${tokFmt(tokens / active)}` : '')}
         ${units ? cell('按次 / 其他计费用量', esc(units), '非 Token 计费项') : ''}
       </div></div>
       <div class="tok-group"><h4>调用</h4>${pc ? `<div class="tok-cells">
@@ -65,7 +65,7 @@ export function drawDailyTokens(el, legendEl, daily, period, { onX, height = 240
   const total = sum(daily, l => l.tokens || 0);
   if (legendEl) legendEl.innerHTML = series.length > 1 ? legendHtml(series) : '';
   columnChart(el, {
-    xs: days, series, cell: (x, s) => tcell.get(x + '|' + s) || 0, avg: days.length ? total / periodDays(period) : null, height, fmt: compact,
+    xs: days, series, cell: (x, s) => tcell.get(x + '|' + s) || 0, avg: days.length ? total / periodDays(period) : null, height, fmt: tokFmt,
     xLabel: x => x.slice(5), tipTitle: x => `${x}（周${WEEK[weekday(x)]}）`, empty: '本期无 Token 用量（可能为按次计费的模型）', onX, clickHint: onX ? '点击查看当日明细' : '',
   });
 }

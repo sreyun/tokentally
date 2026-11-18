@@ -1,7 +1,7 @@
 /* 成本概览：本期费用、预算与预测、趋势、关键发现、Top Key / 模型、构成、归因、治理摘要 */
 import {
-  $, esc, state, ui, app, money, moneyShort, compact, intFmt, pct, sum, uniq, metricVal, METRICS, NONE_KEY, DIMS, keyShort, wsName,
-  filterLines, aggregate, aggAll, sortedAggs, totalTokens, topModels, deltaPill, tipRows, icon, help, segCtl, forecastOf, budgetOf,
+  $, esc, state, ui, app, money, moneyShort, compact, tokFmt, intFmt, pct, sum, uniq, metricVal, METRICS, NONE_KEY, DIMS, keyShort, wsName,
+  filterLines, aggregate, aggAll, sortedAggs, rankVal, totalTokens, topModels, deltaPill, tipRows, icon, help, segCtl, forecastOf, budgetOf,
   budgetBar, activeFilterCount, channelLabel, addDays, daysBetween, WEEK, weekday, isCurrentMonth, lastDayOf as lastDayOfCycle,
   multiCloud, hasTags, PROVIDERS, usageFiltered, usageAgg, callsOn, NO_WS, NO_CC, NO_OWNER, groupHash, dimVal, dimName, toneOf,
 } from '../core.js';
@@ -89,9 +89,9 @@ export function render(v) {
       : kpi('calendar', '日均费用', noBills ? '—' : money(avgDay), '', '', noBills ? NB : `${calDays} 天 · 峰值 ${peakText(days, dayCost)}`, '', '', '', spk('violet', ds.map(d => d.cost), '每日费用', v => money(v)))}
     ${noBills ? kpi('key', '活跃 API Key', `—<small>/ ${state.apiKeys.size}</small>`, '', '', NB, '', '#/keys', '查看 Key 分析')
       : kpi('key', '活跃 API Key', `${active}<small>/ ${state.apiKeys.size}</small>`, deltaPill(active, pActive, { neutral: true }), state.compareLabel, top1 ? `最高：${keyShort(top1.key)} 占 ${pct(top1.cost, cur.cost)}` : '—', '', '#/keys', '查看 Key 分析', spk('teal', ds.map(d => d.keys), '每日有消费的 API Key', cnt))}
-    ${kpi('token', 'Token 总量', noTok ? '—' : compact(tokens), noTok ? '' : deltaPill(tokens, pTokens, { neutral: true }), noTok ? '' : state.compareLabel, noBills ? NB : noTok ? '当前数据无用量' : ua && ua.requests ? `请求 ${compact(ua.requests)} 次 · 单次 ${intFmt(ua.tokens / ua.requests)} Token` : `输入 ${compact(cur.tIn)} · 输出 ${compact(cur.tOut)}`, intFmt(tokens), '#/models', '查看模型 Token 结构', noTok ? '' : spk('sky', ds.map(d => d.tok), '每日 Token', compact))}
+    ${kpi('token', 'Token 总量', noTok ? '—' : tokFmt(tokens), noTok ? '' : deltaPill(tokens, pTokens, { neutral: true }), noTok ? '' : state.compareLabel, noBills ? NB : noTok ? '当前数据无用量' : ua && ua.requests ? `请求 ${compact(ua.requests)} 次 · 单次 ${intFmt(ua.tokens / ua.requests)} Token` : `输入 ${tokFmt(cur.tIn)} · 输出 ${tokFmt(cur.tOut)}`, intFmt(tokens), '#/models', '查看模型 Token 结构', noTok ? '' : spk('sky', ds.map(d => d.tok), '每日 Token', tokFmt))}
     ${kpi('unit', '每百万 Token 成本', perM == null ? '—' : money(perM), perM == null ? '' : deltaPill(perM, pPerM), perM == null ? '' : state.compareLabel, '费用 ÷ 总 Token × 10⁶', '', '', '', perM == null ? '' : spk('amber', ds.map(d => d.perM), '每日每百万 Token 成本', v => money(v), { zero: false }))}
-    ${kpi('cache', '缓存命中率', hit == null ? '—' : (hit * 100).toFixed(1) + '%', hit == null ? '' : deltaPill(hit, pHit, { pp: true, goodWhenUp: true }), hit == null ? '' : state.compareLabel, saved > 0.01 ? `估算节省 ${moneyShort(saved)}` : hit == null ? '—' : `命中 ${compact(cur.tCache)} Token`, '', '', '', hit == null ? '' : spk('indigo', ds.map(d => d.hit), '每日缓存命中率', pctF, { zero: false }))}
+    ${kpi('cache', '缓存命中率', hit == null ? '—' : (hit * 100).toFixed(1) + '%', hit == null ? '' : deltaPill(hit, pHit, { pp: true, goodWhenUp: true }), hit == null ? '' : state.compareLabel, saved > 0.01 ? `估算节省 ${moneyShort(saved)}` : hit == null ? '—' : `命中 ${tokFmt(cur.tCache)} tokens`, '', '', '', hit == null ? '' : spk('indigo', ds.map(d => d.hit), '每日缓存命中率', pctF, { zero: false }))}
     ${kpi('model', '使用模型', noBills ? '—' : String([...byModel.values()].filter(used).length), '', '', noBills ? NB : byModel.size ? `主力：${sortedAggs(byModel, a => a.cost + a.gross * 1e-9)[0].key}` : '—', '', '#/models', '查看模型分析', spk('fuchsia', ds.map(d => d.models), '每日使用的模型', cnt))}
   </div>
 
@@ -143,14 +143,14 @@ export function render(v) {
   $('#insights').innerHTML = ins.length ? ins.map(x => `<li class="ins ${x.level}"><span class="ins-ico">${icon(x.icon)}</span><div><div class="ins-t">${esc(x.title)}</div><div class="ins-d">${x.html}</div>${x.go ? `<button class="link" data-go="${esc(x.go)}">${esc(x.goLabel || '查看')} →</button>` : ''}${x.day ? `<button class="link" data-day="${esc(x.day)}">${esc(x.dayLabel || '查看当日明细')} →</button>` : ''}${x.model ? `<button class="link" data-model="${esc(x.model)}">${esc(x.modelLabel || '查看模型')} →</button>` : ''}</div></li>`).join('') : '<li class="nodata">暂无需要关注的发现</li>';
 
   // 排行只显示前 10 项：只为前面的项生成提示内容（上千个 Key 时逐个生成会明显拖慢页面）
-  rankList($('#rkKeys'), sortedAggs(byKey).map((a, i) => ({
+  rankList($('#rkKeys'), sortedAggs(byKey, rankVal).map((a, i) => ({
     id: a.key, label: keyShort(a.key), sub: a.key === NONE_KEY ? '' : [multiCloud() ? PROVIDERS[state.apiKeys.get(a.key)?.provider || 'aliyun'] : '', state.apiKeys.get(a.key)?.costCenter || wsName(state.apiKeys.get(a.key)?.wsKey || [...a.wss][0] || '')].filter(Boolean).join(' · '),
     value: a.cost, gross: a.gross, prev: pByKey.get(a.key)?.cost ?? 0, color: DIMS.key.color(a.key),
-    tip: i >= 12 ? '' : tipRows(DIMS.key.short(a.key), [['费用', money(a.cost)], ['占比', pct(a.cost, cur.cost)], ['上期', money(pByKey.get(a.key)?.cost || 0)], ['Token', compact(totalTokens(a))], ['主要模型', topModels(a, 2).join('、')]]),
+    tip: i >= 12 ? '' : tipRows(DIMS.key.short(a.key), [['费用', money(a.cost)], ['占比', pct(a.cost, cur.cost)], ['上期', money(pByKey.get(a.key)?.cost || 0)], ['Token', tokFmt(totalTokens(a))], ['主要模型', topModels(a, 2).join('、')]]),
   })), { total: cur.cost, showDelta: true, onClick: it => (it.id === NONE_KEY ? app.setFilter({ key: NONE_KEY }, '#/detail') : app.go(`#/key/${encodeURIComponent(it.id)}`)) });
-  rankList($('#rkModels'), sortedAggs(byModel).map((a, i) => ({
+  rankList($('#rkModels'), sortedAggs(byModel, rankVal).map((a, i) => ({
     id: a.key, label: a.key, sub: `${a.keys.size} 个 Key`, value: a.cost, gross: a.gross, prev: pByModel.get(a.key)?.cost ?? 0, color: DIMS.model.color(a.key),
-    tip: i >= 12 ? '' : tipRows(a.key, [['费用', money(a.cost)], ['占比', pct(a.cost, cur.cost)], ['上期', money(pByModel.get(a.key)?.cost || 0)], ['Token', compact(totalTokens(a))], ['每百万 Token', totalTokens(a) ? money(a.cost / totalTokens(a) * 1e6) : '—']]),
+    tip: i >= 12 ? '' : tipRows(a.key, [['费用', money(a.cost)], ['占比', pct(a.cost, cur.cost)], ['上期', money(pByModel.get(a.key)?.cost || 0)], ['Token', tokFmt(totalTokens(a))], ['每百万 Token', totalTokens(a) ? money(a.cost / totalTokens(a) * 1e6) : '—']]),
   })), { total: cur.cost, showDelta: true, onClick: it => app.openModel(it.id) });
 
   // 构成
@@ -271,7 +271,7 @@ function drawTokens(daily, days) {
   else lg.innerHTML = series.length > 1 ? legendHtml(series) : '';
   const p = state.data.period, elapsed = Math.max(1, p.elapsedDays || xs.length);
   columnChart(el, {
-    xs, series, cell: (x, id) => cell.get(x + '|' + id) || 0, height: 300, fmt: compact, avg: monthly || !total ? null : total / elapsed,
+    xs, series, cell: (x, id) => cell.get(x + '|' + id) || 0, height: 300, fmt: tokFmt, avg: monthly || !total ? null : total / elapsed,
     xLabel: x => (monthly ? x.slice(2) : x.slice(5)), tipTitle: x => (monthly ? `${x} 账期` : `${x}（周${WEEK[weekday(x)]}）`), weekend: !monthly,
     aria: monthly ? '月度 Token 趋势' : '每日 Token 趋势', empty: monthly ? '暂无历史账期的 Token 用量' : '本期无 Token 用量（可能为按次计费的模型）',
     onX: monthly ? x => app.setPeriod({ mode: 'month', cycle: x }) : x => app.openDay(x),

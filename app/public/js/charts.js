@@ -3,7 +3,7 @@
  * 规范：柱宽 ≤24px、顶端 4px 圆角、2px 段间隙；折线 2px；网格线 1px 实线；
  *      ≥2 个系列必有图例；文字使用文本色，不使用系列色。
  * ========================================================================= */
-import { esc, sum, money, compact, curSym, intFmt, pct, isWeekend, WEEK, weekday, tipRows, deltaPill, DIMS, sortedAggs } from './core.js';
+import { esc, sum, money, compact, tokFmt, curSym, intFmt, pct, isWeekend, WEEK, weekday, tipRows, deltaPill, DIMS, sortedAggs } from './core.js';
 
 export function niceStep(max, n = 4) {
   if (!(max > 0)) return 1;
@@ -55,7 +55,7 @@ export function sparkline(values, color = 'var(--s1)', { zero = true, proj = nul
  * onX(x)：点击柱（或键盘 Enter）；onSeg(x, seriesId)：点击柱中的某一段（按点击位置判定，'__other' 段回退为 onX）
  */
 export function columnChart(el, { xs, series, cell, avg = null, height = 260, xLabel = x => x, tipTitle = x => x, aria = '', empty = '暂无数据', weekend = true, onX, onSeg, clickHint = '', segHint = '', fmt = null }) {
-  const vf = fmt || money, af = fmt ? (v => (v ? compact(v) : '0')) : axisMoney;
+  const vf = fmt || money, af = fmt ? (v => (v ? fmt(v) : '0')) : axisMoney;
   if (!xs.length) { el.innerHTML = `<div class="nodata">${esc(empty)}</div>`; return; }
   const W = width(el), H = height;
   const m = { l: 60, r: 10, t: 16, b: 26 }, pw = W - m.l - m.r, ph = H - m.t - m.b;
@@ -162,10 +162,10 @@ export function lineChart(el, { xs, lines, height = 260, xLabel = x => x, tipTit
 
 /** 两行式排行：名称/数值 + 条形/占比/环比 */
 export function rankList(el, items, { fmt = v => money(v), limit = 10, onClick, total, showDelta = false, goodWhenUp = false, empty = '暂无数据', color } = {}) {
-  // 金额为 0 但有原价的项（被优惠券或订阅抵扣——节省计划 / 资源包——全额覆盖）同样保留：排在有金额的项之后、按原价排序，并标注“已全部抵扣”。
-  // 此前只保留金额大于 0 的项，默认“应付”口径下多个 Key / 模型在用，排行只剩一两个，与 Token 总量、原价对不上（gross 由调用方传入）
+  // 金额为 0 但有原价的项（被优惠券或订阅抵扣——节省计划 / 资源包——全额覆盖）同样保留并标注“已全部抵扣”；
+  // 顺序沿用调用方（sortedAggs 默认按优惠前原价排名），抵扣掉的部分同样是实际用量，不再排到有金额的项之后（gross 由调用方传入）
   const off = i => !(i.value > 0) && (i.gross || 0) >= 0.005;
-  items = [...items.filter(i => i.value > 0), ...items.filter(off).sort((a, b) => b.gross - a.gross)];
+  items = items.filter(i => i.value > 0 || off(i));
   if (!items.length) { el.innerHTML = `<div class="nodata">${esc(empty)}</div>`; return; }
   const max = Math.max(...items.map(i => i.value)) || 1;
   const tot = total ?? sum(items, i => i.value);
@@ -197,7 +197,7 @@ export function divergingList(el, items, { limit = 10, onClick } = {}) {
 }
 
 /** 多段两行式排行（如 Token 构成） */
-export function stackRank(el, rows, parts, { fmt = compact, limit = 10, onClick, meta } = {}) {
+export function stackRank(el, rows, parts, { fmt = tokFmt, limit = 10, onClick, meta } = {}) {
   rows = rows.filter(r => r.parts.some(v => v > 0));
   if (!rows.length) { el.innerHTML = '<div class="nodata">暂无用量数据</div>'; return; }
   const max = Math.max(...rows.map(r => sum(r.parts, v => v))) || 1;

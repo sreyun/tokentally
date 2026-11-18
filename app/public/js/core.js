@@ -26,6 +26,18 @@ export function money(n, d = 2) {
 export const moneyFine = n => money(n, Math.abs(n) > 0 && Math.abs(n) < 0.01 ? 6 : 4);
 const compactFmt = new Intl.NumberFormat('zh-CN', { notation: 'compact', maximumFractionDigits: 2 });
 export const compact = n => (n == null ? '—' : compactFmt.format(n));
+/**
+ * Token 数量：与云厂商控制台、报表消息一致按量换算为 K（千）/ M（百万）/ B（十亿），不足 1 千显示整数
+ * （阈值按显示精度取整后的值判断，与 src/tokens.mjs 相同）。金额、请求次数仍用 compact（万 / 亿）
+ */
+// 不足 1 千时最多保留 2 位小数（日均、图表纵轴刻度可能是小数），整数仍显示为整数
+const TOK_FMT = [[999.5, 1, '', new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 2 })], [999.95e3, 1e3, 'K', new Intl.NumberFormat('zh-CN', { minimumFractionDigits: 1, maximumFractionDigits: 1 })],
+  [999.995e6, 1e6, 'M', new Intl.NumberFormat('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })], [Infinity, 1e9, 'B', new Intl.NumberFormat('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })]];
+export const tokFmt = n => {
+  if (n == null) return '—';
+  const [, div, unit, f] = TOK_FMT.find(x => Math.abs(n) < x[0]);
+  return f.format(n / div) + (unit ? ' ' + unit : '');
+};
 export const moneyShort = n => (Math.abs(n) >= 1e5 ? (n < 0 ? '-' : '') + curSym() + compact(Math.abs(n)) : money(n));
 export const signedMoney = n => (n > 0 ? '+' : n < 0 ? '−' : '') + money(Math.abs(n));
 const intFmter = new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 0 });
@@ -619,6 +631,8 @@ export const aggAll = lines => { const a = newAgg('all'); lines.forEach(l => add
 export const totalTokens = a => a.tIn + a.tOut + a.tEmb + a.tOther;
 export const topModels = (a, n = 3) => [...a.models.entries()].sort((x, y) => y[1] - x[1]).slice(0, n).map(e => e[0]);
 export const unitsText = a => Object.entries(a.units).map(([u, v]) => `${numFmt(v)} ${u}`).join('；');
+// 排行榜（rankList）按优惠前原价排名：被优惠券 / 资源包 / 节省计划抵扣的部分同样是实际用量，不能因应付为 0 排到后面
+export const rankVal = a => Math.max(a.gross || 0, a.cost || 0);
 export const sortedAggs = (m, f = a => a.cost) => [...m.values()].sort((a, b) => f(b) - f(a));
 
 /* =========================================================================
