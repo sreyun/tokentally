@@ -137,6 +137,11 @@ export const LINE_COLS = [
   'resource_pkg', 'currency', 'billing_item', 'commodity_code', 'product_detail', 'instance_id', 'region', 'item', 'alloc',
 ];
 const SLIM_COLS = ['period', 'provider', 'api_key_id', 'workspace_id', 'model', 'io', 'channel', 'kind', 'usage', 'usage_unit', 'tokens', 'list_price', 'list_price_unit', 'gross', 'pretax', 'after_discount', 'alloc'];
+const lineSql = cols => `SELECT ${cols.join(',')} FROM bill_lines WHERE granularity = ? AND period >= ? AND period <= ? ORDER BY period`;
+const AGG_COLS = ['provider', 'api_key_id', 'workspace_id', 'model', 'io', 'channel', 'kind', 'gross', 'pretax', 'after_discount', 'tokens', 'usage_unit'];
+const AGG_SQL = `SELECT provider, api_key_id, workspace_id, model, io, channel, kind, SUM(gross) AS gross, SUM(pretax) AS pretax, SUM(after_discount) AS after_discount,
+      SUM(tokens) AS tokens, usage_unit FROM bill_lines WHERE granularity = ? AND period >= ? AND period <= ?
+      GROUP BY provider, api_key_id, workspace_id, model, io, channel, kind, usage_unit`;
 const INSERT_COLS = ['provider', 'granularity', 'period', 'cycle', 'product_code', 'instance_id', 'api_key_id', 'workspace_id', 'model', 'io', 'channel', 'stop_flag', 'kind',
   'billing_item', 'billing_item_code', 'commodity_code', 'product_detail', 'usage', 'usage_unit', 'tokens', 'list_price', 'list_price_unit',
   'gross', 'pretax', 'after_discount', 'invoice_discount', 'coupons', 'cash_coupons', 'prepaid', 'resource_pkg', 'currency', 'region', 'item', 'subscription_type', 'alloc', 'synced_at'];
@@ -724,19 +729,38 @@ export class Store {
     return { cols, rows: rows.map(r => cols.map(c => r[c])) };
   }
 
+  /**
+   * 以数组形式返回查询结果（列顺序与 SELECT 一致）：几十万行的账单不必先为每行建对象、再逐行转换为数组
+   * （node:sqlite 的 setReturnArrays，Node 22.16+ / 24+；不支持时退回逐行转换）。语句单独缓存，不影响 q() 返回对象的同一 SQL
+   */
+  arrays(sql, cols, ...args) {
+    const k = '\u0000arrays\u0000' + sql;
+    let s = this.stmts.get(k);
+    if (!s) {
+      const st = this.db.prepare(sql), native = typeof st.setReturnArrays === 'function';
+      if (native) st.setReturnArrays(true);
+      s = { st, native };
+      this.stmts.set(k, s);
+    }
+    const rows = s.st.all(...args);
+    return s.native ? rows : rows.map(r => cols.map(c => r[c]));
+  }
   /** 返回紧凑数组：{ cols, rows }；slim=true 时只返回趋势/对比所需的列 */
   queryLines(gran, from, to, slim = false) {
     const cols = slim ? SLIM_COLS : LINE_COLS;
-    const rows = this.q(`SELECT ${cols.join(',')} FROM bill_lines WHERE granularity = ? AND period >= ? AND period <= ? ORDER BY period`).all(gran, from, to);
-    return { cols, rows: rows.map(r => cols.map(c => r[c])) };
+    return { cols, rows: this.arrays(lineSql(cols), cols, gran, from, to) };
+  }
+  /** 同 queryLines，返回对象数组（服务端汇总用，如成本概览邮件、限定范围的报表） */
+  lineObjs(gran, from, to, slim = false) {
+    return this.q(lineSql(slim ? SLIM_COLS : LINE_COLS)).all(gran, from, to);
   }
   /** 同比/环比用：按维度聚合的上期数据 */
   queryAgg(gran, from, to) {
-    const cols = ['provider', 'api_key_id', 'workspace_id', 'model', 'io', 'channel', 'kind', 'gross', 'pretax', 'after_discount', 'tokens', 'usage_unit'];
-    const rows = this.q(`SELECT provider, api_key_id, workspace_id, model, io, channel, kind, SUM(gross) AS gross, SUM(pretax) AS pretax, SUM(after_discount) AS after_discount,
-      SUM(tokens) AS tokens, usage_unit FROM bill_lines WHERE granularity = ? AND period >= ? AND period <= ?
-      GROUP BY provider, api_key_id, workspace_id, model, io, channel, kind, usage_unit`).all(gran, from, to);
-    return { cols, rows: rows.map(r => cols.map(c => r[c])) };
+    return { cols: AGG_COLS, rows: this.arrays(AGG_SQL, AGG_COLS, gran, from, to) };
+  }
+  /** 同 queryAgg，返回对象数组 */
+  aggObjs(gran, from, to) {
+    return this.q(AGG_SQL).all(gran, from, to);
   }
   /** 每个 Key 的最近消费日、近 7/30 天应付金额（基于日账单） */
   keyActivity(today) {

@@ -278,7 +278,7 @@ flowchart LR
 | `BACKUP_KEEP` / `BACKUP_HOUR` | 7 / 3 | 自动备份份数（0 关闭）与时间 |
 | `METRICS_TOKEN` | — | ≥16 位，开启 `/metrics` |
 | `DEMO_DATA` | false | 演示模式 |
-| `APP_IMAGE` | 本机构建 | 使用 CI 发布到华为云 SWR 的镜像，如 `swr.cn-east-3.myhuaweicloud.com/sreyun/tokentally:1.10.11`（`docker compose pull app && docker compose up -d`） |
+| `APP_IMAGE` | 本机构建 | 使用 CI 发布到华为云 SWR 的镜像，如 `swr.cn-east-3.myhuaweicloud.com/sreyun/tokentally:1.10.12`（`docker compose pull app && docker compose up -d`） |
 | `TENCENT_ENDPOINT_OVERRIDE` | — | 仅测试 / 私有网关 |
 </details>
 

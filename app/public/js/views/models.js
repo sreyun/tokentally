@@ -78,7 +78,7 @@ export function render(v) {
       <div><span>平均 ¥/百万Token</span><b>${tok ? money(all.cost / tok * 1e6) : '—'}</b></div>
       <div><span>缓存命中率</span><b>${all.tIn ? pct(all.tCache, all.tIn) : '—'}</b></div>
       <div><span>输出 / 输入</span><b>${all.tIn ? (all.tOut / all.tIn * 100).toFixed(1) + '%' : '—'}</b></div>
-      <div><span>单价最高（>10 万 Token）</span><b title="${esc(priciest?.model || '')}">${priciest ? esc(priciest.model) : '—'}</b></div>
+      <div><span>单价最高（用量 > 100 K tokens）</span><b title="${esc(priciest?.model || '')}">${priciest ? esc(priciest.model) : '—'}</b></div>
       ${reqN ? `<div><span>请求次数</span><b title="${esc(REQ_SRC)}">${compact(reqN)}</b></div><div><span>单次平均 Token</span><b>${intFmt(reqTok / reqN)}</b></div>` : ''}
     </div>
     <section class="panel"><div class="panel-h"><h3>模型明细</h3><span class="sub">点击行查看模型详情（Token 与调用统计、使用该模型的 Key、每日费用、计费项）</span>
@@ -124,12 +124,12 @@ export function render(v) {
 
   stackRank($('#mdTok', v), rows.slice().sort((a, b) => b.tokens - a.tokens).map(r => ({ label: r.model, model: r.model, hit: r.hit, parts: [r.tIn - r.tCache, r.tCache, r.tOut, r.tEmb] })), TOKEN_PARTS,
     { limit: 12, onClick: r => openModel(r.model), meta: r => (r.hit != null ? `命中 ${(r.hit * 100).toFixed(0)}%` : '') });
-  // 用量过小的模型单位成本无参考意义：只比较 Token ≥ 10 万的模型
+  // 用量过小的模型单位成本无参考意义：只比较用量 ≥ 100 K tokens 的模型
   const unitRows = rows.filter(r => r.perM != null && r.tokens >= 1e5);
   rankList($('#mdUnit', v), (unitRows.length ? unitRows : rows.filter(r => r.perM != null)).sort((a, b) => b.perM - a.perM).map(r => ({ id: r.model, label: r.model, sub: `${tokFmt(r.tokens)} tokens`, value: r.perM, color: DIMS.model.color(r.model) })),
     { limit: 12, total: 0, onClick: it => openModel(it.id) });
   const excluded = rows.filter(r => r.perM != null && r.tokens < 1e5).length;
-  if (unitRows.length && excluded) $('#mdUnit', v).insertAdjacentHTML('beforeend', `<div class="panel-foot">仅比较 Token ≥ 10 万的模型，另有 ${excluded} 个低用量模型未列入（见上方明细表）。</div>`);
+  if (unitRows.length && excluded) $('#mdUnit', v).insertAdjacentHTML('beforeend', `<div class="panel-foot">仅比较用量 ≥ 100 K tokens 的模型，另有 ${excluded} 个低用量模型未列入（见上方明细表）。</div>`);
   $('#mdDims', v).innerHTML = billDimsHtml(lines);
   dailyByModel($('#mdDaily', v), $('#mdLegend', v), daily);
   keyModelMatrix($('#mx', v), lines, { cellScope: k => ({ global: true, key: k }) });

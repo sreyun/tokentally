@@ -23,7 +23,7 @@ import { ShareService, filterData, SHARE_DAYS } from './share.mjs';
 import { scopePredicate } from './overview-mail.mjs';
 import { loadMasterKey, hashPassword, verifyPassword, burnPasswordCheck, checkPasswordPolicy, randomPassword, maskId, sha256 } from './crypto.mjs';
 
-const VERSION = '1.10.11';
+const VERSION = '1.10.12';
 
 /* ===================================================================
  * 系统日志：所有运行日志同时输出到控制台并写入数据库（system_log，保留 SYSTEM_LOG_DAYS 天），
@@ -333,7 +333,7 @@ function securityHeaders(req, res) {
 }
 
 /** 压缩在线程池中进行：同步压缩（gzipSync）会在压缩大响应时占住事件循环，期间其他请求都得不到处理 */
-const gzipAsync = promisify(zlib.gzip);
+const gzipAsync = promisify(zlib.gzip), gunzipAsync = promisify(zlib.gunzip);
 /**
  * 发送响应。超过 1KB 且客户端接受 gzip 时异步压缩后发送，返回 Promise（路由处理函数 return 它即可）；
  * 压缩期间响应可能已由别处发出（如处理函数随后抛错、由统一错误处理返回 500）或连接已断开，此时不再重复发送
@@ -1075,9 +1075,12 @@ async function cachedData(etag, url, dv) {
 }
 async function buildData(etag, url, dv) {
   const body = Buffer.from(JSON.stringify(getData(url, dv)));
-  const c = { body, gz: body.length > 1024 ? await gzipAsync(body) : null };
-  c.size = body.length + (c.gz?.length || 0);
-  if (c.size > CACHE_ITEM_MAX) return c; // 过大的响应不缓存
+  const gz = body.length > 1024 ? await gzipAsync(body) : null;
+  // 大账号的月度数据可达数十 MB（压缩后约 1/7）：缓存中只保留压缩后的内容（浏览器都接受 gzip，不接受的客户端按需解压）。
+  // 此前原文 + 压缩合计超过单项上限就不缓存，大账号每次打开页面都要重新查询、序列化、压缩，期间占住事件循环数秒
+  const keepBody = !gz || body.length <= 4 * 1048576;
+  const c = { body: keepBody ? body : null, gz, size: (keepBody ? body.length : 0) + (gz?.length || 0) };
+  if (c.size > CACHE_ITEM_MAX) return { ...c, body }; // 过大的响应不缓存
   dataCache.set(etag, c); cacheBytes += c.size;
   while (dataCache.size > 8 || cacheBytes > CACHE_MAX_BYTES) {
     const k = dataCache.keys().next().value;
@@ -1098,7 +1101,7 @@ route('GET', '/api/data', async (req, res, ctx) => {
   if (etagMatches(req.headers['if-none-match'], etag)) { res.writeHead(304, headers); return res.end(); }
   const c = await cachedData(etag, ctx.url, dv);
   const gzip = c.gz && /\bgzip\b/.test(req.headers['accept-encoding'] || '');
-  const out = gzip ? c.gz : c.body;
+  const out = gzip ? c.gz : c.body || await gunzipAsync(c.gz); // 缓存中只有压缩内容（大响应）时按需解压
   res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': out.length, ...(gzip ? { 'Content-Encoding': 'gzip' } : {}), Vary: 'Accept-Encoding', ...headers });
   return res.end(req.method === 'HEAD' ? undefined : out);
 });

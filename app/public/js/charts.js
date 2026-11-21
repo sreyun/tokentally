@@ -161,7 +161,7 @@ export function lineChart(el, { xs, lines, height = 260, xLabel = x => x, tipTit
 }
 
 /** 两行式排行：名称/数值 + 条形/占比/环比 */
-export function rankList(el, items, { fmt = v => money(v), limit = 10, onClick, total, showDelta = false, goodWhenUp = false, empty = '暂无数据', color } = {}) {
+export function rankList(el, items, { fmt = v => money(v), limit = 10, onClick, total, showDelta = false, goodWhenUp = false, neutral = false, empty = '暂无数据', color } = {}) {
   // 金额为 0 但有原价的项（被优惠券或订阅抵扣——节省计划 / 资源包——全额覆盖）同样保留并标注“已全部抵扣”；
   // 顺序沿用调用方（sortedAggs 默认按优惠前原价排名），抵扣掉的部分同样是实际用量，不再排到有金额的项之后（gross 由调用方传入）
   const off = i => !(i.value > 0) && (i.gross || 0) >= 0.005;
@@ -174,7 +174,7 @@ export function rankList(el, items, { fmt = v => money(v), limit = 10, onClick, 
       <span class="rank-no">${i + 1}</span>
       <div><div class="rank-top"><span class="rank-label" title="${esc(it.label + (it.sub ? " · " + it.sub : ""))}">${esc(it.label)}${it.sub ? `<small>${esc(it.sub)}</small>` : ''}</span><span class="rank-val">${esc(fmt(it.value))}</span></div>
       <div class="rank-bot"><span class="rank-bar"><i style="width:${Math.max(1, it.value / max * 100).toFixed(1)}%;background:${off(it) ? 'var(--other)' : it.color || color || 'var(--s1)'}"></i></span>
-      <span class="rank-meta">${off(it) ? `<span class="pill neutral" title="应付为 0：已由优惠券或订阅抵扣（节省计划 / 资源包）等全部抵扣，不代表没有用量">已全部抵扣 · 原价 ${esc(money(it.gross))}</span>` : `${tot ? pct(it.value, tot) : ''}${showDelta ? ' ' + deltaPill(it.value, it.prev ?? 0, { goodWhenUp }) : ''}`}${it.extra ? ' ' + it.extra : ''}</span></div></div></li>`).join('')}</ol>
+      <span class="rank-meta">${off(it) ? `<span class="pill neutral" title="应付为 0：已由优惠券或订阅抵扣（节省计划 / 资源包）等全部抵扣，不代表没有用量">已全部抵扣 · 原价 ${esc(money(it.gross))}</span>` : `${tot ? pct(it.value, tot) : ''}${showDelta ? ' ' + deltaPill(it.value, it.prev ?? 0, { goodWhenUp, neutral }) : ''}`}${it.extra ? ' ' + it.extra : ''}</span></div></div></li>`).join('')}</ol>
     ${items.length > limit ? `<div class="more">另有 ${items.length - limit} 项未显示</div>` : ''}`;
   bindActivate(el, 'li[data-idx]', li => onClick && onClick(shown[+li.dataset.idx]));
 }
@@ -253,14 +253,13 @@ export function scatterChart(el, { points, height = 300, xFmt = tokFmt, yFmt = m
   const med = a => { const s = [...a].sort((p, q) => p - q), n = s.length; return n % 2 ? s[(n - 1) / 2] : (s[n / 2 - 1] + s[n / 2]) / 2; };
   const split = points.length >= 4, mx = split ? med(points.map(p => p.x)) : 0, my = split ? med(points.map(p => p.y)) : 0;
   const hot = p => split && p.x > mx && p.y > my;
-  if (split) {
-    body += `<line class="qline" x1="${X(mx)}" x2="${X(mx)}" y1="${m.t}" y2="${m.t + ph}"/><line class="qline" x1="${m.l}" x2="${m.l + pw}" y1="${Y(my)}" y2="${Y(my)}"/>`;
-    if (quad) body += [[quad.tr, m.l + pw - 4, m.t + 12, 'end'], [quad.tl, m.l + 4, m.t + 12, 'start'], [quad.br, m.l + pw - 4, m.t + ph - 6, 'end'], [quad.bl, m.l + 4, m.t + ph - 6, 'start']]
-      .filter(q => q[0]).map(([t, x, y, a]) => `<text class="qlabel" x="${x}" y="${y}" text-anchor="${a}">${esc(t)}</text>`).join('');
-  }
+  if (split) body += `<line class="qline" x1="${X(mx)}" x2="${X(mx)}" y1="${m.t}" y2="${m.t + ph}"/><line class="qline" x1="${m.l}" x2="${m.l + pw}" y1="${Y(my)}" y2="${Y(my)}"/>`;
   const order = points.map((p, i) => i).sort((a, b) => (points[b].r || 0) - (points[a].r || 0));
   body += order.map(i => { const p = points[i], c = p.color || (hot(p) ? 'var(--crit)' : 'var(--s1)');
     return `<circle class="pt" cx="${X(p.x).toFixed(1)}" cy="${Y(p.y).toFixed(1)}" r="${R(p.r).toFixed(1)}" style="fill:${c};stroke:${c}" data-idx="${i}" ${onClick ? 'tabindex="0" role="button"' : ''} aria-label="${esc(p.label)}" ${p.tip ? `data-tip="${esc(p.tip)}"` : ''}/>`; }).join('');
+  // 象限说明画在气泡之后（带底色描边、不响应鼠标）：画在前面时会被角落的大气泡盖住
+  if (split && quad) body += [[quad.tr, m.l + pw - 4, m.t + 12, 'end'], [quad.tl, m.l + 4, m.t + 12, 'start'], [quad.br, m.l + pw - 4, m.t + ph - 6, 'end'], [quad.bl, m.l + 4, m.t + ph - 6, 'start']]
+    .filter(q => q[0]).map(([t, x, y, a]) => `<text class="qlabel" x="${x}" y="${y}" text-anchor="${a}">${esc(t)}</text>`).join('');
   el.innerHTML = `<svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" role="img" aria-label="${esc(aria)}">${body}</svg>`;
   if (onClick) bindActivate(el, 'circle[data-idx]', c => onClick(points[+c.dataset.idx]));
 }

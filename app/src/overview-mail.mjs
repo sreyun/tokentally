@@ -15,16 +15,23 @@ const pct = (a, b, d = 1) => (b ? (a / b * 100).toFixed(d) + '%' : '—');
 const compact = tok;
 const daysBetween = (a, b) => Math.round((Date.parse(b + 'T00:00:00Z') - Date.parse(a + 'T00:00:00Z')) / 864e5) + 1;
 const lastDayOf = c => addDays(addMonths(c, 1) + '-01', -1);
-const rowsOf = blk => (blk?.rows || []).map(r => Object.fromEntries(blk.cols.map((c, i) => [c, r[i]])));
 /** Token 类型（与前端 ioInfo 一致）：输入（非缓存）/ 缓存命中 / 缓存创建 / 输出 / 向量 / 其他 */
-function tokType(io) {
-  let s = String(io || '');
+function tokTypeOf(io) {
+  let s = io;
   const m = s.match(/^context_([^_]+)_(.+)$/); if (m) s = m[2];
   if (/^thinking_/.test(s)) s = s.slice(9);
   s = s.replace(/_(offpeak|peak)$/, '');
   const dir = /^output/.test(s) ? 'out' : /^input/.test(s) ? 'in' : /^embedding/.test(s) ? 'emb' : 'other';
   if (dir === 'in') return /cache_creation/.test(s) ? 'create' : /cache/.test(s) ? 'hit' : 'in';
   return dir;
+}
+/** 按 io 缓存分类结果：每行账单在多次汇总中都要分类，io 的取值只有几十种，逐行跑正则在大账单上要数秒 */
+const tokTypes = new Map();
+function tokType(io) {
+  const k = String(io || '');
+  let t = tokTypes.get(k);
+  if (t === undefined) { t = tokTypeOf(k); if (tokTypes.size < 10000) tokTypes.set(k, t); }
+  return t;
 }
 const TOK = { in: ['输入（非缓存）', '#2a78d6'], hit: ['缓存命中', '#1baf7a'], create: ['缓存创建', '#eda100'], out: ['输出', '#eb6834'], emb: ['向量', '#6250d6'], other: ['其他', '#b5b8bf'] };
 const PAL = ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#008300', '#6250d6', '#e34948'];
@@ -40,11 +47,18 @@ function agg(lines, keyFn) {
   return m;
 }
 const total = lines => agg(lines, () => 'all').get('all') || { cost: 0, gross: 0, after: 0, tokens: 0, tIn: 0, tHit: 0, tOut: 0 };
+/**
+ * 环比（与页面 deltaPill 一致）：变化不足 0.05% 写作“持平”（不写“▲ 0.0%”）；上期为负数（退款冲销）时按绝对值计算方向；
+ * goodWhenUp = 'neutral' 时（用量、活跃 Key 数）涨跌不代表好坏，统一用蓝色
+ */
 const delta = (c, p, goodWhenUp = false) => {
-  if (!p) return c > 0.005 ? '<span style="color:#475569">新增</span>' : '';
-  const d = (c - p) / p * 100, up = d >= 0, good = goodWhenUp ? up : !up;
-  return `<span style="color:${Math.abs(d) < 0.05 ? '#475569' : good ? '#15803d' : '#b42318'}">${up ? '▲' : '▼'} ${Math.abs(d).toFixed(1)}%</span>`;
+  if (!p || Math.abs(p) < 1e-9) return c > 0.005 ? '<span style="color:#475569">新增</span>' : '';
+  const d = (c - p) / Math.abs(p) * 100, up = d >= 0, good = goodWhenUp ? up : !up;
+  if (Math.abs(d) < 0.05) return '<span style="color:#475569">持平</span>';
+  return `<span style="color:${goodWhenUp === 'neutral' ? '#2563eb' : good ? '#15803d' : '#b42318'}">${up ? '▲' : '▼'} ${Math.abs(d).toFixed(1)}%</span>`;
 };
+/** 百分点变化（缓存命中率）：不足 0.05pp 写作“持平” */
+const ppDelta = (c, p) => (Math.abs(c - p) < 0.0005 ? '<span style="color:#475569">持平</span>' : `<span style="color:${c >= p ? '#15803d' : '#b42318'}">${c >= p ? '▲' : '▼'} ${Math.abs((c - p) * 100).toFixed(1)}pp</span>`);
 
 /* ---------------- HTML 片段 ---------------- */
 const S = {
@@ -105,19 +119,19 @@ export function renderOverviewHtml(spec, { store, today, link = '', scope = null
     isCurrent = c === today.slice(0, 7);
     from = c + '-01'; to = isCurrent ? today : last;
     daysInPeriod = daysBetween(from, last);
-    lines = rowsOf(store.queryLines('M', c, c));
-    daily = rowsOf(store.queryLines('D', from, last, true));
+    lines = store.lineObjs('M', c, c);
+    daily = store.lineObjs('D', from, last, true);
     const pc = addMonths(c, -1);
     if (isCurrent) {
       const n = daysBetween(from, today), pTo = addDays(pc + '-01', n - 1) > lastDayOf(pc) ? lastDayOf(pc) : addDays(pc + '-01', n - 1);
-      prev = rowsOf(store.queryAgg('D', pc + '-01', pTo)); prevLabel = `上月同期（${pc}-01 ~ ${pTo.slice(5)}）`;
-    } else { prev = rowsOf(store.queryAgg('M', pc, pc)); prevLabel = `上月（${pc}）`; }
+      prev = store.aggObjs('D', pc + '-01', pTo); prevLabel = `上月同期（${pc}-01 ~ ${pTo.slice(5)}）`;
+    } else { prev = store.aggObjs('M', pc, pc); prevLabel = `上月（${pc}）`; }
     label = `${c} 账期${isCurrent ? `（截至 ${today.slice(5)}，未出账）` : ''}`;
   } else {
     from = spec.from; to = spec.to; daysInPeriod = daysBetween(from, to);
-    lines = rowsOf(store.queryLines('D', from, to)); daily = lines;
+    lines = store.lineObjs('D', from, to); daily = lines;
     const pTo = addDays(from, -1), pFrom = addDays(from, -daysInPeriod);
-    prev = rowsOf(store.queryAgg('D', pFrom, pTo)); prevLabel = `上一周期（${pFrom.slice(5)} ~ ${pTo.slice(5)}）`;
+    prev = store.aggObjs('D', pFrom, pTo); prevLabel = `上一周期（${pFrom.slice(5)} ~ ${pTo.slice(5)}）`;
     label = `${from} ~ ${to}`;
   }
   if (inScope) { lines = lines.filter(inScope); daily = spec.mode === 'month' ? daily.filter(inScope) : lines; prev = prev.filter(inScope); }
@@ -178,10 +192,10 @@ export function renderOverviewHtml(spec, { store, today, link = '', scope = null
   const hasTok = cur.tokens > 0 || pv.tokens > 0;
   const K = {
     cost: forecast != null ? kpi('预计本月费用', yuan(forecast), '', '按已完整日的日均推算') : kpi('日均费用', yuan(avgDay), '', `${elapsed} 天`),
-    keys: kpi('活跃 API Key', `${activeKeys} / ${inScope ? scopeKeys.size : keys.size}`, delta(activeKeys, pActive, true), top1 ? `最高：${keyName(top1.key)} 占 ${pct(top1.cost, cur.cost)}` : ''),
-    tok: kpi('总用量', `${compact(cur.tokens)} tokens`, delta(cur.tokens, pv.tokens, true), `输入 ${compact(cur.tIn)} · 输出 ${compact(cur.tOut)}`),
+    keys: kpi('活跃 API Key', `${activeKeys} / ${inScope ? scopeKeys.size : keys.size}`, delta(activeKeys, pActive, 'neutral'), top1 ? `最高：${keyName(top1.key)} 占 ${pct(top1.cost, cur.cost)}` : ''),
+    tok: kpi('总用量', `${compact(cur.tokens)} tokens`, delta(cur.tokens, pv.tokens, 'neutral'), `输入 ${compact(cur.tIn)} · 输出 ${compact(cur.tOut)}`),
     perm: kpi('单位成本', perM == null ? '—' : `${yuan(perM)} / M tokens`, perM != null && pPerM ? delta(perM, pPerM) : '', '按应付金额计算'),
-    hit: kpi('缓存命中率', hit == null ? '—' : (hit * 100).toFixed(1) + '%', hit != null && pHit != null ? `<span style="color:${hit >= pHit ? '#15803d' : '#b42318'}">${hit >= pHit ? '▲' : '▼'} ${Math.abs((hit - pHit) * 100).toFixed(1)}pp</span>` : '', '缓存命中 ÷ 输入 Token'),
+    hit: kpi('缓存命中率', hit == null ? '—' : (hit * 100).toFixed(1) + '%', hit != null && pHit != null ? ppDelta(hit, pHit) : '', '缓存命中 ÷ 输入 Token'),
     models: kpi('使用模型', String(models), '', models ? `主力：${[...byModel.values()].sort((a, b) => b.cost - a.cost)[0].key}` : ''),
   };
   const kOrder = hasTok ? ['tok', 'hit', 'perm', 'cost', 'keys', 'models'] : ['cost', 'keys', 'tok', 'perm', 'hit', 'models'];
@@ -216,7 +230,7 @@ export function renderOverviewHtml(spec, { store, today, link = '', scope = null
     ${items.map((it, i) => `<tr><td style="${S.td};color:#64748b">${i + 1}</td><td style="${S.td}">${esc(it.name)}</td>
       <td style="${S.td};text-align:right;font-weight:600;white-space:nowrap">${esc(compact(it.tokens))} tokens</td>
       <td style="${S.td}">${bar(it.tokens, max, '#14a38b')}<span style="font-size:11px;color:#64748b">${pct(it.tokens, cur.tokens)}</span></td>
-      <td style="${S.td};text-align:right;white-space:nowrap">${delta(it.tokens, it.prev, true)}</td></tr>`).join('')}</table>`;
+      <td style="${S.td};text-align:right;white-space:nowrap">${delta(it.tokens, it.prev, 'neutral')}</td></tr>`).join('')}</table>`;
   };
   const byTok = m => [...m.values()].filter(a => a.tokens > 0).sort((a, b) => b.tokens - a.tokens);
   const tkRank = tokRank(byTok(byKey).slice(0, 10).map(a => ({ name: keyName(a.key), tokens: a.tokens, prev: pByKey.get(a.key)?.tokens || 0 })), 'API Key');
@@ -280,9 +294,10 @@ export function renderOverviewHtml(spec, { store, today, link = '', scope = null
     const drv = vars.filter(v => Math.sign(v.d) === Math.sign(cur.cost - pv.cost)).slice(0, 2).map(v => `${esc(keyName(v.id))}（${v.d > 0 ? '+' : '−'}${yuan(Math.abs(v.d))}）`).join('、');
     ins.push(`<b>费用较${esc(prevLabel)}${cur.cost > pv.cost ? '上升' : '下降'} ${pct(Math.abs(cur.cost - pv.cost), pv.cost)}</b>：本期 ${yuan(cur.cost)}，上期 ${yuan(pv.cost)}${drv ? `，主要来自 ${drv}` : ''}。`);
   }
-  if (keyItems.length >= 3 && cur.cost > 0 && keyItems[0].cost / cur.cost >= 0.5) ins.push(`<b>费用高度集中</b>：${esc(keyName(keyItems[0].key))} 占 ${pct(keyItems[0].cost, cur.cost)}，建议设置 Key 预算。`);
+  // 集中度按应付最高的 Key（top1）：keyItems 按原价排名，第一项不一定是应付最高的 Key
+  if (keyItems.length >= 3 && cur.cost > 0 && top1 && top1.cost / cur.cost >= 0.5) ins.push(`<b>费用高度集中</b>：${esc(keyName(top1.key))} 占 ${pct(top1.cost, cur.cost)}，建议设置 Key 预算。`);
   if (coupons > 0.005 || discount > 0.005) ins.push(`<b>本期优惠与抵扣 ${yuan(discount + coupons)}</b>：折扣 ${yuan(discount)}、优惠券等抵扣 ${yuan(coupons)}（按云厂商实际抵扣的日期计入，常集中在某几天）${zeroDays.length ? `；${esc(zeroDays.slice(0, 5).map(d => d.slice(5)).join('、'))}${zeroDays.length > 5 ? ` 等 ${zeroDays.length} 天` : ''}应付为 ¥0.00，当天原价已全部抵扣，不代表没有用量` : ''}。`);
-  if (hit != null) ins.push(`<b>缓存命中率 ${(hit * 100).toFixed(1)}%</b>${pHit != null ? `，较上期 ${hit >= pHit ? '+' : '−'}${Math.abs((hit - pHit) * 100).toFixed(1)}pp` : ''}。`);
+  if (hit != null) ins.push(`<b>缓存命中率 ${(hit * 100).toFixed(1)}%</b>${pHit != null ? (Math.abs(hit - pHit) < 0.0005 ? '，与上期持平' : `，较上期 ${hit >= pHit ? '+' : '−'}${Math.abs((hit - pHit) * 100).toFixed(1)}pp`) : ''}。`);
   if (gov.length) ins.push(`<b>存在需治理的 API Key</b>：${gov.map(g => `${esc(g[2])} ${g[3].length} 个`).join('，')}。`);
   const insHtml = ins.length ? ins.map(t => `<div style="padding:8px 10px;margin-bottom:6px;background:#f7f9fc;border:1px solid #eef2f7;border-radius:8px;font-size:13px;line-height:1.6;color:#334155">${t}</div>`).join('') : '<div style="color:#64748b;font-size:13px">暂无需要关注的发现</div>';
 

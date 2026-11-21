@@ -143,8 +143,12 @@ function postJson(url, body, headers, allowPrivate) {
 /* ---------------- 消息格式 ---------------- */
 const yuan = n => (n < 0 ? '-' : '') + '¥' + Math.abs(Number(n || 0)).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const pct = n => (Number.isFinite(n) ? n.toFixed(1) + '%' : '—');
-/** 涨跌：增长 10 倍以上（+1000%）时改写为“+203 倍”，避免“+20321.0%”这类难读的数字 */
-const chg = (a, b) => (b > 0 ? ((a - b) / b >= 10 ? `+${Math.round((a - b) / b)} 倍` : `${a >= b ? '+' : '−'}${Math.abs((a - b) / b * 100).toFixed(1)}%`) : a > 0 ? '新增' : '持平');
+/**
+ * 涨跌：增长 10 倍以上（+1000%）时改写为“+203 倍”，避免“+20321.0%”这类难读的数字；
+ * 变化不足 0.05%（保留一位小数后为 0.0%）时写作“持平”，避免“−0.0%”（Token 用量常有这种极小的差异）
+ */
+const flat = (a, b) => Math.abs(a - b) < 0.005 || Math.abs((a - b) / b) < 0.0005;
+const chg = (a, b) => (b > 0 ? ((a - b) / b >= 10 ? `+${Math.round((a - b) / b)} 倍` : flat(a, b) ? '持平' : `${a >= b ? '+' : '−'}${Math.abs((a - b) / b * 100).toFixed(1)}%`) : a > 0 ? '新增' : '持平');
 /** 按长度截断且不切开表情等代理对：切开后 JSON 中为孤立的 \ud83d，机器人与邮件中显示为乱码 */
 export const cut = (s, n) => String(s ?? '').slice(0, n).replace(/[\uD800-\uDBFF]$/, '');
 /** 来自云厂商的文本（Key 备注、错误信息等）：去掉可构成 Markdown 链接/格式的字符，合并空白，按长度截断 */
@@ -160,7 +164,7 @@ export const rejectedNote = res => (Array.isArray(res?.rejected) && res.rejected
   ? `部分收件人被邮件服务器拒绝：${res.rejected.slice(0, 5).map(r => String(r).replace(/^(.{1,2})[^@]*(@.*)$/, '$1***$2')).join('、')}${res.rejected.length > 5 ? ` 等 ${res.rejected.length} 个` : ''}`
   : null);
 /** 涨跌（飞书卡片着色用）：{ label, text: '+2.0%', dir: up / down / null } */
-const delta = (label, a, b) => ({ label, text: chg(a, b), dir: b > 0 && Math.abs(a - b) >= 0.005 ? (a > b ? 'up' : 'down') : null });
+const delta = (label, a, b) => ({ label, text: chg(a, b), dir: b > 0 && !flat(a, b) ? (a > b ? 'up' : 'down') : null });
 /**
  * 排行：[{ name, value, share, sub? }]；与文本消息中的“1. 名称 ¥金额（占比）”一一对应。
  * extra(r) 可附加 sub: { text, level }（如成本中心的预算使用情况），飞书卡片显示在名称下方，文本消息接在行尾

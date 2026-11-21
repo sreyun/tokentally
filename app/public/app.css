@@ -985,7 +985,7 @@ dialog.modal .dlg-b { max-height: calc(100vh - 140px); }
 .lgl.wide .li { grid-template-columns: 10px minmax(0, 1fr) auto auto; }
 .lgl.wide .li em { min-width: 72px; }
 .chart .qline { stroke: var(--border-strong); stroke-width: 1; stroke-dasharray: 4 4; }
-.chart .qlabel { fill: var(--muted); font-size: 11px; }
+.chart .qlabel { fill: var(--muted); font-size: 11px; paint-order: stroke; stroke: var(--surface); stroke-width: 3px; stroke-linejoin: round; pointer-events: none; }
 .chart circle.pt { fill-opacity: .55; stroke-width: 1.5; cursor: default; transition: fill-opacity .15s; }
 .chart circle.pt[role="button"] { cursor: pointer; }
 .chart circle.pt:hover, .chart circle.pt:focus { fill-opacity: .9; outline: none; }

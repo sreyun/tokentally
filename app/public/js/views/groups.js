@@ -149,7 +149,7 @@ export function render(v) {
       <section class="panel c12"><div class="panel-h"><h3>${G.label}明细</h3><span class="sub">含本期无费用但有关联 Key 的${G.label} · 点击行查看详情</span>
         <div class="actions">${segCtl('density', { normal: '标准', compact: '紧凑' })}<button class="btn sm" id="csv">${icon('download')}导出</button></div></div><div id="gTbl"></div></section>
       <section class="panel c6"><div class="panel-h"><h3>变动归因</h3>${help(`本期与上期（${state.compareRange || ''}）相比，各${G.label}的费用增减额。`)}<span class="sub">点击进入详情</span></div><div id="gVar"></div></section>
-      <section class="panel c6"><div class="panel-h"><h3>单位成本</h3>${help('每百万 Token 费用 = 费用 ÷ 总 Token × 10⁶；只比较 Token ≥ 10 万的分组。')}<span class="sub">每百万 Token 费用</span></div><div id="gUnit"></div></section>
+      <section class="panel c6"><div class="panel-h"><h3>单位成本</h3>${help('每百万 Token 费用 = 费用 ÷ 总 Token × 10⁶；只比较用量 ≥ 100 K tokens 的分组。')}<span class="sub">每百万 Token 费用</span></div><div id="gUnit"></div></section>
     </div>`;
 
   // 每日趋势
@@ -233,7 +233,7 @@ export function render(v) {
   // 单位成本
   const unit = rows.filter(r => r.perM != null && r.tokens >= 1e5).sort((a, b) => b.perM - a.perM);
   rankList($('#gUnit', v), unit.map(r => ({ id: r.id, label: r.name, sub: `${tokFmt(r.tokens)} tokens`, value: r.perM, color: colorOf.get(r.id) || 'var(--other)' })),
-    { limit: 10, total: 0, empty: 'Token ≥ 10 万的分组不足', onClick: it => app.go(groupHash(dim, it.id)) });
+    { limit: 10, total: 0, empty: '用量 ≥ 100 K tokens 的分组不足', onClick: it => app.go(groupHash(dim, it.id)) });
 }
 
 /* ---------------- 层级钻取（分组 → API Key → 模型） ---------------- */

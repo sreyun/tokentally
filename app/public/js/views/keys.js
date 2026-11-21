@@ -70,8 +70,9 @@ export function keyRows() {
     if ((f.cc || f.owner) && id === NONE_KEY && !byKey.has(id)) return false;
     if (q && !byKey.has(id) && !`${id} ${keyDesc(id)} ${k ? wsName(k.wsKey) : ''} ${k?.costCenter || ''} ${k?.owner || ''}`.toLowerCase().includes(q)) return false;
     if (narrowing && !byKey.has(id)) return false;
-    // “有消费”按用量判断（金额或原价大于 0）：被优惠券或订阅抵扣全额覆盖、应付为 0 的 Key 同样算有消费
-    if (ui.onlySpent && !((u => u && (u.cost > 0 || u.gross >= 0.005))(byKey.get(id)))) return false;
+    // “有消费”按用量判断（金额、原价或 Token 大于 0，与“活跃 Key”同一口径）：被优惠券或订阅抵扣全额覆盖、应付为 0 的 Key，
+    // 以及只有免费额度 Token 的 Key 同样算有消费（否则勾选后总用量、用量排行会少掉这些 Key）
+    if (ui.onlySpent && !((u => u && (u.cost > 0 || u.gross >= 0.005 || totalTokens(u) > 0))(byKey.get(id)))) return false;
     return true;
   });
   const month = state.data.period.mode === 'month';
@@ -178,7 +179,7 @@ export function render(v) {
         <div class="actions">${segCtl('kTrend', TC)}</div></div><div class="legend" id="kTrLegend"></div><div class="chart" id="kTrend"></div></section>
       <section class="panel c4"><div class="panel-h"><h3>多维分布</h3>${help('按所选维度汇总全部 Key 的用量与费用（取自账单行的归属）。点击条目进入该维度详情。')}
         <div class="actions">${Object.keys(dimOpts).length > 1 ? segCtl('kDim', dimOpts) : ''}</div></div><div id="kDim"></div></section>
-      <section class="panel c6"><div class="panel-h"><h3>效率象限</h3>${help('每个气泡是一个 Key：横轴为用量（对数刻度），纵轴为单位成本（每百万 tokens 费用），气泡越大费用越高。虚线为中位数，右上象限的 Key 用量大且单价高，优先考虑换用更便宜的模型、提高缓存命中或使用资源包。只统计用量 ≥ 1 万 tokens 的 Key。')}
+      <section class="panel c6"><div class="panel-h"><h3>效率象限</h3>${help('每个气泡是一个 Key：横轴为用量（对数刻度），纵轴为单位成本（每百万 tokens 费用），气泡越大费用越高。虚线为中位数，右上象限的 Key 用量大且单价高，优先考虑换用更便宜的模型、提高缓存命中或使用资源包。只统计用量 ≥ 10 K tokens 的 Key。')}
         <span class="sub">横轴用量 · 纵轴 ¥ / M tokens · 点击查看 Key 详情</span></div><div class="chart" id="kScatter"></div></section>
       <section class="panel c6"><div class="panel-h"><h3>Token 结构</h3>${help('各 Key 的输入（非缓存）、缓存命中、输出与向量 Token 构成；右侧为缓存命中率（缓存命中 ÷ 输入）。')}<span class="sub">按用量前 10 个 Key</span></div><div id="kTokMix"></div></section>
       <section class="panel c12"><div class="panel-h"><h3>Key × 模型</h3>${help('前 15 个 Key 在前 8 个模型上的分布，颜色越深数值越大（平方根刻度）。点击 Key 名称查看详情，点击格子查看该 Key 在该模型上的消耗。')}
@@ -196,7 +197,8 @@ export function render(v) {
 
   // 双排行
   rankList($('#kRkTok', v), byTok.map(r => ({ id: r.id, label: r.desc, sub: r.wsName !== '—' ? r.wsName : '', value: r.tokens, prev: r.prevTok, color: 'var(--s3)' })),
-    { fmt: tokT, total: tok, showDelta: true, goodWhenUp: true, onClick: it => goKey(it.id), empty: '本期无 Token 用量' });
+    // 用量涨跌不代表好坏：与指标卡、变动归因一致用中性颜色
+    { fmt: tokT, total: tok, showDelta: true, neutral: true, onClick: it => goKey(it.id), empty: '本期无 Token 用量' });
   rankList($('#kRkCost', v), byCost.map(r => ({ id: r.id, label: r.desc, sub: r.wsName !== '—' ? r.wsName : '', value: r.cost, gross: r.gross, prev: r.prevCost })),
     { total, showDelta: true, onClick: it => goKey(it.id) });
 
@@ -232,7 +234,7 @@ export function render(v) {
     points: rows.filter(r => r.tokens >= 1e4 && r.perM != null).map(r => ({ id: r.id, label: r.desc, x: r.tokens, y: r.perM, r: rankVal(r),
       tip: tipRows(r.desc, [['用量', tokT(r.tokens)], ['单位成本', `${money(r.perM)} / M tokens`], ['费用', money(r.cost)], ...(r.gross - r.cost >= 0.005 ? [['原价', money(r.gross)]] : []), ['缓存命中率', r.hit == null ? '—' : (r.hit * 100).toFixed(1) + '%']]) })),
     xFmt: n => tokFmt(n), yFmt: n => money(n, n && n < 1 ? 2 : 0), xTitle: '用量（tokens，对数刻度）', yTitle: '¥ / M tokens', height: 300,
-    quad: { tr: '用量大 · 单价高', tl: '用量小 · 单价高', br: '用量大 · 单价低', bl: '用量小 · 单价低' }, onClick: p => goKey(p.id), aria: 'API Key 用量与单位成本散点图', empty: '没有用量 ≥ 1 万 tokens 的 Key',
+    quad: { tr: '用量大 · 单价高', tl: '用量小 · 单价高', br: '用量大 · 单价低', bl: '用量小 · 单价低' }, onClick: p => goKey(p.id), aria: 'API Key 用量与单位成本散点图', empty: '没有用量 ≥ 10 K tokens 的 Key',
   });
 
   // Token 结构
