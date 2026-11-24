@@ -110,7 +110,7 @@ export function computeInsights() {
     const hit = cur.tCache / cur.tIn, ph = prev.tIn ? prev.tCache / prev.tIn : null;
     const saved = cacheSavings(lines);
     out.push({ level: hit >= 0.5 ? 'good' : 'info', icon: 'cache', rank: 6, title: `缓存命中率 ${(hit * 100).toFixed(1)}%`,
-      html: `${ph != null ? `较上期 ${b(((hit - ph) * 100 >= 0 ? '+' : '') + ((hit - ph) * 100).toFixed(1) + 'pp')}。` : ''}${saved > 0.01 ? `按同模型常规输入单价估算，缓存为本期节省约 ${b(money(saved))}。` : ''}${hit < 0.3 ? '可通过复用系统提示词、固定前缀提升命中率。' : ''}` });
+      html: `${ph != null ? (Math.abs(hit - ph) < 0.0005 ? '与上期持平。' : `较上期 ${b((hit >= ph ? '+' : '−') + Math.abs((hit - ph) * 100).toFixed(1) + 'pp')}。`) : ''}${saved > 0.01 ? `按同模型常规输入单价估算，缓存为本期节省约 ${b(money(saved))}。` : ''}${hit < 0.3 ? '可通过复用系统提示词、固定前缀提升命中率。' : ''}` });
   }
 
   // 7. 治理风险

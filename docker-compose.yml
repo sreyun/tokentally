@@ -8,9 +8,9 @@ services:
     build: .
     # 默认在本机构建（docker compose up -d --build）；也可以直接使用 CI 发布到华为云 SWR 的镜像，
     # 在 .env 中设置 APP_IMAGE 后执行 docker compose pull app && docker compose up -d，例如
-    #   APP_IMAGE=swr.cn-east-3.myhuaweicloud.com/sreyun/tokentally:1.10.12
+    #   APP_IMAGE=swr.cn-east-3.myhuaweicloud.com/sreyun/tokentally:1.10.13
     # 设置 APP_IMAGE 后不要再加 --build，否则会在本机重新构建并覆盖该镜像标签
-    image: ${APP_IMAGE:-tokentally:1.10.12}
+    image: ${APP_IMAGE:-tokentally:1.10.13}
     container_name: tokentally
     restart: unless-stopped
     env_file: .env
