@@ -75,6 +75,12 @@ export const config = {
   metricsToken: checked('METRICS_TOKEN', (env.METRICS_TOKEN || '').trim().length >= 16, '长度不足 16 位（/metrics 保持关闭）') ? env.METRICS_TOKEN.trim() : '',
   /** 演示模式：数据库为空且未配置任何云厂商时生成虚构演示数据；配置真实访问密钥后自动清除 */
   demo: bool(env.DEMO_DATA),
+  /**
+   * 公开演示站点的演示账号（只读）：DEMO_DATA=true 时设置 DEMO_USERNAME / DEMO_PASSWORD，启动时自动创建，登录页公开显示用户名与密码。
+   * 演示数据被清除（配置了真实访问密钥）后自动停用；演示账号不能修改密码，也不受按账号的连续失败锁定
+   */
+  demoUser: (env.DEMO_USERNAME || '').trim(),
+  demoPassword: env.DEMO_PASSWORD || '',
   /** 自动备份：每天保留最近 N 份（0 关闭），备份时间（时，账单时区） */
   backupKeep: int(env.BACKUP_KEEP, 7, 0, 90),
   backupHour: int(env.BACKUP_HOUR, 3, 0, 23),

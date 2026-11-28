@@ -718,7 +718,7 @@ $('#btnUser').onclick = e => {
   e.stopPropagation();
   if (popKind === 'user') return closePop();
   openPop('user', $('#btnUser'), `<div class="pop-h">${esc(state.me.username)} · ${isAdmin() ? '管理员' : '只读用户'}</div>
-    <button class="pop-item" role="menuitem" data-act="pwd">${icon('lock')}修改密码</button>
+    ${state.me.demo ? '' : `<button class="pop-item" role="menuitem" data-act="pwd">${icon('lock')}修改密码</button>`}
     ${isAdmin() ? `<button class="pop-item" role="menuitem" data-go="#/admin/users">${icon('user')}用户管理</button>` : ''}
     ${Setup.setupReopenable() ? `<button class="pop-item" role="menuitem" data-act="setup-show">${icon('bulb')}初始设置清单</button>` : ''}
     <div class="pop-sep"></div>

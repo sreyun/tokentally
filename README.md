@@ -278,7 +278,8 @@ flowchart LR
 | `BACKUP_KEEP` / `BACKUP_HOUR` | 7 / 3 | 自动备份份数（0 关闭）与时间 |
 | `METRICS_TOKEN` | — | ≥16 位，开启 `/metrics` |
 | `DEMO_DATA` | false | 演示模式 |
-| `APP_IMAGE` | 本机构建 | 使用 CI 发布到华为云 SWR 的镜像，如 `swr.cn-east-3.myhuaweicloud.com/sreyun/tokentally:1.10.13`（`docker compose pull app && docker compose up -d`） |
+| `DEMO_USERNAME` / `DEMO_PASSWORD` | 空 | 公开演示站点的只读演示账号：登录页显示用户名与密码并可一键填入（仅演示模式下生效；不能改密码，不受按账号的失败锁定；配置真实访问密钥后自动停用） |
+| `APP_IMAGE` | 本机构建 | 使用 CI 发布到华为云 SWR 的镜像，如 `swr.cn-east-3.myhuaweicloud.com/sreyun/tokentally:1.10.14`（`docker compose pull app && docker compose up -d`） |
 | `TENCENT_ENDPOINT_OVERRIDE` | — | 仅测试 / 私有网关 |
 </details>
 

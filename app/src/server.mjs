@@ -23,7 +23,7 @@ import { ShareService, filterData, SHARE_DAYS } from './share.mjs';
 import { scopePredicate } from './overview-mail.mjs';
 import { loadMasterKey, hashPassword, verifyPassword, burnPasswordCheck, checkPasswordPolicy, randomPassword, maskId, sha256 } from './crypto.mjs';
 
-const VERSION = '1.10.13';
+const VERSION = '1.10.14';
 
 /* ===================================================================
  * 系统日志：所有运行日志同时输出到控制台并写入数据库（system_log，保留 SYSTEM_LOG_DAYS 天），
@@ -966,6 +966,38 @@ async function testConnection(body) {
 }
 
 const USER_RE = /^[A-Za-z0-9_.@-]{3,32}$/;
+
+/* ===================================================================
+ * 演示账号（公开演示站点）：DEMO_DATA=true 且设置了 DEMO_USERNAME / DEMO_PASSWORD 时，启动时创建（或重置为）只读用户，
+ * 登录页公开显示其用户名与密码，访客无需联系管理员即可体验。
+ *  - 只在演示数据有效时可用：配置真实访问密钥、演示数据被清除后，登录页不再显示，该账号也不能再登录（密码已公开）
+ *  - 不能修改密码；不受按账号的连续失败锁定（密码本就公开，锁定只会让其他访客无法登录；按 IP 的频率限制仍然有效）
+ *  - 同名账号已是管理员时不启用：不能把管理员密码公开在登录页
+ * =================================================================== */
+let demoUserId = null;
+if (config.demo && (config.demoUser || config.demoPassword)) {
+  const err = !USER_RE.test(config.demoUser) ? 'DEMO_USERNAME 需为 3-32 位字母、数字或 _ . @ -' : checkPasswordPolicy(config.demoPassword, config.demoUser);
+  const u = err ? null : store.userByName(config.demoUser);
+  if (err) log(`演示账号未启用：${err}`);
+  else if (u && u.role !== 'viewer') log(`演示账号未启用：已存在同名的管理员账号 ${u.username}（不能把管理员密码公开在登录页）`);
+  else {
+    const passHash = await hashPassword(config.demoPassword);
+    if (u) store.updateUser(u.id, { pass_hash: passHash, disabled: 0, must_change: 0, failed_count: 0, locked_until: null });
+    demoUserId = Number(u ? u.id : store.createUser({ username: config.demoUser, passHash, role: 'viewer', mustChange: false }));
+    if (!u) store.audit('system', '', 'user.create', { username: config.demoUser, role: 'viewer', demo: true });
+    log(`演示账号已启用：${config.demoUser}（只读，登录页显示用户名与密码）`);
+  }
+}
+const isDemoUser = u => demoUserId != null && Number(u?.id) === demoUserId;
+/** 演示数据仍然有效（配置真实访问密钥后演示数据会被清除，演示账号随之停用） */
+const demoActive = () => demoUserId != null && !!store.getSetting('demo', false);
+/** 登录页显示的演示账号：账号仍是未禁用的只读用户、演示数据仍然有效时才返回 */
+function demoLogin() {
+  if (!demoActive()) return null;
+  const u = store.userById(demoUserId);
+  return u && !u.disabled && u.role === 'viewer' ? { username: u.username, password: config.demoPassword } : null;
+}
+
 let lastActive = null;
 const userOut = u => ({
   id: u.id, username: u.username, role: u.role, disabled: !!u.disabled, mustChange: !!u.must_change, locked: !!(u.locked_until && u.locked_until > Date.now()),
@@ -1000,9 +1032,17 @@ route('POST', '/api/login', async (req, res, ctx) => {
       store.audit(`?${sha256(username.trim().toLowerCase()).slice(0, 8)}`, ctx.ip, 'login.fail', `用户不存在（输入长度 ${username.trim().length}）`);
       return fail();
     }
+    // 演示账号：演示数据被清除（已配置真实访问密钥）后停用，公开过的密码不能再登录
+    const demo = isDemoUser(u);
+    if (demo && !demoActive()) {
+      await burnPasswordCheck(password); noteLoginFail(ctx.ip);
+      store.audit(u.username, ctx.ip, 'login.fail', '演示账号已停用（演示数据已清除）');
+      return json(req, res, 403, { error: '演示账号已停用' });
+    }
     // 账号锁定中，或进行中的校验已占满剩余失败次数：不再校验密码（并发猜测不能超过失败上限）
     // failed_count 按上限截断：调低 LOGIN_MAX_FAILURES 后，旧的失败计数不能让账号在没有锁定记录的情况下永远无法登录
-    if ((u.locked_until && u.locked_until > now) || Math.min(u.failed_count, max - 1) + (userInflight.get(u.id) || 0) >= max) {
+    // 演示账号不按账号锁定：密码本就公开，锁定只会让其他访客无法登录（按 IP 的频率限制仍然有效）
+    if (!demo && ((u.locked_until && u.locked_until > now) || Math.min(u.failed_count, max - 1) + (userInflight.get(u.id) || 0) >= max)) {
       await burnPasswordCheck(password); noteLoginFail(ctx.ip);
       store.audit(u.username, ctx.ip, 'login.fail', '账号锁定中');
       return fail();
@@ -1011,8 +1051,8 @@ route('POST', '/api/login', async (req, res, ctx) => {
     try { ok = await verifyPassword(password, u.pass_hash); } finally { bump(userInflight, u.id, -1); }
     if (!ok) {
       noteLoginFail(ctx.ip);
-      const r = store.noteUserLoginFail(u.id, max, config.login.lockMinutes * 60_000);
-      store.audit(u.username, ctx.ip, 'login.fail', r.locked ? `密码错误，账号锁定 ${config.login.lockMinutes} 分钟` : `密码错误（${r.n}/${max}）`);
+      const r = demo ? null : store.noteUserLoginFail(u.id, max, config.login.lockMinutes * 60_000);
+      store.audit(u.username, ctx.ip, 'login.fail', !r ? '密码错误（演示账号）' : r.locked ? `密码错误，账号锁定 ${config.login.lockMinutes} 分钟` : `密码错误（${r.n}/${max}）`);
       return fail();
     }
   } finally { bump(loginInflight, ctx.ip, -1); }
@@ -1042,11 +1082,13 @@ route('POST', '/api/logout', async (req, res, ctx) => {
 }, { allowMustChange: true });
 
 route('GET', '/api/me', async (req, res, ctx) => json(req, res, 200, {
-  user: { id: ctx.user.id, username: ctx.user.username, role: ctx.user.role, mustChange: !!ctx.user.mustChange },
+  user: { id: ctx.user.id, username: ctx.user.username, role: ctx.user.role, mustChange: !!ctx.user.mustChange, demo: isDemoUser(ctx.user) },
   csrf: ctx.session.csrf, tz: config.billTz, today: todayIn(config.billTz), sessionIdleMinutes: config.sessionIdleMinutes,
 }), { allowMustChange: true });
 
 route('POST', '/api/me/password', async (req, res, ctx) => {
+  // 演示账号的密码公开在登录页：任何访客改掉它，其他人就无法登录
+  if (isDemoUser(ctx.user)) throw new HttpError(403, '演示账号不能修改密码');
   const { oldPassword, newPassword } = await readJson(req, 4096);
   const u = await confirmCurrentPassword(ctx, oldPassword, 'password.change', '原密码不正确');
   const err = checkPasswordPolicy(newPassword, u.username);
@@ -1112,7 +1154,8 @@ route('GET', '/api/changes', async (req, res, ctx) => {
   return json(req, res, 200, { changes: store.listChanges(2000), total: store.maxChangeId() });
 });
 /* 品牌信息：登录页使用，无敏感内容 */
-route('GET', '/api/branding', async (req, res) => json(req, res, 200, store.branding()), { public: true });
+// 公开演示站点：演示账号有效时附带其用户名与密码，登录页显示并可一键填入
+route('GET', '/api/branding', async (req, res) => { const d = demoLogin(); return json(req, res, 200, { ...store.branding(), ...(d ? { demoLogin: d } : {}) }); }, { public: true });
 
 route('GET', '/api/admin/settings', async (req, res) => json(req, res, 200, adminSettingsOut()), { admin: true });
 route('PUT', '/api/admin/settings', async (req, res, ctx) => json(req, res, 200, await putSettings(await readJson(req), ctx)), { admin: true });
